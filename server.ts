@@ -15,13 +15,16 @@ const PORT = isStandaloneProd ? (process.env.PORT ? parseInt(process.env.PORT, 1
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Ensure public directories exist
-fs.mkdirSync(path.join(__dirname, 'public/toys'), { recursive: true });
-fs.mkdirSync(path.join(__dirname, 'public/payment'), { recursive: true });
-fs.mkdirSync(path.join(__dirname, 'public/resources'), { recursive: true });
-fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+try {
+  fs.mkdirSync(path.join(__dirname, 'public/toys'), { recursive: true });
+  fs.mkdirSync(path.join(__dirname, 'public/payment'), { recursive: true });
+  fs.mkdirSync(path.join(__dirname, 'public/resources'), { recursive: true });
+  fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+} catch {}
 
-const DB_PATH = path.join(__dirname, 'data/store.json');
+const DB_PATH = process.env.VERCEL
+  ? path.join('/tmp', 'store.json')
+  : path.join(__dirname, 'data/store.json');
 
 interface Product {
   id: string;
@@ -591,6 +594,9 @@ app.post('/api/owner/change-pin', (req, res) => {
 
 // Setup Vite middleware or static serving
 async function startServer() {
+  if (process.env.VERCEL) {
+    return;
+  }
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -610,3 +616,5 @@ async function startServer() {
 }
 
 startServer();
+
+export default app;

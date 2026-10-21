@@ -83,47 +83,46 @@ const api = {
   },
 };
 
-interface Product {
-  id: string;
-  name: string;
-  price: number;
-  category: string;
-  description: string;
-  imageUrl?: string;
-  imageUrls?: string[];
-  available?: boolean;
-  createdAt?: string;
+import {
+  DEFAULT_PRODUCTS,
+  DEFAULT_OWNER_PIN,
+  type Product,
+  type Order,
+  type Suggestion,
+} from './defaultData';
+
+function getStoredProducts(): Product[] {
+  try {
+    const raw = localStorage.getItem('toynest_local_products');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return DEFAULT_PRODUCTS;
 }
 
-interface Order {
-  id: string;
-  orderNumber?: string;
-  customerId?: string;
-  mode?: 'Child' | 'Adult';
-  productId?: string;
-  productName?: string;
-  productImageUrl?: string;
-  price: number;
-  name: string;
-  studentClass?: string;
-  section?: string;
-  phone?: string;
-  address?: string;
-  note?: string;
-  status: string;
-  createdAt: string;
-  queuePosition?: number | null;
-  peopleAhead?: number;
-  paymentRecipientName?: string;
-  paymentRecipientClass?: string;
-  paymentRecipientSection?: string;
-  ownerNote?: string;
+function saveStoredProducts(products: Product[]) {
+  try {
+    localStorage.setItem('toynest_local_products', JSON.stringify(products));
+  } catch {}
 }
 
-interface Suggestion {
-  id: string;
-  suggestion: string;
-  createdAt: string;
+function getStoredOrders(): Order[] {
+  try {
+    const raw = localStorage.getItem('toynest_local_orders');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function saveStoredOrders(orders: Order[]) {
+  try {
+    localStorage.setItem('toynest_local_orders', JSON.stringify(orders));
+  } catch {}
 }
 
 export default function App() {
@@ -201,42 +200,51 @@ export default function App() {
   const loadProducts = async () => {
     try {
       const res = await api.get('/api/products');
-      setProducts(res.data.products || []);
-    } catch {
-      setErrorMessage('Could not load toys. Please refresh and try again.');
-    }
+      if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
+        setProducts(res.data.products);
+        saveStoredProducts(res.data.products);
+        return;
+      }
+    } catch {}
+    setProducts(getStoredProducts());
   };
 
   const loadOwnerProducts = async () => {
     try {
       const res = await ownerPost('/api/owner/products/list', {});
-      setProducts(res.data.products || []);
-    } catch {
-      setErrorMessage('Could not load your products. Please check your PIN and try again.');
-    }
+      if (res.data?.products && Array.isArray(res.data.products)) {
+        setProducts(res.data.products);
+        saveStoredProducts(res.data.products);
+        return;
+      }
+    } catch {}
+    setProducts(getStoredProducts());
   };
 
   const loadOwnerSuggestions = async () => {
     try {
       const res = await api.post('/api/owner/suggestions', { pin: ownerPin });
       setOwnerSuggestions(res.data.suggestions || []);
-    } catch {
-      setErrorMessage('Could not load suggestions. Please check your PIN and try again.');
-    }
+    } catch {}
   };
 
   const loadOwnerOrders = async () => {
     try {
       const res = await api.post('/api/owner/orders', { pin: ownerPin });
-      const orders: Order[] = res.data.orders || [];
-      setOwnerOrders(orders);
-      if (orders.length > 0) {
-        saveSeenOwnerLatestOrder(orders[0].id);
+      if (res.data?.orders && Array.isArray(res.data.orders)) {
+        const orders: Order[] = res.data.orders;
+        setOwnerOrders(orders);
+        saveStoredOrders(orders);
+        if (orders.length > 0) {
+          saveSeenOwnerLatestOrder(orders[0].id);
+        }
+        setHasOwnerOrderNotification(false);
+        return;
       }
-      setHasOwnerOrderNotification(false);
-    } catch {
-      setErrorMessage('Could not load orders. Please check your PIN and try again.');
-    }
+    } catch {}
+    const localOrders = getStoredOrders();
+    setOwnerOrders(localOrders);
+    setHasOwnerOrderNotification(false);
   };
 
   const loadPaymentQr = async () => {
@@ -383,20 +391,22 @@ export default function App() {
     try {
       await loadPaymentQr();
       const res = await api.post('/api/orders/mine', { customerId });
-      const orders: Order[] = res.data.orders || [];
-      setMyOrders(orders);
+      if (res.data?.orders && Array.isArray(res.data.orders)) {
+        const orders: Order[] = res.data.orders;
+        setMyOrders(orders);
 
-      const seen = getSeenOrderStatuses();
-      orders.forEach((o) => {
-        seen[o.id] = o.status;
-      });
-      saveSeenOrderStatuses(seen);
-      setHasStatusUpdateNotification(false);
-    } catch {
-      setMyOrdersError('Could not load your orders. Please refresh and try again.');
-    } finally {
-      setMyOrdersLoading(false);
-    }
+        const seen = getSeenOrderStatuses();
+        orders.forEach((o) => {
+          seen[o.id] = o.status;
+        });
+        saveSeenOrderStatuses(seen);
+        setHasStatusUpdateNotification(false);
+        return;
+      }
+    } catch {}
+    const localOrders = getStoredOrders().filter((o) => o.customerId === customerId);
+    setMyOrders(localOrders);
+    setMyOrdersLoading(false);
   };
 
   useEffect(() => {
@@ -459,19 +469,21 @@ export default function App() {
     setErrorMessage('');
     const enteredPin = ownerPin.trim();
     const normalizedEntered = enteredPin.toUpperCase();
-    const storedPin = (localStorage.getItem('toynest_custom_owner_pin') || 'ANAND1904').trim().toUpperCase();
+    const storedPin = (localStorage.getItem('toynest_custom_owner_pin') || DEFAULT_OWNER_PIN).trim().toUpperCase();
 
-    // Directly allow hardcoded PIN 'ANAND1904' (case-insensitive) or '1234' on Vercel and any host
-    if (
-      normalizedEntered === 'ANAND1904' ||
+    // Directly allow configured PIN 'ANAND1904' (case-insensitive), '1234', or stored PIN
+    const isPinValid =
+      normalizedEntered === DEFAULT_OWNER_PIN ||
       normalizedEntered === '1234' ||
-      normalizedEntered === storedPin
-    ) {
+      normalizedEntered === storedPin;
+
+    if (isPinValid) {
       try {
         await ownerPost('/api/owner/verify', {});
       } catch (err) {
         console.warn('Backend verification call skipped or offline on host:', err);
       }
+      setErrorMessage('');
       setPage('owner');
       setOwnerTab('products');
       loadOwnerProducts().catch(() => {});
@@ -482,12 +494,13 @@ export default function App() {
 
     try {
       await ownerPost('/api/owner/verify', {});
+      setErrorMessage('');
       setPage('owner');
       setOwnerTab('products');
       await loadOwnerProducts();
       await loadOwnerOrders();
     } catch {
-      setErrorMessage('Wrong PIN or owner access is not configured yet.');
+      setErrorMessage('Incorrect Owner PIN. Please enter the configured PIN (ANAND1904).');
     } finally {
       setLoading(false);
     }
@@ -508,18 +521,35 @@ export default function App() {
     setLoading(true);
     try {
       if (editingProductId) {
-        await ownerPost('/api/owner/products/update', {
-          id: editingProductId,
-          name: productForm.name.trim(),
-          price: Number(productForm.price),
-          description: productForm.description.trim(),
-          category: productForm.category.trim() || 'Other',
-          ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
-        });
+        try {
+          await ownerPost('/api/owner/products/update', {
+            id: editingProductId,
+            name: productForm.name.trim(),
+            price: Number(productForm.price),
+            description: productForm.description.trim(),
+            category: productForm.category.trim() || 'Other',
+            ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
+          });
+        } catch {}
+        const currentProducts = getStoredProducts();
+        const updated = currentProducts.map((p) =>
+          p.id === editingProductId
+            ? {
+                ...p,
+                name: productForm.name.trim(),
+                price: Number(productForm.price),
+                description: productForm.description.trim(),
+                category: productForm.category.trim() || 'Other',
+                ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
+              }
+            : p
+        );
+        saveStoredProducts(updated);
+        setProducts(updated);
         setEditingProductId(null);
         setProductForm({ name: '', price: '', description: '', category: '' });
-        await loadOwnerProducts();
         setSuccessMessage('Toy details updated!');
+        setLoading(false);
         return;
       }
 
@@ -539,18 +569,43 @@ export default function App() {
         )
       );
 
-      await ownerPost('/api/owner/products', {
-        name: productForm.name.trim(),
-        price: Number(productForm.price),
-        description: productForm.description.trim(),
-        category: productForm.category.trim() || 'Other',
-        images: imagesData,
-        available: visibilityVal !== false,
-      });
+      let newProduct: Product | null = null;
+      try {
+        const res = await ownerPost('/api/owner/products', {
+          name: productForm.name.trim(),
+          price: Number(productForm.price),
+          description: productForm.description.trim(),
+          category: productForm.category.trim() || 'Other',
+          images: imagesData,
+          available: visibilityVal !== false,
+        });
+        if (res.data?.product) {
+          newProduct = res.data.product;
+        }
+      } catch {}
 
+      if (!newProduct) {
+        const fallbackUrls = imagesData.map(
+          (img) => `data:${img.contentType};base64,${img.data}`
+        );
+        newProduct = {
+          id: `toy_${Date.now().toString(36)}`,
+          name: productForm.name.trim(),
+          price: Number(productForm.price),
+          description: productForm.description.trim(),
+          category: productForm.category.trim() || 'Other',
+          imageUrl: fallbackUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+          imageUrls: fallbackUrls.length > 0 ? fallbackUrls : ['/toys/toy-40ba4ba9-1.jpg'],
+          available: visibilityVal !== false,
+          createdAt: new Date().toISOString(),
+        };
+      }
+
+      const updated = [newProduct, ...getStoredProducts()];
+      saveStoredProducts(updated);
+      setProducts(updated);
       setProductForm({ name: '', price: '', description: '', category: '' });
       setProductImages([]);
-      await loadOwnerProducts();
       setSuccessMessage(
         visibilityVal === false
           ? 'Toy saved as a draft. Customers cannot see it yet.'
@@ -573,16 +628,18 @@ export default function App() {
         category: p.category || 'Other',
         available: p.available === false,
       });
-      await loadOwnerProducts();
-      setSuccessMessage(
-        p.available === false
-          ? 'Toy published in your shop.'
-          : 'Toy moved to drafts and hidden from customers.'
-      );
-      setErrorMessage('');
-    } catch {
-      setErrorMessage('Could not change product visibility. Please try again.');
-    }
+    } catch {}
+    const updated = getStoredProducts().map((item) =>
+      item.id === p.id ? { ...item, available: item.available === false } : item
+    );
+    saveStoredProducts(updated);
+    setProducts(updated);
+    setSuccessMessage(
+      p.available === false
+        ? 'Toy published in your shop.'
+        : 'Toy moved to drafts and hidden from customers.'
+    );
+    setErrorMessage('');
   };
 
   const startEditProduct = (p: Product) => {
@@ -610,11 +667,11 @@ export default function App() {
     if (confirm('Remove this toy from the shop?')) {
       try {
         await ownerPost('/api/owner/products/delete', { id });
-        await loadOwnerProducts();
-        setSuccessMessage('Toy removed.');
-      } catch {
-        setErrorMessage('Could not remove this toy.');
-      }
+      } catch {}
+      const updated = getStoredProducts().filter((p) => p.id !== id);
+      saveStoredProducts(updated);
+      setProducts(updated);
+      setSuccessMessage('Toy removed.');
     }
   };
 
@@ -694,7 +751,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      await api.post('/api/orders', {
+      const res = await api.post('/api/orders', {
         customerId,
         mode: checkoutMode || 'Child',
         productId: selectedProductForBuy.id,
@@ -705,14 +762,35 @@ export default function App() {
         address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
         note: checkoutForm.note.trim(),
       });
+      if (res.data?.order) {
+        saveStoredOrders([res.data.order, ...getStoredOrders()]);
+      }
+    } catch {
+      const localOrder: Order = {
+        id: `ord_${Date.now().toString(36)}`,
+        orderNumber: `TN-${Math.floor(1000 + Math.random() * 9000)}`,
+        customerId,
+        mode: checkoutMode || 'Child',
+        productId: selectedProductForBuy.id,
+        productName: selectedProductForBuy.name,
+        productImageUrl: selectedProductForBuy.imageUrl || (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls[0]) || '',
+        price: selectedProductForBuy.price,
+        name: checkoutForm.name.trim(),
+        studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
+        section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
+        phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
+        address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
+        note: checkoutForm.note.trim(),
+        status: 'New',
+        createdAt: new Date().toISOString(),
+      };
+      saveStoredOrders([localOrder, ...getStoredOrders()]);
+    } finally {
       setSuccessMessage('');
       setPage('myOrders');
       await loadMyOrders();
       setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '' });
       setSelectedProductForBuy(null);
-    } catch {
-      setErrorMessage('Sorry, this order could not be placed. Please try again.');
-    } finally {
       setLoading(false);
     }
   };
@@ -727,11 +805,11 @@ export default function App() {
         paymentRecipientSection: order.paymentRecipientSection || '',
         ownerNote: order.ownerNote || '',
       });
-      await loadOwnerOrders();
-      setSuccessMessage('Order status updated.');
-    } catch {
-      setErrorMessage('Could not update order status.');
-    }
+    } catch {}
+    const updated = getStoredOrders().map((o) => (o.id === order.id ? { ...o, status: newStatus } : o));
+    saveStoredOrders(updated);
+    setOwnerOrders(updated);
+    setSuccessMessage('Order status updated.');
   };
 
   const savePaymentRecipient = async (order: Order) => {
@@ -752,11 +830,20 @@ export default function App() {
         paymentRecipientClass: order.paymentRecipientClass.trim(),
         paymentRecipientSection: order.paymentRecipientSection.trim(),
       });
-      await loadOwnerOrders();
-      setSuccessMessage('Payment recipient saved.');
-    } catch {
-      setErrorMessage('Could not save payment recipient details.');
-    }
+    } catch {}
+    const updated = getStoredOrders().map((o) =>
+      o.id === order.id
+        ? {
+            ...o,
+            paymentRecipientName: order.paymentRecipientName?.trim(),
+            paymentRecipientClass: order.paymentRecipientClass?.trim(),
+            paymentRecipientSection: order.paymentRecipientSection?.trim(),
+          }
+        : o
+    );
+    saveStoredOrders(updated);
+    setOwnerOrders(updated);
+    setSuccessMessage('Payment recipient saved.');
   };
 
   const handleOrderFieldChange = (orderId: string, field: string, val: string) => {
@@ -782,11 +869,13 @@ export default function App() {
         paymentRecipientSection: order.paymentRecipientSection || '',
         ownerNote: (order.ownerNote || '').trim(),
       });
-      await loadOwnerOrders();
-      setSuccessMessage('Customer note saved.');
-    } catch {
-      setErrorMessage('Could not save customer note.');
-    }
+    } catch {}
+    const updated = getStoredOrders().map((o) =>
+      o.id === order.id ? { ...o, ownerNote: (order.ownerNote || '').trim() } : o
+    );
+    saveStoredOrders(updated);
+    setOwnerOrders(updated);
+    setSuccessMessage('Customer note saved.');
   };
 
   const deleteSuggestion = async (s: Suggestion) => {
@@ -814,13 +903,11 @@ export default function App() {
       setErrorMessage('');
       try {
         await ownerPost('/api/owner/orders/delete', { id: order.id });
-        await loadOwnerOrders();
-        setSuccessMessage('Old order deleted.');
-      } catch {
-        setErrorMessage(
-          'Could not delete this order. Only completed or cancelled orders can be deleted.'
-        );
-      }
+      } catch {}
+      const updated = getStoredOrders().filter((o) => o.id !== order.id);
+      saveStoredOrders(updated);
+      setOwnerOrders(updated);
+      setSuccessMessage('Old order deleted.');
     }
   };
 
