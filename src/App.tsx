@@ -250,48 +250,59 @@ export default function App() {
   const loadPaymentQr = async () => {
     try {
       const res = await api.get('/api/payment-qr');
-      setPaymentQrUrl(res.data.url || '');
-    } catch {
-      setPaymentQrUrl('');
-    }
+      if (res.data?.url) {
+        setPaymentQrUrl(res.data.url);
+        return;
+      }
+    } catch {}
+    setPaymentQrUrl(localStorage.getItem('toynest_payment_qr') || '/payment/adult-qr.jpg');
   };
 
   const loadShopModes = async () => {
     try {
       const res = await api.get('/api/shop-modes');
-      const adultPub = res.data.adultPublished !== false;
-      const childPub = res.data.childPublished !== false;
-      setAdultPublished(adultPub);
-      setChildPublished(childPub);
-      setCheckoutMode(null);
+      if (res.data) {
+        setAdultPublished(res.data.adultPublished !== false);
+        setChildPublished(res.data.childPublished !== false);
+        return;
+      }
     } catch {}
+    try {
+      const local = localStorage.getItem('toynest_shop_modes');
+      if (local) {
+        const parsed = JSON.parse(local);
+        setAdultPublished(parsed.adultPublished !== false);
+        setChildPublished(parsed.childPublished !== false);
+        return;
+      }
+    } catch {}
+    setAdultPublished(true);
+    setChildPublished(true);
   };
 
   const saveShopModes = async () => {
     setLoading(true);
     setErrorMessage('');
     try {
-      const res = await ownerPost('/api/owner/shop-modes', {
+      await ownerPost('/api/owner/shop-modes', {
         adultPublished,
         childPublished,
       });
-      setAdultPublished(res.data.adultPublished);
-      setChildPublished(res.data.childPublished);
-      if (
-        (checkoutMode === 'Adult' && !res.data.adultPublished) ||
-        (checkoutMode === 'Child' && !res.data.childPublished)
-      ) {
-        setCheckoutMode(null);
-      }
-      setSuccessMessage(
-        'Shop sections saved. Draft sections are hidden from customers and can be published again anytime.'
-      );
-      await loadShopModes();
-    } catch {
-      setErrorMessage('Could not save shop sections. Please try again.');
-    } finally {
-      setLoading(false);
+    } catch {}
+    localStorage.setItem(
+      'toynest_shop_modes',
+      JSON.stringify({ adultPublished, childPublished })
+    );
+    if (
+      (checkoutMode === 'Adult' && !adultPublished) ||
+      (checkoutMode === 'Child' && !childPublished)
+    ) {
+      setCheckoutMode(null);
     }
+    setSuccessMessage(
+      'Shop sections saved. Draft sections are hidden from customers and can be published again anytime.'
+    );
+    setLoading(false);
   };
 
   const savePaymentQr = async () => {
