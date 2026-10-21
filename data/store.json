@@ -1,0 +1,105 @@
+{
+  "products": [
+    {
+      "id": "40ba4ba9-6434-4a5b-837a-c7a582847205",
+      "name": "Ferrari F40 & Competizion kit card",
+      "price": 79,
+      "category": "Cars",
+      "available": true,
+      "createdAt": "2026-10-17T13:01:36.978Z",
+      "description": "",
+      "imageUrl": "/toys/toy-40ba4ba9-1.jpg",
+      "imageUrls": [
+        "/toys/toy-40ba4ba9-1.jpg",
+        "/toys/toy-40ba4ba9-2.jpg",
+        "/toys/toy-40ba4ba9-3.jpg",
+        "/toys/toy-40ba4ba9-4.jpg"
+      ]
+    },
+    {
+      "id": "78291ec9-cf52-4df8-ab72-7d4c0ab2d082",
+      "name": "Spider-Noir Sitting on Ledge Figure | Spiderman",
+      "price": 79,
+      "category": "Action figure",
+      "available": true,
+      "createdAt": "2026-10-19T05:43:34.974Z",
+      "description": "",
+      "imageUrl": "/toys/toy-78291ec9-1.jpg",
+      "imageUrls": [
+        "/toys/toy-78291ec9-1.jpg",
+        "/toys/toy-78291ec9-2.jpg",
+        "/toys/toy-78291ec9-3.jpg"
+      ]
+    },
+    {
+      "id": "7db6d4d5-075a-4953-9ed7-2aa46422f116",
+      "name": "Mini flower pot",
+      "price": 49,
+      "category": "Decorative",
+      "available": true,
+      "createdAt": "2026-10-17T03:52:43.766Z",
+      "description": "",
+      "imageUrl": "/toys/toy-7db6d4d5-1.jpg",
+      "imageUrls": [
+        "/toys/toy-7db6d4d5-1.jpg",
+        "/toys/toy-7db6d4d5-2.jpg"
+      ]
+    },
+    {
+      "id": "8b48e410-debe-4755-a99b-8915fcb5b939",
+      "name": "Roman Battleship Kit Card",
+      "price": 69,
+      "category": "Decorative",
+      "available": true,
+      "createdAt": "2026-10-17T04:02:40.407Z",
+      "description": "",
+      "imageUrl": "/toys/toy-8b48e410-1.jpg",
+      "imageUrls": [
+        "/toys/toy-8b48e410-1.jpg",
+        "/toys/toy-8b48e410-2.jpg",
+        "/toys/toy-8b48e410-3.jpg",
+        "/toys/toy-8b48e410-4.jpg"
+      ]
+    },
+    {
+      "id": "94189799-9004-4f29-ba0c-64fc8400619d",
+      "name": "Nissan 370z Kit Card",
+      "price": 79,
+      "category": "Cars",
+      "available": true,
+      "createdAt": "2026-10-17T04:04:14.938Z",
+      "description": "",
+      "imageUrl": "/toys/toy-94189799-1.jpg",
+      "imageUrls": [
+        "/toys/toy-94189799-1.jpg",
+        "/toys/toy-94189799-2.jpg",
+        "/toys/toy-94189799-3.jpg",
+        "/toys/toy-94189799-4.jpg"
+      ]
+    },
+    {
+      "id": "f0acb428-9f95-4bab-94a5-6b57d2415b25",
+      "name": "Nissan GTR R34 Kit Card",
+      "price": 79,
+      "category": "Cars",
+      "available": true,
+      "createdAt": "2026-10-17T04:05:47.738Z",
+      "description": "",
+      "imageUrl": "/toys/toy-f0acb428-1.jpg",
+      "imageUrls": [
+        "/toys/toy-f0acb428-1.jpg",
+        "/toys/toy-f0acb428-2.jpg",
+        "/toys/toy-f0acb428-3.jpg",
+        "/toys/toy-f0acb428-4.jpg"
+      ]
+    }
+  ],
+  "orders": [],
+  "suggestions": [],
+  "shopModes": {
+    "adultPublished": true,
+    "childPublished": true
+  },
+  "paymentQrUrl": "/payment/adult-qr.jpg",
+  "ownerPin": "1234"
+}

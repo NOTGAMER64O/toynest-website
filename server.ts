@@ -1,0 +1,598 @@
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const isStandaloneProd = process.env.NODE_ENV === 'production' && !fs.existsSync('/etc/nginx/nginx.conf');
+const PORT = isStandaloneProd ? (process.env.PORT ? parseInt(process.env.PORT, 10) : 3000) : 3000;
+
+// High payload limit for base64 image uploads
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// Ensure public directories exist
+fs.mkdirSync(path.join(__dirname, 'public/toys'), { recursive: true });
+fs.mkdirSync(path.join(__dirname, 'public/payment'), { recursive: true });
+fs.mkdirSync(path.join(__dirname, 'public/resources'), { recursive: true });
+fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+
+const DB_PATH = path.join(__dirname, 'data/store.json');
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  category: string;
+  description: string;
+  imageUrl: string;
+  imageUrls: string[];
+  available: boolean;
+  createdAt: string;
+}
+
+interface Order {
+  id: string;
+  orderNumber: string;
+  customerId: string;
+  mode: 'Child' | 'Adult';
+  productId: string;
+  productName: string;
+  productImageUrl: string;
+  price: number;
+  name: string;
+  studentClass: string;
+  section: string;
+  phone: string;
+  address: string;
+  note: string;
+  status: string;
+  createdAt: string;
+  paymentRecipientName?: string;
+  paymentRecipientClass?: string;
+  paymentRecipientSection?: string;
+  ownerNote?: string;
+}
+
+interface Suggestion {
+  id: string;
+  suggestion: string;
+  createdAt: string;
+}
+
+interface DB {
+  products: Product[];
+  orders: Order[];
+  suggestions: Suggestion[];
+  shopModes: {
+    adultPublished: boolean;
+    childPublished: boolean;
+  };
+  paymentQrUrl: string;
+  ownerPin: string;
+}
+
+// Initial seed products
+const defaultProducts: Product[] = [
+  {
+    id: "40ba4ba9-6434-4a5b-837a-c7a582847205",
+    name: "Ferrari F40 & Competizion kit card",
+    price: 79,
+    category: "Cars",
+    available: true,
+    createdAt: "2026-10-17T13:01:36.978Z",
+    description: "",
+    imageUrl: "/toys/toy-40ba4ba9-1.jpg",
+    imageUrls: [
+      "/toys/toy-40ba4ba9-1.jpg",
+      "/toys/toy-40ba4ba9-2.jpg",
+      "/toys/toy-40ba4ba9-3.jpg",
+      "/toys/toy-40ba4ba9-4.jpg"
+    ]
+  },
+  {
+    id: "78291ec9-cf52-4df8-ab72-7d4c0ab2d082",
+    name: "Spider-Noir Sitting on Ledge Figure | Spiderman",
+    price: 79,
+    category: "Action figure",
+    available: true,
+    createdAt: "2026-10-19T05:43:34.974Z",
+    description: "",
+    imageUrl: "/toys/toy-78291ec9-1.jpg",
+    imageUrls: [
+      "/toys/toy-78291ec9-1.jpg",
+      "/toys/toy-78291ec9-2.jpg",
+      "/toys/toy-78291ec9-3.jpg"
+    ]
+  },
+  {
+    id: "7db6d4d5-075a-4953-9ed7-2aa46422f116",
+    name: "Mini flower pot",
+    price: 49,
+    category: "Decorative",
+    available: true,
+    createdAt: "2026-10-17T03:52:43.766Z",
+    description: "",
+    imageUrl: "/toys/toy-7db6d4d5-1.jpg",
+    imageUrls: [
+      "/toys/toy-7db6d4d5-1.jpg",
+      "/toys/toy-7db6d4d5-2.jpg"
+    ]
+  },
+  {
+    id: "8b48e410-debe-4755-a99b-8915fcb5b939",
+    name: "Roman Battleship Kit Card",
+    price: 69,
+    category: "Decorative",
+    available: true,
+    createdAt: "2026-10-17T04:02:40.407Z",
+    description: "",
+    imageUrl: "/toys/toy-8b48e410-1.jpg",
+    imageUrls: [
+      "/toys/toy-8b48e410-1.jpg",
+      "/toys/toy-8b48e410-2.jpg",
+      "/toys/toy-8b48e410-3.jpg",
+      "/toys/toy-8b48e410-4.jpg"
+    ]
+  },
+  {
+    id: "94189799-9004-4f29-ba0c-64fc8400619d",
+    name: "Nissan 370z Kit Card",
+    price: 79,
+    category: "Cars",
+    available: true,
+    createdAt: "2026-10-17T04:04:14.938Z",
+    description: "",
+    imageUrl: "/toys/toy-94189799-1.jpg",
+    imageUrls: [
+      "/toys/toy-94189799-1.jpg",
+      "/toys/toy-94189799-2.jpg",
+      "/toys/toy-94189799-3.jpg",
+      "/toys/toy-94189799-4.jpg"
+    ]
+  },
+  {
+    id: "f0acb428-9f95-4bab-94a5-6b57d2415b25",
+    name: "Nissan GTR R34 Kit Card",
+    price: 79,
+    category: "Cars",
+    available: true,
+    createdAt: "2026-10-17T04:05:47.738Z",
+    description: "",
+    imageUrl: "/toys/toy-f0acb428-1.jpg",
+    imageUrls: [
+      "/toys/toy-f0acb428-1.jpg",
+      "/toys/toy-f0acb428-2.jpg",
+      "/toys/toy-f0acb428-3.jpg",
+      "/toys/toy-f0acb428-4.jpg"
+    ]
+  }
+];
+
+function loadDB(): DB {
+  try {
+    if (fs.existsSync(DB_PATH)) {
+      return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    }
+  } catch (err) {
+    console.error('Error reading DB, using defaults:', err);
+  }
+  const initial: DB = {
+    products: defaultProducts,
+    orders: [],
+    suggestions: [],
+    shopModes: {
+      adultPublished: true,
+      childPublished: true,
+    },
+    paymentQrUrl: '/payment/adult-qr.jpg',
+    ownerPin: process.env.OWNER_PIN || '1234',
+  };
+  saveDB(initial);
+  return initial;
+}
+
+function saveDB(data: DB) {
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Error saving DB:', err);
+  }
+}
+
+let db = loadDB();
+
+// Helper to check PIN - strictly only matches the owner's single configured PIN
+function verifyPin(pin: unknown): boolean {
+  if (!pin) return false;
+  const p = String(pin).trim();
+  db = loadDB();
+  const currentOwnerPin = (db.ownerPin || process.env.OWNER_PIN || '1234').trim();
+  return p === currentOwnerPin;
+}
+
+// Helper to compute queue positions
+function computeQueuePositions(orders: Order[]) {
+  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+  const activeOrders = orders
+    .filter((o) => activeStatuses.includes(o.status))
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  const positionMap = new Map<string, { queuePosition: number; peopleAhead: number }>();
+  activeOrders.forEach((o, idx) => {
+    positionMap.set(o.id, {
+      queuePosition: idx + 1,
+      peopleAhead: idx,
+    });
+  });
+
+  return orders.map((o) => {
+    const queueInfo = positionMap.get(o.id);
+    return {
+      ...o,
+      queuePosition: queueInfo ? queueInfo.queuePosition : null,
+      peopleAhead: queueInfo ? queueInfo.peopleAhead : 0,
+    };
+  });
+}
+
+// Static files from public
+app.use(express.static(path.join(__dirname, 'public')));
+
+// API Routes
+app.get('/api/products', (req, res) => {
+  db = loadDB();
+  const publishedProducts = db.products.filter((p) => p.available !== false);
+  res.json({ products: publishedProducts });
+});
+
+app.get('/api/payment-qr', (req, res) => {
+  db = loadDB();
+  res.json({ url: db.paymentQrUrl });
+});
+
+app.get('/api/shop-modes', (req, res) => {
+  db = loadDB();
+  res.json(db.shopModes);
+});
+
+app.post('/api/orders', (req, res) => {
+  db = loadDB();
+  const { customerId, mode, productId, name, studentClass, section, phone, address, note } = req.body;
+
+  if (!productId || !name || !name.trim()) {
+    return res.status(400).json({ error: 'Please enter your name and select a toy.' });
+  }
+
+  const product = db.products.find((p) => p.id === productId);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found.' });
+  }
+
+  const orderId = 'ord_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const orderNumber = 'TN-' + (Math.floor(1000 + Math.random() * 9000));
+
+  const newOrder: Order = {
+    id: orderId,
+    orderNumber,
+    customerId: customerId || 'cust_' + Date.now(),
+    mode: mode === 'Adult' ? 'Adult' : 'Child',
+    productId,
+    productName: product.name,
+    productImageUrl: product.imageUrl || (product.imageUrls && product.imageUrls[0]) || '',
+    price: product.price,
+    name: name.trim(),
+    studentClass: mode === 'Adult' ? '' : (studentClass || ''),
+    section: mode === 'Adult' ? '' : (section || '').trim(),
+    phone: mode === 'Adult' ? (phone || '').trim() : '',
+    address: mode === 'Adult' ? (address || '').trim() : '',
+    note: (note || '').trim(),
+    status: 'New',
+    createdAt: new Date().toISOString(),
+    paymentRecipientName: '',
+    paymentRecipientClass: '',
+    paymentRecipientSection: '',
+    ownerNote: '',
+  };
+
+  db.orders.unshift(newOrder);
+  saveDB(db);
+
+  res.json({ success: true, order: newOrder });
+});
+
+app.post('/api/orders/mine', (req, res) => {
+  db = loadDB();
+  const { customerId } = req.body;
+  if (!customerId) {
+    return res.json({ orders: [] });
+  }
+
+  const userOrders = db.orders.filter((o) => o.customerId === customerId);
+  const enrichedOrders = computeQueuePositions(userOrders);
+  res.json({ orders: enrichedOrders });
+});
+
+app.post('/api/suggestions', (req, res) => {
+  db = loadDB();
+  const { suggestion } = req.body;
+  if (!suggestion || !suggestion.trim()) {
+    return res.status(400).json({ error: 'Suggestion cannot be empty.' });
+  }
+
+  const newSuggestion: Suggestion = {
+    id: 'sug_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    suggestion: suggestion.trim(),
+    createdAt: new Date().toISOString(),
+  };
+
+  db.suggestions.unshift(newSuggestion);
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+// OWNER ROUTES
+app.post('/api/owner/verify', (req, res) => {
+  const { pin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/owner/products/list', (req, res) => {
+  const { pin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+  db = loadDB();
+  res.json({ products: db.products });
+});
+
+app.post('/api/owner/products', (req, res) => {
+  const { pin, name, price, description, category, images, available } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  if (!name || !name.trim() || !price || Number(price) <= 0) {
+    return res.status(400).json({ error: 'Invalid product details.' });
+  }
+
+  db = loadDB();
+  const productId = 'toy_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const imageUrls: string[] = [];
+
+  if (Array.isArray(images) && images.length > 0) {
+    images.forEach((img, idx) => {
+      try {
+        if (img && img.data) {
+          const ext = img.contentType?.includes('png') ? 'png' : img.contentType?.includes('webp') ? 'webp' : 'jpg';
+          const filename = `toy-${productId}-${idx + 1}.${ext}`;
+          const filepath = path.join(__dirname, 'public/toys', filename);
+          fs.writeFileSync(filepath, Buffer.from(img.data, 'base64'));
+          imageUrls.push(`/toys/${filename}`);
+        }
+      } catch (err) {
+        console.error('Error saving image:', err);
+      }
+    });
+  }
+
+  const newProduct: Product = {
+    id: productId,
+    name: name.trim(),
+    price: Number(price),
+    description: (description || '').trim(),
+    category: (category || '').trim() || 'Other',
+    imageUrl: imageUrls[0] || '',
+    imageUrls,
+    available: available !== false,
+    createdAt: new Date().toISOString(),
+  };
+
+  db.products.unshift(newProduct);
+  saveDB(db);
+
+  res.json({ success: true, product: newProduct });
+});
+
+app.post('/api/owner/products/update', (req, res) => {
+  const { pin, id, name, price, description, category, available } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  const product = db.products.find((p) => p.id === id);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found.' });
+  }
+
+  if (name !== undefined) product.name = name.trim();
+  if (price !== undefined) product.price = Number(price);
+  if (description !== undefined) product.description = description.trim();
+  if (category !== undefined) product.category = category.trim() || 'Other';
+  if (available !== undefined) product.available = Boolean(available);
+
+  saveDB(db);
+  res.json({ success: true, product });
+});
+
+app.post('/api/owner/products/delete', (req, res) => {
+  const { pin, id } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  db.products = db.products.filter((p) => p.id !== id);
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+app.post('/api/owner/orders', (req, res) => {
+  const { pin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  const enrichedOrders = computeQueuePositions(db.orders);
+  res.json({ orders: enrichedOrders });
+});
+
+app.post('/api/owner/orders/status', (req, res) => {
+  const { pin, id, status, paymentRecipientName, paymentRecipientClass, paymentRecipientSection, ownerNote } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  const order = db.orders.find((o) => o.id === id);
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found.' });
+  }
+
+  if (status !== undefined) order.status = status;
+  if (paymentRecipientName !== undefined) order.paymentRecipientName = paymentRecipientName;
+  if (paymentRecipientClass !== undefined) order.paymentRecipientClass = paymentRecipientClass;
+  if (paymentRecipientSection !== undefined) order.paymentRecipientSection = paymentRecipientSection;
+  if (ownerNote !== undefined) order.ownerNote = ownerNote;
+
+  saveDB(db);
+  res.json({ success: true, order });
+});
+
+app.post('/api/owner/orders/delete', (req, res) => {
+  const { pin, id } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  const order = db.orders.find((o) => o.id === id);
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found.' });
+  }
+
+  if (!['Completed', 'Cancelled'].includes(order.status)) {
+    return res.status(400).json({ error: 'Only completed or cancelled orders can be deleted.' });
+  }
+
+  db.orders = db.orders.filter((o) => o.id !== id);
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+app.post('/api/owner/suggestions', (req, res) => {
+  const { pin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  res.json({ suggestions: db.suggestions });
+});
+
+app.post('/api/owner/suggestions/delete', (req, res) => {
+  const { pin, id } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  db.suggestions = db.suggestions.filter((s) => s.id !== id);
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+app.post('/api/owner/shop-modes', (req, res) => {
+  const { pin, adultPublished, childPublished } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  db.shopModes = {
+    adultPublished: adultPublished !== false,
+    childPublished: childPublished !== false,
+  };
+  saveDB(db);
+
+  res.json(db.shopModes);
+});
+
+app.post('/api/owner/payment-qr', (req, res) => {
+  const { pin, data, contentType } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  if (!data) {
+    return res.status(400).json({ error: 'No QR data provided.' });
+  }
+
+  try {
+    const ext = contentType?.includes('png') ? 'png' : contentType?.includes('webp') ? 'webp' : 'jpg';
+    const filename = `adult-qr.${ext}`;
+    const filepath = path.join(__dirname, 'public/payment', filename);
+    fs.writeFileSync(filepath, Buffer.from(data, 'base64'));
+
+    db = loadDB();
+    db.paymentQrUrl = `/payment/${filename}?t=${Date.now()}`;
+    saveDB(db);
+
+    res.json({ url: db.paymentQrUrl });
+  } catch (err) {
+    console.error('Error saving QR code:', err);
+    res.status(500).json({ error: 'Failed to save QR code.' });
+  }
+});
+
+app.post('/api/owner/change-pin', (req, res) => {
+  const { pin, newPin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Current PIN is incorrect.' });
+  }
+
+  if (!newPin || typeof newPin !== 'string' || newPin.trim().length < 4) {
+    return res.status(400).json({ error: 'New PIN must be at least 4 characters.' });
+  }
+
+  db = loadDB();
+  db.ownerPin = newPin.trim();
+  saveDB(db);
+
+  res.json({ success: true, message: 'Owner PIN updated successfully.' });
+});
+
+// Setup Vite middleware or static serving
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, 'dist')));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(__dirname, 'dist/index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`ToyNest server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer();
