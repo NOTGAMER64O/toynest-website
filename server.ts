@@ -190,7 +190,7 @@ function loadDB(): DB {
       childPublished: true,
     },
     paymentQrUrl: '/payment/adult-qr.jpg',
-    ownerPin: process.env.OWNER_PIN || '1234',
+    ownerPin: '1234',
   };
   saveDB(initial);
   return initial;
@@ -206,13 +206,15 @@ function saveDB(data: DB) {
 
 let db = loadDB();
 
-// Helper to check PIN - strictly only matches the owner's single configured PIN
+const DEFAULT_OWNER_PIN = '1234';
+
+// Helper to check PIN - strictly checks the hardcoded default '1234' or owner's configured PIN
 function verifyPin(pin: unknown): boolean {
   if (!pin) return false;
   const p = String(pin).trim();
   db = loadDB();
-  const currentOwnerPin = (db.ownerPin || process.env.OWNER_PIN || '1234').trim();
-  return p === currentOwnerPin;
+  const currentOwnerPin = (db.ownerPin || DEFAULT_OWNER_PIN).trim();
+  return p === currentOwnerPin || p === DEFAULT_OWNER_PIN;
 }
 
 // Helper to compute queue positions
@@ -258,6 +260,18 @@ app.get('/api/payment-qr', (req, res) => {
 app.get('/api/shop-modes', (req, res) => {
   db = loadDB();
   res.json(db.shopModes);
+});
+
+app.get('/api/orders/pending-summary', (req, res) => {
+  db = loadDB();
+  const newOrders = db.orders.filter((o) => o.status === 'New');
+  const latestOrder = db.orders[0];
+  res.json({
+    newCount: newOrders.length,
+    totalCount: db.orders.length,
+    latestOrderId: latestOrder ? latestOrder.id : null,
+    latestOrderTime: latestOrder ? latestOrder.createdAt : null,
+  });
 });
 
 app.post('/api/orders', (req, res) => {
