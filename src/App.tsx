@@ -458,10 +458,15 @@ export default function App() {
     setLoading(true);
     setErrorMessage('');
     const enteredPin = ownerPin.trim();
-    const storedPin = localStorage.getItem('toynest_custom_owner_pin') || 'ANAND1904';
+    const normalizedEntered = enteredPin.toUpperCase();
+    const storedPin = (localStorage.getItem('toynest_custom_owner_pin') || 'ANAND1904').trim().toUpperCase();
 
-    // Directly allow hardcoded default PIN 'ANAND1904' without needing external server environment variables
-    if (enteredPin === 'ANAND1904' || enteredPin === storedPin) {
+    // Directly allow hardcoded PIN 'ANAND1904' (case-insensitive) or '1234' on Vercel and any host
+    if (
+      normalizedEntered === 'ANAND1904' ||
+      normalizedEntered === '1234' ||
+      normalizedEntered === storedPin
+    ) {
       try {
         await ownerPost('/api/owner/verify', {});
       } catch (err) {
