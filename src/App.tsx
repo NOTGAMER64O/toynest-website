@@ -458,10 +458,10 @@ export default function App() {
     setLoading(true);
     setErrorMessage('');
     const enteredPin = ownerPin.trim();
-    const storedPin = localStorage.getItem('toynest_custom_owner_pin') || '1234';
+    const storedPin = localStorage.getItem('toynest_custom_owner_pin') || 'ANAND1904';
 
-    // Directly allow hardcoded default PIN '1234' without needing external server environment variables
-    if (enteredPin === '1234' || enteredPin === storedPin) {
+    // Directly allow hardcoded default PIN 'ANAND1904' without needing external server environment variables
+    if (enteredPin === 'ANAND1904' || enteredPin === storedPin) {
       try {
         await ownerPost('/api/owner/verify', {});
       } catch (err) {

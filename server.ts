@@ -190,7 +190,7 @@ function loadDB(): DB {
       childPublished: true,
     },
     paymentQrUrl: '/payment/adult-qr.jpg',
-    ownerPin: '1234',
+    ownerPin: 'ANAND1904',
   };
   saveDB(initial);
   return initial;
@@ -206,9 +206,9 @@ function saveDB(data: DB) {
 
 let db = loadDB();
 
-const DEFAULT_OWNER_PIN = '1234';
+const DEFAULT_OWNER_PIN = 'ANAND1904';
 
-// Helper to check PIN - strictly checks the hardcoded default '1234' or owner's configured PIN
+// Helper to check PIN - strictly checks the hardcoded default 'ANAND1904' or owner's configured PIN
 function verifyPin(pin: unknown): boolean {
   if (!pin) return false;
   const p = String(pin).trim();
