@@ -205,7 +205,7 @@ export default function App() {
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
 
   const shareShop = async () => {
-    const url = 'https://tinyurl.com/toynest';
+    const url = 'https://toynest-website.vercel.app/';
     if (navigator.share) {
       try {
         await navigator.share({
@@ -261,16 +261,17 @@ export default function App() {
         const orders: Order[] = res.data.orders;
         setOwnerOrders(orders);
         saveStoredOrders(orders);
-        if (orders.length > 0) {
-          saveSeenOwnerLatestOrder(orders[0].id);
-        }
-        setHasOwnerOrderNotification(false);
+        const newOrders = orders.filter((o) => o.status === 'New');
+        setOwnerNewOrdersCount(newOrders.length);
+        setHasOwnerOrderNotification(newOrders.length > 0);
         return;
       }
     } catch {}
     const localOrders = getStoredOrders();
     setOwnerOrders(localOrders);
-    setHasOwnerOrderNotification(false);
+    const newLocal = localOrders.filter((o) => o.status === 'New');
+    setOwnerNewOrdersCount(newLocal.length);
+    setHasOwnerOrderNotification(newLocal.length > 0);
   };
 
   const loadPaymentQr = async () => {
@@ -371,37 +372,38 @@ export default function App() {
 
   const checkOrderUpdates = async () => {
     if (!customerId) return;
+    let orders: Order[] = [];
     try {
       const res = await api.post('/api/orders/mine', { customerId });
-      const orders: Order[] = res.data.orders || [];
-      const seen = getSeenOrderStatuses();
-      let hasUpdate = false;
-
-      orders.forEach((o) => {
-        if (o.status === 'Confirmed' || o.status === 'Dispatched') {
-          if (seen[o.id] !== o.status) {
-            hasUpdate = true;
-          }
-        }
-      });
-
-      setHasStatusUpdateNotification(hasUpdate);
+      if (res.data?.orders && Array.isArray(res.data.orders)) {
+        orders = res.data.orders;
+      }
     } catch {}
+
+    if (orders.length === 0) {
+      orders = getStoredOrders().filter((o) => o.customerId === customerId);
+    }
+
+    const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+    const hasActiveOrders = orders.some((o) => activeStatuses.includes(o.status));
+    setHasStatusUpdateNotification(hasActiveOrders);
   };
 
   const checkOwnerOrderUpdates = async () => {
+    let newCount = 0;
     try {
       const res = await api.get('/api/orders/pending-summary');
-      const { newCount, latestOrderId } = res.data;
-      setOwnerNewOrdersCount(newCount || 0);
-
-      const seenId = getSeenOwnerLatestOrder();
-      if (newCount > 0 && latestOrderId && seenId !== latestOrderId) {
-        setHasOwnerOrderNotification(true);
-      } else if (newCount === 0) {
-        setHasOwnerOrderNotification(false);
+      if (typeof res.data?.newCount === 'number') {
+        newCount = res.data.newCount;
       }
     } catch {}
+
+    const stored = getStoredOrders();
+    const storedNew = stored.filter((o) => o.status === 'New').length;
+    const finalNewCount = Math.max(newCount, storedNew);
+
+    setOwnerNewOrdersCount(finalNewCount);
+    setHasOwnerOrderNotification(finalNewCount > 0);
   };
 
   useEffect(() => {
@@ -437,7 +439,8 @@ export default function App() {
           seen[o.id] = o.status;
         });
         saveSeenOrderStatuses(seen);
-        setHasStatusUpdateNotification(false);
+        const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+        setHasStatusUpdateNotification(orders.some((o) => activeStatuses.includes(o.status)));
         return;
       }
     } catch {}
@@ -445,6 +448,8 @@ export default function App() {
     const enrichedStored = computeLocalQueuePositions(allStoredOrders);
     const localOrders = enrichedStored.filter((o) => o.customerId === customerId);
     setMyOrders(localOrders);
+    const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+    setHasStatusUpdateNotification(localOrders.some((o) => activeStatuses.includes(o.status)));
     setMyOrdersLoading(false);
   };
 
@@ -798,6 +803,8 @@ export default function App() {
       const updatedList = computeLocalQueuePositions([localOrder, ...allExisting]);
       saveStoredOrders(updatedList);
     } finally {
+      setHasStatusUpdateNotification(true);
+      setHasOwnerOrderNotification(true);
       setSuccessMessage('');
       setPage('myOrders');
       await loadMyOrders();
@@ -932,9 +939,17 @@ export default function App() {
           type="button"
           aria-label="Open navigation menu"
           aria-expanded={isSideMenuOpen}
+          style={{ position: 'relative' }}
           onClick={() => setIsSideMenuOpen(true)}
         >
           <Menu size={23} />
+          {(hasOwnerOrderNotification || hasStatusUpdateNotification) && (
+            <span
+              className="blinking-green-dot"
+              style={{ top: '4px', right: '4px' }}
+              title="New updates"
+            />
+          )}
         </button>
 
         <button
@@ -967,7 +982,7 @@ export default function App() {
             className="owner-link"
             type="button"
             onClick={shareShop}
-            title="Copy short link (tinyurl.com/toynest)"
+            title="Copy shop link (toynest-website.vercel.app)"
           >
             <Share2 size={16} /> {copiedLink ? 'Copied link!' : 'Share shop'}
           </button>
@@ -982,8 +997,8 @@ export default function App() {
             <PackageCheck size={16} /> My Orders
             {hasStatusUpdateNotification && (
               <span
-                className="notification-dot"
-                title="Your order status has been updated!"
+                className="blinking-green-dot"
+                title="Your active order is in progress!"
                 aria-label="Order status update notification"
               />
             )}
@@ -1078,14 +1093,18 @@ export default function App() {
                   <PackageCheck size={19} /> My Orders
                 </span>
                 {hasStatusUpdateNotification && (
-                  <span className="notification-badge-pill">Update</span>
+                  <span
+                    className="blinking-green-dot-inline"
+                    title="Active orders in progress"
+                    aria-label="Active order notification"
+                  />
                 )}
               </button>
               <button
                 type="button"
                 onClick={shareShop}
               >
-                <Share2 size={19} /> {copiedLink ? 'Link copied!' : 'Share shop (tinyurl.com/toynest)'}
+                <Share2 size={19} /> {copiedLink ? 'Link copied!' : 'Share shop (toynest-website.vercel.app)'}
               </button>
               <button
                 type="button"
@@ -1109,7 +1128,8 @@ export default function App() {
                 {hasOwnerOrderNotification && (
                   <span
                     className="blinking-green-dot-inline"
-                    title="New order request"
+                    title={`${ownerNewOrdersCount || 'New'} order request(s)`}
+                    aria-label="New order notification"
                   />
                 )}
               </button>
