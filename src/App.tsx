@@ -142,11 +142,9 @@ export default function App() {
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'pin'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment'
   >('products');
   const [productFilter, setProductFilter] = useState<'all' | 'published' | 'drafts'>('all');
-  const [currentPinInput, setCurrentPinInput] = useState<string>('');
-  const [newPinInput, setNewPinInput] = useState<string>('');
   const [checkoutMode, setCheckoutMode] = useState<'Child' | 'Adult' | null>(null);
   const [adultPublished, setAdultPublished] = useState<boolean>(true);
   const [childPublished, setChildPublished] = useState<boolean>(true);
@@ -484,14 +482,14 @@ export default function App() {
     setErrorMessage('');
     const enteredPin = ownerPin.trim();
     const normalizedEntered = enteredPin.toUpperCase();
-    const storedPin = (localStorage.getItem('toynest_custom_owner_pin') || DEFAULT_OWNER_PIN).trim().toUpperCase();
 
-    // Strictly only allow configured PIN 'ANAND1904' (case-insensitive) or stored PIN
-    const isPinValid =
-      normalizedEntered === DEFAULT_OWNER_PIN ||
-      normalizedEntered === storedPin;
+    // Strictly only allow fixed owner PIN 'ANAND1904' (case-insensitive)
+    const isPinValid = normalizedEntered === DEFAULT_OWNER_PIN;
 
     if (isPinValid) {
+      try {
+        localStorage.removeItem('toynest_custom_owner_pin');
+      } catch {}
       try {
         await ownerPost('/api/owner/verify', {});
       } catch (err) {
@@ -710,34 +708,6 @@ export default function App() {
     }
   };
 
-  const handleChangePin = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setErrorMessage('');
-    setSuccessMessage('');
-    const targetPin = newPinInput.trim();
-    if (!targetPin || targetPin.length < 4) {
-      setErrorMessage('New PIN must be at least 4 characters.');
-      return;
-    }
-    setLoading(true);
-    try {
-      await api.post('/api/owner/change-pin', {
-        pin: currentPinInput.trim() || ownerPin,
-        newPin: targetPin,
-      }).catch((err) => {
-        console.warn('Backend change-pin skipped:', err);
-      });
-      setOwnerPin(targetPin);
-      localStorage.setItem('toynest_custom_owner_pin', targetPin);
-      setSuccessMessage(`Owner PIN successfully updated to "${targetPin}".`);
-      setNewPinInput('');
-      setCurrentPinInput('');
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Could not change PIN. Make sure current PIN is correct.');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handlePlaceOrder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1908,18 +1878,6 @@ export default function App() {
               >
                 Payment QR
               </button>
-              <button
-                className={ownerTab === 'pin' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('pin');
-                  setCurrentPinInput(ownerPin);
-                  setNewPinInput('');
-                  setErrorMessage('');
-                  setSuccessMessage('');
-                }}
-              >
-                Change PIN
-              </button>
             </div>
 
             {successMessage && <p className="success-msg">{successMessage}</p>}
@@ -2587,54 +2545,6 @@ export default function App() {
               </section>
             )}
 
-            {/* CHANGE PIN TAB */}
-            {ownerTab === 'pin' && (
-              <section className="payment-qr-panel">
-                <span className="eyebrow">SECURITY</span>
-                <h2>Change owner PIN</h2>
-                <p>Set a specific PIN of your choice to protect your owner dashboard.</p>
-                <form
-                  onSubmit={handleChangePin}
-                  className="panel-form"
-                  style={{
-                    maxWidth: '440px',
-                    margin: '20px 0',
-                    padding: '24px',
-                    borderRadius: '12px',
-                    background: '#fffefa',
-                    border: '1px solid #eceae1',
-                  }}
-                >
-                  <label>
-                    Current PIN
-                    <input
-                      type="password"
-                      value={currentPinInput}
-                      onChange={(e) => setCurrentPinInput(e.target.value)}
-                      placeholder="Enter current PIN"
-                      required
-                      autoComplete="current-password"
-                    />
-                  </label>
-                  <label>
-                    New specific PIN
-                    <input
-                      type="text"
-                      value={newPinInput}
-                      onChange={(e) => setNewPinInput(e.target.value)}
-                      placeholder="e.g. 5821"
-                      required
-                      minLength={4}
-                      autoComplete="new-password"
-                    />
-                    <small>Enter any 4+ digit or letter code.</small>
-                  </label>
-                  <button className="primary-btn full-btn" type="submit" disabled={loading}>
-                    {loading ? 'Updating PIN…' : 'Save new PIN'}
-                  </button>
-                </form>
-              </section>
-            )}
           </section>
         )}
       </main>

@@ -211,13 +211,10 @@ let db = loadDB();
 
 const DEFAULT_OWNER_PIN = 'ANAND1904';
 
-// Helper to check PIN - strictly checks the hardcoded default 'ANAND1904' (case-insensitive)
 function verifyPin(pin: unknown): boolean {
   if (!pin) return false;
   const p = String(pin).trim().toUpperCase();
-  db = loadDB();
-  const currentOwnerPin = (db.ownerPin || DEFAULT_OWNER_PIN).trim().toUpperCase();
-  return p === currentOwnerPin || p === DEFAULT_OWNER_PIN;
+  return p === DEFAULT_OWNER_PIN;
 }
 
 // Helper to compute queue positions
@@ -575,22 +572,6 @@ app.post('/api/owner/payment-qr', (req, res) => {
   }
 });
 
-app.post('/api/owner/change-pin', (req, res) => {
-  const { pin, newPin } = req.body;
-  if (!verifyPin(pin)) {
-    return res.status(401).json({ error: 'Current PIN is incorrect.' });
-  }
-
-  if (!newPin || typeof newPin !== 'string' || newPin.trim().length < 4) {
-    return res.status(400).json({ error: 'New PIN must be at least 4 characters.' });
-  }
-
-  db = loadDB();
-  db.ownerPin = newPin.trim();
-  saveDB(db);
-
-  res.json({ success: true, message: 'Owner PIN updated successfully.' });
-});
 
 // Setup Vite middleware or static serving
 async function startServer() {
