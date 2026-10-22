@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Share2,
+  FileText,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -140,7 +141,10 @@ export default function App() {
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
-  const [ownerTab, setOwnerTab] = useState<'products' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'pin'>('products');
+  const [ownerTab, setOwnerTab] = useState<
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'pin'
+  >('products');
+  const [productFilter, setProductFilter] = useState<'all' | 'published' | 'drafts'>('all');
   const [currentPinInput, setCurrentPinInput] = useState<string>('');
   const [newPinInput, setNewPinInput] = useState<string>('');
   const [checkoutMode, setCheckoutMode] = useState<'Child' | 'Adult' | null>(null);
@@ -1805,17 +1809,42 @@ export default function App() {
             </div>
 
             <div className="stats-row">
-              <div className="stat-card">
-                <span>Listed toys</span>
-                <strong>{products.length}</strong>
-                <ShoppingBag size={20} />
+              <div
+                className="stat-card"
+                onClick={() => setOwnerTab('products')}
+                style={{ cursor: 'pointer' }}
+                title="View live toys"
+              >
+                <span>Live toys</span>
+                <strong>{products.filter((p) => p.available !== false).length}</strong>
+                <Store size={20} />
               </div>
-              <div className="stat-card">
+              <div
+                className="stat-card"
+                onClick={() => setOwnerTab('drafts')}
+                style={{ cursor: 'pointer' }}
+                title="View draft products"
+              >
+                <span>Draft products</span>
+                <strong>{products.filter((p) => p.available === false).length}</strong>
+                <FileText size={20} />
+              </div>
+              <div
+                className="stat-card"
+                onClick={() => setOwnerTab('orders')}
+                style={{ cursor: 'pointer' }}
+                title="View orders"
+              >
                 <span>Total orders</span>
                 <strong>{ownerOrders.length}</strong>
                 <PackageCheck size={20} />
               </div>
-              <div className="stat-card">
+              <div
+                className="stat-card"
+                onClick={() => setOwnerTab('orders')}
+                style={{ cursor: 'pointer' }}
+                title="View orders needing follow-up"
+              >
                 <span>To follow up</span>
                 <strong>{ownerOrders.filter((o) => o.status === 'New').length}</strong>
                 <Store size={20} />
@@ -1827,7 +1856,13 @@ export default function App() {
                 className={ownerTab === 'products' ? 'active' : ''}
                 onClick={() => setOwnerTab('products')}
               >
-                Products
+                Products ({products.filter((p) => p.available !== false).length})
+              </button>
+              <button
+                className={ownerTab === 'drafts' ? 'active' : ''}
+                onClick={() => setOwnerTab('drafts')}
+              >
+                Drafts ({products.filter((p) => p.available === false).length})
               </button>
               <button
                 className={ownerTab === 'orders' ? 'active' : ''}
@@ -2083,59 +2118,194 @@ export default function App() {
                     </span>
                   </div>
 
-                  {products.length === 0 ? (
-                    <div className="mini-empty">Your products will appear here.</div>
+                  <div className="filter-pills">
+                    <button
+                      type="button"
+                      className={`filter-pill ${productFilter === 'all' ? 'active' : ''}`}
+                      onClick={() => setProductFilter('all')}
+                    >
+                      All ({products.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`filter-pill ${productFilter === 'published' ? 'active' : ''}`}
+                      onClick={() => setProductFilter('published')}
+                    >
+                      Published ({products.filter((p) => p.available !== false).length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`filter-pill ${productFilter === 'drafts' ? 'active' : ''}`}
+                      onClick={() => setProductFilter('drafts')}
+                    >
+                      Drafts ({products.filter((p) => p.available === false).length})
+                    </button>
+                  </div>
+
+                  {products.filter((p) => {
+                    if (productFilter === 'published') return p.available !== false;
+                    if (productFilter === 'drafts') return p.available === false;
+                    return true;
+                  }).length === 0 ? (
+                    <div className="mini-empty">
+                      {productFilter === 'drafts'
+                        ? 'No toys currently in draft.'
+                        : 'Your products will appear here.'}
+                    </div>
                   ) : (
-                    products.map((p) => {
-                      const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
-                      return (
-                        <div className="manage-item" key={p.id}>
-                          <div className="manage-thumb">
-                            {firstImg ? <img src={firstImg} alt="" /> : '🧸'}
-                          </div>
-                          <div className="manage-item-text">
-                            <strong>{p.name}</strong>
-                            <span>
-                              {da(p.price)} · {p.category || 'Other'}
-                            </span>
-                            <span
-                              className={
-                                p.available === false
-                                  ? 'product-status draft-status'
-                                  : 'product-status published-status'
-                              }
+                    products
+                      .filter((p) => {
+                        if (productFilter === 'published') return p.available !== false;
+                        if (productFilter === 'drafts') return p.available === false;
+                        return true;
+                      })
+                      .map((p) => {
+                        const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
+                        return (
+                          <div className="manage-item" key={p.id}>
+                            <div className="manage-thumb">
+                              {firstImg ? <img src={firstImg} alt="" /> : '🧸'}
+                            </div>
+                            <div className="manage-item-text">
+                              <strong>{p.name}</strong>
+                              <span>
+                                {da(p.price)} · {p.category || 'Other'}
+                              </span>
+                              <span
+                                className={
+                                  p.available === false
+                                    ? 'product-status draft-status'
+                                    : 'product-status published-status'
+                                }
+                              >
+                                {p.available === false
+                                  ? 'Draft · hidden from customers'
+                                  : 'Published · visible to customers'}
+                              </span>
+                            </div>
+                            <button
+                              className="secondary-btn product-visibility-btn"
+                              onClick={() => void toggleProductVisibility(p)}
                             >
-                              {p.available === false
-                                ? 'Draft · hidden from customers'
-                                : 'Published · visible to customers'}
-                            </span>
+                              {p.available === false ? 'Publish' : 'Unpublish'}
+                            </button>
+                            <button
+                              className="icon-btn"
+                              aria-label={`Edit ${p.name}`}
+                              title="Edit toy details"
+                              onClick={() => startEditProduct(p)}
+                            >
+                              <Pencil size={16} />
+                            </button>
+                            <button
+                              className="icon-btn danger"
+                              aria-label={`Delete ${p.name}`}
+                              onClick={() => void deleteProduct(p.id)}
+                            >
+                              <Trash2 size={17} />
+                            </button>
                           </div>
-                          <button
-                            className="secondary-btn product-visibility-btn"
-                            onClick={() => void toggleProductVisibility(p)}
-                          >
-                            {p.available === false ? 'Publish' : 'Unpublish'}
-                          </button>
-                          <button
-                            className="icon-btn"
-                            aria-label={`Edit ${p.name}`}
-                            title="Edit toy details"
-                            onClick={() => startEditProduct(p)}
-                          >
-                            <Pencil size={16} />
-                          </button>
-                          <button
-                            className="icon-btn danger"
-                            aria-label={`Delete ${p.name}`}
-                            onClick={() => void deleteProduct(p.id)}
-                          >
-                            <Trash2 size={17} />
-                          </button>
-                        </div>
-                      );
-                    })
+                        );
+                      })
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* DRAFTS TAB - DEDICATED SEPARATE SECTION FOR DRAFT PRODUCTS */}
+            {ownerTab === 'drafts' && (
+              <div className="drafts-section">
+                <div className="drafts-section-header">
+                  <div>
+                    <span className="eyebrow">UNPUBLISHED ITEMS</span>
+                    <h2>Draft Products ({products.filter((p) => p.available === false).length})</h2>
+                    <p>
+                      These toys are saved as drafts and hidden from customers.
+                      You can review, edit details, or publish them to make them live in your shop.
+                    </p>
+                  </div>
+                  <button
+                    className="primary-btn"
+                    onClick={() => {
+                      setEditingProductId(null);
+                      setProductForm({ name: '', price: '', description: '', category: '' });
+                      setProductImages([]);
+                      setOwnerTab('products');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                  >
+                    + Add new toy
+                  </button>
+                </div>
+
+                {products.filter((p) => p.available === false).length === 0 ? (
+                  <div className="empty-state" style={{ margin: '20px 0' }}>
+                    <div className="empty-icon">📝</div>
+                    <h3>No products in draft</h3>
+                    <p>
+                      All your toys are currently live in the shop! When you create a toy and click
+                      &quot;Save as draft&quot; or unpublish a live toy, it will appear in this dedicated section.
+                    </p>
+                    <button
+                      className="secondary-btn"
+                      onClick={() => setOwnerTab('products')}
+                    >
+                      Go to Products
+                    </button>
+                  </div>
+                ) : (
+                  <div className="draft-products-grid">
+                    {products
+                      .filter((p) => p.available === false)
+                      .map((p) => {
+                        const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
+                        return (
+                          <div className="draft-card" key={p.id}>
+                            <div className="draft-card-image">
+                              {firstImg ? (
+                                <img src={firstImg} alt={p.name} />
+                              ) : (
+                                <span style={{ fontSize: '60px' }}>🧸</span>
+                              )}
+                              <span className="draft-badge-pill">Draft</span>
+                            </div>
+                            <div className="draft-card-content">
+                              <span className="draft-category">{p.category || 'Other'}</span>
+                              <h3>{p.name}</h3>
+                              {p.description && <p className="draft-desc">{p.description}</p>}
+                              <strong className="draft-price">{da(p.price)}</strong>
+                              <div className="draft-card-actions">
+                                <button
+                                  className="primary-btn publish-now-btn"
+                                  onClick={() => void toggleProductVisibility(p)}
+                                  title="Make this toy visible to all customers"
+                                >
+                                  Publish to shop
+                                </button>
+                                <button
+                                  className="secondary-btn"
+                                  onClick={() => {
+                                    startEditProduct(p);
+                                    setOwnerTab('products');
+                                  }}
+                                  title="Edit toy details"
+                                >
+                                  <Pencil size={15} /> Edit
+                                </button>
+                                <button
+                                  className="icon-btn danger"
+                                  onClick={() => void deleteProduct(p.id)}
+                                  title="Delete draft"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
               </div>
             )}
 
