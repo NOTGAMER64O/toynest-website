@@ -217,10 +217,10 @@ function verifyPin(pin: unknown): boolean {
   return p === DEFAULT_OWNER_PIN;
 }
 
-// Helper to compute queue positions
-function computeQueuePositions(orders: Order[]) {
+// Helper to compute queue positions accurately relative to all active orders
+function computeQueuePositions(orders: Order[], allOrders: Order[] = orders) {
   const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
-  const activeOrders = orders
+  const activeOrders = allOrders
     .filter((o) => activeStatuses.includes(o.status))
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
@@ -316,7 +316,8 @@ app.post('/api/orders', (req, res) => {
   db.orders.unshift(newOrder);
   saveDB(db);
 
-  res.json({ success: true, order: newOrder });
+  const [enrichedOrder] = computeQueuePositions([newOrder], db.orders);
+  res.json({ success: true, order: enrichedOrder || newOrder });
 });
 
 app.post('/api/orders/mine', (req, res) => {
@@ -327,7 +328,7 @@ app.post('/api/orders/mine', (req, res) => {
   }
 
   const userOrders = db.orders.filter((o) => o.customerId === customerId);
-  const enrichedOrders = computeQueuePositions(userOrders);
+  const enrichedOrders = computeQueuePositions(userOrders, db.orders);
   res.json({ orders: enrichedOrders });
 });
 

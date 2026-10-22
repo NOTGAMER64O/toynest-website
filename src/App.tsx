@@ -126,6 +126,30 @@ function saveStoredOrders(orders: Order[]) {
   } catch {}
 }
 
+function computeLocalQueuePositions(orders: Order[]): Order[] {
+  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+  const activeOrders = [...orders]
+    .filter((o) => activeStatuses.includes(o.status))
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  const positionMap = new Map<string, { queuePosition: number; peopleAhead: number }>();
+  activeOrders.forEach((o, idx) => {
+    positionMap.set(o.id, {
+      queuePosition: idx + 1,
+      peopleAhead: idx,
+    });
+  });
+
+  return orders.map((o) => {
+    const queueInfo = positionMap.get(o.id);
+    return {
+      ...o,
+      queuePosition: queueInfo ? queueInfo.queuePosition : null,
+      peopleAhead: queueInfo ? queueInfo.peopleAhead : 0,
+    };
+  });
+}
+
 export default function App() {
   const [page, setPage] = useState<'home' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
   const [products, setProducts] = useState<Product[]>([]);
@@ -417,7 +441,9 @@ export default function App() {
         return;
       }
     } catch {}
-    const localOrders = getStoredOrders().filter((o) => o.customerId === customerId);
+    const allStoredOrders = getStoredOrders();
+    const enrichedStored = computeLocalQueuePositions(allStoredOrders);
+    const localOrders = enrichedStored.filter((o) => o.customerId === customerId);
     setMyOrders(localOrders);
     setMyOrdersLoading(false);
   };
@@ -768,7 +794,9 @@ export default function App() {
         status: 'New',
         createdAt: new Date().toISOString(),
       };
-      saveStoredOrders([localOrder, ...getStoredOrders()]);
+      const allExisting = getStoredOrders();
+      const updatedList = computeLocalQueuePositions([localOrder, ...allExisting]);
+      saveStoredOrders(updatedList);
     } finally {
       setSuccessMessage('');
       setPage('myOrders');
@@ -1669,7 +1697,18 @@ export default function App() {
                       </div>
                     )}
 
-                    {o.queuePosition !== null && o.queuePosition !== undefined ? (
+                    {/* Status & Queue tracking */}
+                    {o.status === 'Cancelled' ? (
+                      <div className="queue-status order-cancelled-status">
+                        <strong>Order cancelled</strong>
+                        <p>This order has been cancelled and is no longer in the active queue.</p>
+                      </div>
+                    ) : o.status === 'Completed' ? (
+                      <div className="queue-status order-completed-status">
+                        <strong>Order completed! 🎉</strong>
+                        <p>Thank you for shopping with ToyNest!</p>
+                      </div>
+                    ) : o.queuePosition !== null && o.queuePosition !== undefined && o.queuePosition > 0 ? (
                       <div className="queue-status">
                         <strong>
                           {o.peopleAhead === 0
@@ -1684,9 +1723,27 @@ export default function App() {
                     ) : (
                       <div className="queue-status">
                         <strong>
-                          {o.status === 'Completed' ? 'Order completed!' : 'Order cancelled'}
+                          {o.status === 'New'
+                            ? 'Order received & pending'
+                            : o.status === 'Confirmed'
+                            ? 'Order confirmed'
+                            : o.status === 'Preparing'
+                            ? 'Preparing your toy'
+                            : o.status === 'Dispatched'
+                            ? 'Order dispatched'
+                            : `Status: ${o.status}`}
                         </strong>
-                        <p>This order is no longer in the active queue.</p>
+                        <p>
+                          {o.status === 'New'
+                            ? 'Your order has been placed successfully and is waiting for owner confirmation.'
+                            : o.status === 'Confirmed'
+                            ? 'Your order is confirmed and scheduled for preparation.'
+                            : o.status === 'Preparing'
+                            ? 'Your order is being assembled and packed.'
+                            : o.status === 'Dispatched'
+                            ? 'Your toy is on the way!'
+                            : 'Your order is active in the shop queue.'}
+                        </p>
                       </div>
                     )}
                   </article>

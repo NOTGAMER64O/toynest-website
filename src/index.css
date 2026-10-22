@@ -301,3 +301,53 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
 }
 
+/* Order Queue and Final Status Styles */
+.queue-status {
+  margin-top: 14px;
+  padding: 13px 15px;
+  border-radius: 11px;
+  background: #f4f5ec;
+  border: 1px solid #e7e9dc;
+}
+
+.queue-status strong {
+  display: block;
+  font-size: 13px;
+  color: #273123;
+  margin-bottom: 4px;
+}
+
+.queue-status p {
+  font-size: 12px;
+  color: #6c7566;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.queue-status.order-cancelled-status {
+  background: #fef2f2;
+  border-color: #fee2e2;
+}
+
+.queue-status.order-cancelled-status strong {
+  color: #991b1b;
+}
+
+.queue-status.order-cancelled-status p {
+  color: #b91c1c;
+}
+
+.queue-status.order-completed-status {
+  background: #f0fdf4;
+  border-color: #dcfce7;
+}
+
+.queue-status.order-completed-status strong {
+  color: #166534;
+}
+
+.queue-status.order-completed-status p {
+  color: #15803d;
+}
+
+
