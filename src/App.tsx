@@ -482,10 +482,9 @@ export default function App() {
     const normalizedEntered = enteredPin.toUpperCase();
     const storedPin = (localStorage.getItem('toynest_custom_owner_pin') || DEFAULT_OWNER_PIN).trim().toUpperCase();
 
-    // Directly allow configured PIN 'ANAND1904' (case-insensitive), '1234', or stored PIN
+    // Strictly only allow configured PIN 'ANAND1904' (case-insensitive) or stored PIN
     const isPinValid =
       normalizedEntered === DEFAULT_OWNER_PIN ||
-      normalizedEntered === '1234' ||
       normalizedEntered === storedPin;
 
     if (isPinValid) {
@@ -511,7 +510,7 @@ export default function App() {
       await loadOwnerProducts();
       await loadOwnerOrders();
     } catch {
-      setErrorMessage('Incorrect Owner PIN. Please enter the configured PIN (ANAND1904).');
+      setErrorMessage('Incorrect PIN. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -998,7 +997,7 @@ export default function App() {
             <ShieldCheck size={16} /> Owner
             {hasOwnerOrderNotification && (
               <span
-                className="notification-dot"
+                className="blinking-green-dot"
                 title={`${ownerNewOrdersCount} new order request(s)!`}
                 aria-label="New order notification"
               />
@@ -1044,19 +1043,6 @@ export default function App() {
                 }}
               >
                 <Boxes size={19} /> Home
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPage('home');
-                  setCheckoutMode(null);
-                  setIsSideMenuOpen(false);
-                  window.setTimeout(() => {
-                    document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' });
-                  }, 80);
-                }}
-              >
-                <ShoppingBag size={19} /> Explore toys
               </button>
               <button
                 type="button"
@@ -1119,7 +1105,10 @@ export default function App() {
                   <ShieldCheck size={19} /> Owner access
                 </span>
                 {hasOwnerOrderNotification && (
-                  <span className="notification-badge-pill">New order</span>
+                  <span
+                    className="blinking-green-dot-inline"
+                    title="New order request"
+                  />
                 )}
               </button>
             </div>
@@ -1851,7 +1840,7 @@ export default function App() {
                 Orders ({ownerOrders.length})
                 {hasOwnerOrderNotification && (
                   <span
-                    className="notification-dot"
+                    className="blinking-green-dot"
                     style={{ top: '6px', right: '8px' }}
                     title="New order request received!"
                   />

@@ -217,7 +217,7 @@ function verifyPin(pin: unknown): boolean {
   const p = String(pin).trim().toUpperCase();
   db = loadDB();
   const currentOwnerPin = (db.ownerPin || DEFAULT_OWNER_PIN).trim().toUpperCase();
-  return p === currentOwnerPin || p === 'ANAND1904' || p === '1234';
+  return p === currentOwnerPin || p === DEFAULT_OWNER_PIN;
 }
 
 // Helper to compute queue positions
