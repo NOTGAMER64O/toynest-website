@@ -121,52 +121,42 @@ export async function saveOrderToCloud(order: Order): Promise<void> {
   }
 }
 
+export async function fetchCustomerOrdersByIds(orderIds: string[]): Promise<Order[]> {
+  if (!orderIds || orderIds.length === 0) return [];
+  const results: Order[] = [];
+  await Promise.all(
+    orderIds.map(async (id) => {
+      try {
+        const snap = await getDoc(doc(db, 'orders', id));
+        if (snap.exists()) {
+          results.push(snap.data() as Order);
+        }
+      } catch {}
+    })
+  );
+  return results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
 export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<Order[]> {
-  const path = 'orders';
   try {
-    const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
-    const snapshot = await getDocs(q);
-    const userOrders: Order[] = [];
-    snapshot.forEach((d) => {
-      userOrders.push(d.data() as Order);
-    });
-
-    // Also fetch all active orders to compute queue accurately
-    const allSnapshot = await getDocs(collection(db, 'orders'));
-    const allOrders: Order[] = [];
-    allSnapshot.forEach((d) => {
-      allOrders.push(d.data() as Order);
-    });
-
-    const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
-    const active = allOrders
-      .filter((o) => activeStatuses.includes(o.status))
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-    const posMap = new Map<string, { queuePosition: number; peopleAhead: number }>();
-    active.forEach((o, idx) => {
-      posMap.set(o.id, { queuePosition: idx + 1, peopleAhead: idx });
-    });
-
-    return userOrders
-      .map((o) => {
-        const info = posMap.get(o.id);
-        return {
-          ...o,
-          queuePosition: info ? info.queuePosition : null,
-          peopleAhead: info ? info.peopleAhead : 0,
-        };
-      })
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+    if (auth.currentUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
+      const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
+      const snapshot = await getDocs(q);
+      const userOrders: Order[] = [];
+      snapshot.forEach((d) => {
+        userOrders.push(d.data() as Order);
+      });
+      return userOrders;
+    }
+  } catch {}
+  return [];
 }
 
 export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
-  const path = 'orders';
   try {
+    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
+      return [];
+    }
     const snapshot = await getDocs(collection(db, 'orders'));
     const orders: Order[] = [];
     snapshot.forEach((d) => {
@@ -177,29 +167,35 @@ export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
+    console.warn('Could not fetch cloud orders (permission or network):', error);
     return [];
   }
 }
 
 export function subscribeToAllOrders(callback: (orders: Order[]) => void): () => void {
-  const path = 'orders';
-  return onSnapshot(
-    collection(db, 'orders'),
-    (snapshot) => {
-      const orders: Order[] = [];
-      snapshot.forEach((d) => {
-        orders.push(d.data() as Order);
-      });
-      const enriched = computeQueue(orders).sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      );
-      callback(enriched);
-    },
-    (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+  try {
+    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
+      return () => {};
     }
-  );
+    return onSnapshot(
+      collection(db, 'orders'),
+      (snapshot) => {
+        const orders: Order[] = [];
+        snapshot.forEach((d) => {
+          orders.push(d.data() as Order);
+        });
+        const enriched = computeQueue(orders).sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        callback(enriched);
+      },
+      (error) => {
+        console.warn('Order subscription error:', error);
+      }
+    );
+  } catch {
+    return () => {};
+  }
 }
 
 export async function updateOrderStatusInCloud(orderId: string, updates: Partial<Order>): Promise<void> {
@@ -234,8 +230,10 @@ export async function saveSuggestionToCloud(suggestion: Suggestion): Promise<voi
 }
 
 export async function fetchSuggestionsFromCloud(): Promise<Suggestion[]> {
-  const path = 'suggestions';
   try {
+    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
+      return [];
+    }
     const snapshot = await getDocs(collection(db, 'suggestions'));
     const list: Suggestion[] = [];
     snapshot.forEach((d) => {
@@ -243,7 +241,7 @@ export async function fetchSuggestionsFromCloud(): Promise<Suggestion[]> {
     });
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
+    console.warn('Could not fetch suggestions:', error);
     return [];
   }
 }
@@ -259,7 +257,6 @@ export async function deleteSuggestionFromCloud(id: string): Promise<void> {
 
 // ----------------- PRODUCTS -----------------
 export async function fetchProductsFromCloud(): Promise<Product[]> {
-  const path = 'products';
   try {
     const snapshot = await getDocs(collection(db, 'products'));
     const list: Product[] = [];
@@ -267,15 +264,10 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
       list.push(d.data() as Product);
     });
     if (list.length === 0) {
-      // Seed default products to cloud
-      for (const p of DEFAULT_PRODUCTS) {
-        await setDoc(doc(db, 'products', p.id), p);
-      }
       return DEFAULT_PRODUCTS;
     }
     return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
     return DEFAULT_PRODUCTS;
   }
 }
@@ -324,4 +316,36 @@ export async function saveSettingsToCloud(updates: { adultPublished?: boolean; c
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
+}
+
+// ----------------- ADMIN AUTHENTICATION -----------------
+export async function signInAdminWithGoogle(): Promise<{ success: boolean; email?: string | null; error?: string }> {
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    if (cred.user.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
+      await signOut(auth);
+      return {
+        success: false,
+        error: 'Access denied: Only the authorized owner (sanyukta.mehtaa@gmail.com) can access this workspace.',
+      };
+    }
+    return { success: true, email: cred.user.email };
+  } catch (err: any) {
+    if (err.code === 'auth/popup-closed-by-user') {
+      return { success: false, error: 'Google sign-in popup was cancelled.' };
+    }
+    if (err.code === 'auth/operation-not-allowed') {
+      return {
+        success: false,
+        error: 'Google Sign-in is not yet enabled in the Firebase Console. You can still log in using your Owner PIN.',
+      };
+    }
+    return { success: false, error: err.message || 'Could not sign in with Google.' };
+  }
+}
+
+export async function signOutAdmin(): Promise<void> {
+  try {
+    await signOut(auth);
+  } catch {}
 }

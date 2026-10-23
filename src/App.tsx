@@ -92,6 +92,7 @@ const api = {
   },
 };
 
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   DEFAULT_PRODUCTS,
   DEFAULT_OWNER_PIN,
@@ -100,7 +101,11 @@ import {
   type Suggestion,
 } from './defaultData';
 import {
+  auth,
+  signInAdminWithGoogle,
+  signOutAdmin,
   saveOrderToCloud,
+  fetchCustomerOrdersByIds,
   fetchCustomerOrdersFromCloud,
   fetchAllOrdersFromCloud,
   subscribeToAllOrders,
@@ -227,6 +232,14 @@ export default function App() {
   const [hasStatusUpdateNotification, setHasStatusUpdateNotification] = useState<boolean>(false);
   const [hasOwnerOrderNotification, setHasOwnerOrderNotification] = useState<boolean>(false);
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
+  const [adminUser, setAdminUser] = useState<User | null>(null);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setAdminUser(user);
+    });
+    return () => unsub();
+  }, []);
 
   const shareShop = async () => {
     const url = 'https://toynest-website.vercel.app/';
@@ -481,23 +494,16 @@ export default function App() {
 
   const checkOrderUpdates = async () => {
     if (!customerId) return;
-    let orders: Order[] = [];
+    const stored = getStoredOrders().filter((o) => o.customerId === customerId);
+    if (stored.length === 0) return;
+    const storedIds = stored.map((o) => o.id);
+    let orders: Order[] = stored;
     try {
-      orders = await fetchCustomerOrdersFromCloud(customerId);
+      const cloudOrders = await fetchCustomerOrdersByIds(storedIds);
+      if (cloudOrders.length > 0) {
+        orders = cloudOrders;
+      }
     } catch {}
-
-    if (orders.length === 0) {
-      try {
-        const res = await api.post('/api/orders/mine', { customerId });
-        if (res.data?.orders && Array.isArray(res.data.orders)) {
-          orders = res.data.orders;
-        }
-      } catch {}
-    }
-
-    if (orders.length === 0) {
-      orders = getStoredOrders().filter((o) => o.customerId === customerId);
-    }
 
     const seen = getSeenOrderStatuses();
     const hasUnseenStatus = orders.some((o) => seen[o.id] !== o.status);
@@ -505,16 +511,19 @@ export default function App() {
   };
 
   const checkOwnerOrderUpdates = async () => {
-    try {
-      const cloudOrders = await fetchAllOrdersFromCloud();
-      if (cloudOrders && cloudOrders.length > 0) {
-        const seenIds = new Set(getSeenOwnerOrderIds());
-        const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
-        setOwnerNewOrdersCount(unseenNewOrders.length);
-        setHasOwnerOrderNotification(unseenNewOrders.length > 0);
-        return;
-      }
-    } catch {}
+    // Only query Firestore collection if admin is authenticated
+    if (adminUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
+      try {
+        const cloudOrders = await fetchAllOrdersFromCloud();
+        if (cloudOrders && cloudOrders.length > 0) {
+          const seenIds = new Set(getSeenOwnerOrderIds());
+          const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
+          setOwnerNewOrdersCount(unseenNewOrders.length);
+          setHasOwnerOrderNotification(unseenNewOrders.length > 0);
+          return;
+        }
+      } catch {}
+    }
 
     try {
       const res = await api.get('/api/orders/pending-summary');
@@ -554,11 +563,11 @@ export default function App() {
       clearInterval(interval);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [customerId]);
+  }, [customerId, adminUser]);
 
-  // Real-time Firestore sync when owner dashboard is active
+  // Real-time Firestore sync when owner dashboard is active and authenticated
   useEffect(() => {
-    if (page === 'owner') {
+    if (page === 'owner' && adminUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
       const unsubscribe = subscribeToAllOrders((liveOrders) => {
         if (liveOrders && liveOrders.length > 0) {
           setOwnerOrders(liveOrders);
@@ -567,25 +576,35 @@ export default function App() {
       });
       return () => unsubscribe();
     }
-  }, [page]);
+  }, [page, adminUser]);
 
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
     setMyOrdersError('');
     try {
       await loadPaymentQr();
-      const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
-      if (cloudOrders && cloudOrders.length > 0) {
-        setMyOrders(cloudOrders);
-        saveStoredOrders(cloudOrders);
-        const seen = getSeenOrderStatuses();
-        cloudOrders.forEach((o) => {
-          seen[o.id] = o.status;
-        });
-        saveSeenOrderStatuses(seen);
-        setHasStatusUpdateNotification(false);
-        setMyOrdersLoading(false);
-        return;
+      const storedOrders = getStoredOrders().filter((o) => o.customerId === customerId);
+      const storedIds = storedOrders.map((o) => o.id);
+      
+      // Look up specific customer order documents by ID from Cloud Firestore
+      if (storedIds.length > 0) {
+        const cloudUpdates = await fetchCustomerOrdersByIds(storedIds);
+        if (cloudUpdates.length > 0) {
+          const cloudMap = new Map(cloudUpdates.map((o) => [o.id, o]));
+          const merged = storedOrders.map((o) => cloudMap.get(o.id) || o);
+          const allStored = getStoredOrders().map((o) => cloudMap.get(o.id) || o);
+          saveStoredOrders(allStored);
+          const enriched = computeLocalQueuePositions(merged);
+          setMyOrders(enriched);
+          const seen = getSeenOrderStatuses();
+          enriched.forEach((o) => {
+            seen[o.id] = o.status;
+          });
+          saveSeenOrderStatuses(seen);
+          setHasStatusUpdateNotification(false);
+          setMyOrdersLoading(false);
+          return;
+        }
       }
     } catch {}
 
@@ -713,6 +732,33 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleGoogleAdminLogin = async () => {
+    setLoading(true);
+    setErrorMessage('');
+    try {
+      const res = await signInAdminWithGoogle();
+      if (!res.success) {
+        setErrorMessage(res.error || 'Google sign in was not completed.');
+      } else {
+        setErrorMessage('');
+        setPage('owner');
+        setOwnerTab('products');
+        loadOwnerProducts().catch(() => {});
+        loadOwnerOrders().catch(() => {});
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Google sign-in error.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExitOwner = async () => {
+    setPage('home');
+    setOwnerPin('');
+    await signOutAdmin();
   };
 
   const handleProductSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -2025,9 +2071,47 @@ export default function App() {
               <div className="login-icon">
                 <ShieldCheck size={26} />
               </div>
-              <span className="eyebrow">PRIVATE AREA</span>
+              <span className="eyebrow">SECURE OWNER ACCESS</span>
               <h1>Welcome, owner.</h1>
-              <p>Enter your owner PIN to manage toys and customer orders.</p>
+              <p>Sign in with your verified owner account or enter your owner PIN.</p>
+
+              {adminUser && adminUser.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com' ? (
+                <div style={{ marginBottom: '1.25rem', padding: '1rem', background: '#ecfdf5', borderRadius: '8px', border: '1px solid #a7f3d0' }}>
+                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem', color: '#065f46', fontWeight: 600 }}>
+                    ✓ Authenticated as {adminUser.email}
+                  </p>
+                  <button
+                    type="button"
+                    className="primary-btn full-btn"
+                    onClick={() => {
+                      setPage('owner');
+                      setOwnerTab('products');
+                      loadOwnerProducts().catch(() => {});
+                      loadOwnerOrders().catch(() => {});
+                    }}
+                  >
+                    Enter dashboard as owner <ArrowLeft size={16} />
+                  </button>
+                </div>
+              ) : (
+                <div style={{ marginBottom: '1.25rem' }}>
+                  <button
+                    type="button"
+                    className="secondary-btn full-btn"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', marginBottom: '1rem' }}
+                    onClick={handleGoogleAdminLogin}
+                    disabled={loading}
+                  >
+                    <ShieldCheck size={18} /> Sign in with Google (Owner)
+                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '1rem 0', color: '#6b7280', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    <div style={{ flex: 1, height: '1px', background: '#e5e7eb' }} />
+                    <span>OR ENTER OWNER PIN</span>
+                    <div style={{ flex: 1, height: '1px', background: '#e5e7eb' }} />
+                  </div>
+                </div>
+              )}
+
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -2070,7 +2154,14 @@ export default function App() {
               <div>
                 <span className="eyebrow">OWNER WORKSPACE</span>
                 <h1>Your dashboard.</h1>
-                <p>Manage the toy shelf and keep track of orders.</p>
+                <p>
+                  Manage the toy shelf and keep track of orders.
+                  {adminUser?.email && (
+                    <span style={{ display: 'inline-block', marginLeft: '8px', padding: '2px 8px', fontSize: '0.75rem', background: '#dcfce7', color: '#166534', borderRadius: '4px', fontWeight: 600 }}>
+                      Verified Admin ({adminUser.email})
+                    </span>
+                  )}
+                </p>
               </div>
               <div className="dashboard-heading-actions">
                 <button
@@ -2083,10 +2174,7 @@ export default function App() {
                 </button>
                 <button
                   className="secondary-btn"
-                  onClick={() => {
-                    setPage('home');
-                    setOwnerPin('');
-                  }}
+                  onClick={() => void handleExitOwner()}
                 >
                   Exit owner area
                 </button>

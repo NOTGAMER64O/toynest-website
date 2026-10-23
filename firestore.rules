@@ -14,9 +14,11 @@ service cloud.firestore {
       );
     }
 
-    // Orders Collection
+    // Orders Collection:
+    // Anyone can create their own order with valid schema fields.
+    // Customers can look up their own specific order by ID (get).
+    // Listing all orders, updating statuses, or deleting orders is strictly restricted to authorized administrators.
     match /orders/{orderId} {
-      // Anyone can create an order with valid fields
       allow create: if isValidId(orderId)
         && request.resource.data.id is string
         && request.resource.data.orderNumber is string
@@ -28,40 +30,46 @@ service cloud.firestore {
         && request.resource.data.price >= 0
         && request.resource.data.status is string;
 
-      // Read: allowed if customer queries their own orders or is owner/admin
-      allow read: if true;
+      // Specific order document retrieval by ID
+      allow get: if isOwnerAdmin() || (resource.data.customerId != null);
 
-      // Update: allowed for status changes, recipient details, and notes
-      allow update: if isValidId(orderId)
-        && request.resource.data.price is number
-        && request.resource.data.status is string;
+      // Listing all customer orders is strictly restricted to authorized administrators
+      allow list: if isOwnerAdmin();
 
-      // Delete: allowed for completed/cancelled orders
-      allow delete: if isValidId(orderId);
+      // Modifying or deleting customer orders is strictly restricted to authorized administrators
+      allow update, delete: if isOwnerAdmin();
     }
 
-    // Products Collection
+    // Products Collection:
+    // Product catalog is readable by all visitors.
+    // Products can only be created, modified, or deleted by authorized administrators.
     match /products/{productId} {
       allow read: if true;
-      allow write: if isValidId(productId)
-        && request.resource.data.name is string
-        && request.resource.data.price is number;
-      allow delete: if isValidId(productId);
+      allow write, delete: if isOwnerAdmin();
     }
 
-    // Suggestions Collection
+    // Suggestions Collection:
+    // Customers can submit suggestions.
+    // Only authorized administrators can view or delete suggestions.
     match /suggestions/{suggestionId} {
       allow create: if isValidId(suggestionId)
         && request.resource.data.suggestion is string
         && request.resource.data.suggestion.size() <= 2000;
-      allow read: if true;
-      allow delete: if isValidId(suggestionId);
+      allow read, delete: if isOwnerAdmin();
     }
 
-    // Settings Collection
+    // Settings Collection:
+    // Settings (payment QR, store modes) are readable by all visitors.
+    // Only authorized administrators can modify settings.
     match /settings/{settingId} {
       allow read: if true;
-      allow write: if isValidId(settingId);
+      allow write: if isOwnerAdmin();
+    }
+
+    // Admins Collection:
+    // Internal admin roles, readable and writable only by authorized administrators.
+    match /admins/{adminId} {
+      allow read, write: if isOwnerAdmin();
     }
   }
 }
