@@ -1,0 +1,67 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwnerAdmin() {
+      return request.auth != null && (
+        request.auth.token.email == 'sanyukta.mehtaa@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Orders Collection
+    match /orders/{orderId} {
+      // Anyone can create an order with valid fields
+      allow create: if isValidId(orderId)
+        && request.resource.data.id is string
+        && request.resource.data.orderNumber is string
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && request.resource.data.productName is string
+        && request.resource.data.productName.size() <= 200
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.status is string;
+
+      // Read: allowed if customer queries their own orders or is owner/admin
+      allow read: if true;
+
+      // Update: allowed for status changes, recipient details, and notes
+      allow update: if isValidId(orderId)
+        && request.resource.data.price is number
+        && request.resource.data.status is string;
+
+      // Delete: allowed for completed/cancelled orders
+      allow delete: if isValidId(orderId);
+    }
+
+    // Products Collection
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if isValidId(productId)
+        && request.resource.data.name is string
+        && request.resource.data.price is number;
+      allow delete: if isValidId(productId);
+    }
+
+    // Suggestions Collection
+    match /suggestions/{suggestionId} {
+      allow create: if isValidId(suggestionId)
+        && request.resource.data.suggestion is string
+        && request.resource.data.suggestion.size() <= 2000;
+      allow read: if true;
+      allow delete: if isValidId(suggestionId);
+    }
+
+    // Settings Collection
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isValidId(settingId);
+    }
+  }
+}

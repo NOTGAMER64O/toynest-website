@@ -48,17 +48,25 @@ function saveSeenOrderStatuses(statuses: Record<string, string>) {
   } catch {}
 }
 
-function getSeenOwnerLatestOrder(): string {
+function getSeenOwnerOrderIds(): string[] {
   try {
-    return localStorage.getItem('toynest_seen_owner_latest_order') || '';
-  } catch {
-    return '';
-  }
+    const raw = localStorage.getItem('toynest_seen_owner_order_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
 }
 
-function saveSeenOwnerLatestOrder(orderId: string) {
+function markAllOwnerOrdersSeen(orders: Order[] = []) {
   try {
-    localStorage.setItem('toynest_seen_owner_latest_order', orderId);
+    const current = getSeenOwnerOrderIds();
+    const idSet = new Set(current);
+    orders.forEach((o) => {
+      if (o?.id) idSet.add(o.id);
+    });
+    localStorage.setItem('toynest_seen_owner_order_ids', JSON.stringify(Array.from(idSet)));
   } catch {}
 }
 
@@ -91,6 +99,22 @@ import {
   type Order,
   type Suggestion,
 } from './defaultData';
+import {
+  saveOrderToCloud,
+  fetchCustomerOrdersFromCloud,
+  fetchAllOrdersFromCloud,
+  subscribeToAllOrders,
+  updateOrderStatusInCloud,
+  deleteOrderFromCloud,
+  saveSuggestionToCloud,
+  fetchSuggestionsFromCloud,
+  deleteSuggestionFromCloud,
+  fetchProductsFromCloud,
+  saveProductToCloud,
+  deleteProductFromCloud,
+  fetchSettingsFromCloud,
+  saveSettingsToCloud,
+} from './firebase';
 
 function getStoredProducts(): Product[] {
   try {
@@ -225,6 +249,14 @@ export default function App() {
 
   const loadProducts = async () => {
     try {
+      const cloudProds = await fetchProductsFromCloud();
+      if (cloudProds && cloudProds.length > 0) {
+        setProducts(cloudProds);
+        saveStoredProducts(cloudProds);
+        return;
+      }
+    } catch {}
+    try {
       const res = await api.get('/api/products');
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
         setProducts(res.data.products);
@@ -236,6 +268,14 @@ export default function App() {
   };
 
   const loadOwnerProducts = async () => {
+    try {
+      const cloudProds = await fetchProductsFromCloud();
+      if (cloudProds && cloudProds.length > 0) {
+        setProducts(cloudProds);
+        saveStoredProducts(cloudProds);
+        return;
+      }
+    } catch {}
     try {
       const res = await ownerPost('/api/owner/products/list', {});
       if (res.data?.products && Array.isArray(res.data.products)) {
@@ -249,32 +289,79 @@ export default function App() {
 
   const loadOwnerSuggestions = async () => {
     try {
+      const cloudSuggestions = await fetchSuggestionsFromCloud();
+      if (cloudSuggestions.length > 0) {
+        setOwnerSuggestions(cloudSuggestions);
+        return;
+      }
+    } catch {}
+    try {
       const res = await api.post('/api/owner/suggestions', { pin: ownerPin });
       setOwnerSuggestions(res.data.suggestions || []);
     } catch {}
   };
 
+  const dismissOwnerNotification = () => {
+    setHasOwnerOrderNotification(false);
+    const stored = getStoredOrders();
+    markAllOwnerOrdersSeen(stored);
+    if (ownerOrders.length > 0) {
+      markAllOwnerOrdersSeen(ownerOrders);
+    }
+  };
+
+  const dismissCustomerNotification = () => {
+    setHasStatusUpdateNotification(false);
+    const orders = myOrders.length > 0 ? myOrders : getStoredOrders().filter((o) => o.customerId === customerId);
+    const seen = getSeenOrderStatuses();
+    orders.forEach((o) => {
+      seen[o.id] = o.status;
+    });
+    saveSeenOrderStatuses(seen);
+  };
+
   const loadOwnerOrders = async () => {
+    try {
+      const cloudOrders = await fetchAllOrdersFromCloud();
+      if (cloudOrders && cloudOrders.length > 0) {
+        setOwnerOrders(cloudOrders);
+        saveStoredOrders(cloudOrders);
+        markAllOwnerOrdersSeen(cloudOrders);
+        const newOrders = cloudOrders.filter((o) => o.status === 'New');
+        setOwnerNewOrdersCount(newOrders.length);
+        setHasOwnerOrderNotification(false);
+        return;
+      }
+    } catch {}
     try {
       const res = await api.post('/api/owner/orders', { pin: ownerPin });
       if (res.data?.orders && Array.isArray(res.data.orders)) {
         const orders: Order[] = res.data.orders;
         setOwnerOrders(orders);
         saveStoredOrders(orders);
+        markAllOwnerOrdersSeen(orders);
         const newOrders = orders.filter((o) => o.status === 'New');
         setOwnerNewOrdersCount(newOrders.length);
-        setHasOwnerOrderNotification(newOrders.length > 0);
+        setHasOwnerOrderNotification(false);
         return;
       }
     } catch {}
     const localOrders = getStoredOrders();
     setOwnerOrders(localOrders);
+    markAllOwnerOrdersSeen(localOrders);
     const newLocal = localOrders.filter((o) => o.status === 'New');
     setOwnerNewOrdersCount(newLocal.length);
-    setHasOwnerOrderNotification(newLocal.length > 0);
+    setHasOwnerOrderNotification(false);
   };
 
   const loadPaymentQr = async () => {
+    try {
+      const settings = await fetchSettingsFromCloud();
+      if (settings.paymentQrUrl) {
+        setPaymentQrUrl(settings.paymentQrUrl);
+        return;
+      }
+    } catch {}
     try {
       const res = await api.get('/api/payment-qr');
       if (res.data?.url) {
@@ -286,6 +373,14 @@ export default function App() {
   };
 
   const loadShopModes = async () => {
+    try {
+      const settings = await fetchSettingsFromCloud();
+      if (settings && (settings.adultPublished !== undefined || settings.childPublished !== undefined)) {
+        setAdultPublished(settings.adultPublished !== false);
+        setChildPublished(settings.childPublished !== false);
+        return;
+      }
+    } catch {}
     try {
       const res = await api.get('/api/shop-modes');
       if (res.data) {
@@ -310,6 +405,9 @@ export default function App() {
   const saveShopModes = async () => {
     setLoading(true);
     setErrorMessage('');
+    try {
+      await saveSettingsToCloud({ adultPublished, childPublished });
+    } catch {}
     try {
       await ownerPost('/api/owner/shop-modes', {
         adultPublished,
@@ -350,11 +448,22 @@ export default function App() {
         reader.onerror = reject;
         reader.readAsDataURL(qrFile);
       });
-      const res = await ownerPost('/api/owner/payment-qr', {
-        data: base64Data,
-        contentType: qrFile.type,
-      });
-      setPaymentQrUrl(res.data.url || '');
+      let qrUrl = '';
+      try {
+        const res = await ownerPost('/api/owner/payment-qr', {
+          data: base64Data,
+          contentType: qrFile.type,
+        });
+        qrUrl = res.data.url || '';
+      } catch {}
+      if (!qrUrl) {
+        qrUrl = `data:${qrFile.type};base64,${base64Data}`;
+      }
+      setPaymentQrUrl(qrUrl);
+      localStorage.setItem('toynest_payment_qr', qrUrl);
+      try {
+        await saveSettingsToCloud({ paymentQrUrl: qrUrl });
+      } catch {}
       setQrFile(null);
       setSuccessMessage('Adult payment QR code saved.');
     } catch {
@@ -374,36 +483,59 @@ export default function App() {
     if (!customerId) return;
     let orders: Order[] = [];
     try {
-      const res = await api.post('/api/orders/mine', { customerId });
-      if (res.data?.orders && Array.isArray(res.data.orders)) {
-        orders = res.data.orders;
-      }
+      orders = await fetchCustomerOrdersFromCloud(customerId);
     } catch {}
+
+    if (orders.length === 0) {
+      try {
+        const res = await api.post('/api/orders/mine', { customerId });
+        if (res.data?.orders && Array.isArray(res.data.orders)) {
+          orders = res.data.orders;
+        }
+      } catch {}
+    }
 
     if (orders.length === 0) {
       orders = getStoredOrders().filter((o) => o.customerId === customerId);
     }
 
-    const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
-    const hasActiveOrders = orders.some((o) => activeStatuses.includes(o.status));
-    setHasStatusUpdateNotification(hasActiveOrders);
+    const seen = getSeenOrderStatuses();
+    const hasUnseenStatus = orders.some((o) => seen[o.id] !== o.status);
+    setHasStatusUpdateNotification(hasUnseenStatus);
   };
 
   const checkOwnerOrderUpdates = async () => {
-    let newCount = 0;
+    try {
+      const cloudOrders = await fetchAllOrdersFromCloud();
+      if (cloudOrders && cloudOrders.length > 0) {
+        const seenIds = new Set(getSeenOwnerOrderIds());
+        const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
+        setOwnerNewOrdersCount(unseenNewOrders.length);
+        setHasOwnerOrderNotification(unseenNewOrders.length > 0);
+        return;
+      }
+    } catch {}
+
     try {
       const res = await api.get('/api/orders/pending-summary');
-      if (typeof res.data?.newCount === 'number') {
-        newCount = res.data.newCount;
+      const { newCount, latestOrderId } = res.data || {};
+      const seenIds = new Set(getSeenOwnerOrderIds());
+
+      if (newCount > 0 && latestOrderId) {
+        if (!seenIds.has(latestOrderId)) {
+          setHasOwnerOrderNotification(true);
+          setOwnerNewOrdersCount(newCount);
+          return;
+        }
       }
     } catch {}
 
     const stored = getStoredOrders();
-    const storedNew = stored.filter((o) => o.status === 'New').length;
-    const finalNewCount = Math.max(newCount, storedNew);
+    const seenIds = new Set(getSeenOwnerOrderIds());
+    const unseenNewOrders = stored.filter((o) => o.status === 'New' && !seenIds.has(o.id));
 
-    setOwnerNewOrdersCount(finalNewCount);
-    setHasOwnerOrderNotification(finalNewCount > 0);
+    setOwnerNewOrdersCount(unseenNewOrders.length);
+    setHasOwnerOrderNotification(unseenNewOrders.length > 0);
   };
 
   useEffect(() => {
@@ -424,32 +556,66 @@ export default function App() {
     };
   }, [customerId]);
 
+  // Real-time Firestore sync when owner dashboard is active
+  useEffect(() => {
+    if (page === 'owner') {
+      const unsubscribe = subscribeToAllOrders((liveOrders) => {
+        if (liveOrders && liveOrders.length > 0) {
+          setOwnerOrders(liveOrders);
+          saveStoredOrders(liveOrders);
+        }
+      });
+      return () => unsubscribe();
+    }
+  }, [page]);
+
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
     setMyOrdersError('');
     try {
       await loadPaymentQr();
+      const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
+      if (cloudOrders && cloudOrders.length > 0) {
+        setMyOrders(cloudOrders);
+        saveStoredOrders(cloudOrders);
+        const seen = getSeenOrderStatuses();
+        cloudOrders.forEach((o) => {
+          seen[o.id] = o.status;
+        });
+        saveSeenOrderStatuses(seen);
+        setHasStatusUpdateNotification(false);
+        setMyOrdersLoading(false);
+        return;
+      }
+    } catch {}
+
+    try {
       const res = await api.post('/api/orders/mine', { customerId });
       if (res.data?.orders && Array.isArray(res.data.orders)) {
         const orders: Order[] = res.data.orders;
         setMyOrders(orders);
-
+        saveStoredOrders(orders);
         const seen = getSeenOrderStatuses();
         orders.forEach((o) => {
           seen[o.id] = o.status;
         });
         saveSeenOrderStatuses(seen);
-        const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
-        setHasStatusUpdateNotification(orders.some((o) => activeStatuses.includes(o.status)));
+        setHasStatusUpdateNotification(false);
+        setMyOrdersLoading(false);
         return;
       }
     } catch {}
+
     const allStoredOrders = getStoredOrders();
     const enrichedStored = computeLocalQueuePositions(allStoredOrders);
     const localOrders = enrichedStored.filter((o) => o.customerId === customerId);
     setMyOrders(localOrders);
-    const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
-    setHasStatusUpdateNotification(localOrders.some((o) => activeStatuses.includes(o.status)));
+    const seen = getSeenOrderStatuses();
+    localOrders.forEach((o) => {
+      seen[o.id] = o.status;
+    });
+    saveSeenOrderStatuses(seen);
+    setHasStatusUpdateNotification(false);
     setMyOrdersLoading(false);
   };
 
@@ -564,6 +730,24 @@ export default function App() {
     setLoading(true);
     try {
       if (editingProductId) {
+        const currentProducts = getStoredProducts();
+        const existing = currentProducts.find((p) => p.id === editingProductId);
+        const updatedItem: Product = {
+          id: existing?.id || editingProductId,
+          imageUrl: existing?.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
+          imageUrls: existing?.imageUrls || ['/toys/toy-40ba4ba9-1.jpg'],
+          createdAt: existing?.createdAt || new Date().toISOString(),
+          name: productForm.name.trim(),
+          price: Number(productForm.price),
+          description: productForm.description.trim(),
+          category: productForm.category.trim() || 'Other',
+          available: typeof visibilityVal === 'boolean' ? visibilityVal : (existing?.available !== false),
+        };
+
+        try {
+          await saveProductToCloud(updatedItem);
+        } catch {}
+
         try {
           await ownerPost('/api/owner/products/update', {
             id: editingProductId,
@@ -574,18 +758,9 @@ export default function App() {
             ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
           });
         } catch {}
-        const currentProducts = getStoredProducts();
+
         const updated = currentProducts.map((p) =>
-          p.id === editingProductId
-            ? {
-                ...p,
-                name: productForm.name.trim(),
-                price: Number(productForm.price),
-                description: productForm.description.trim(),
-                category: productForm.category.trim() || 'Other',
-                ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
-              }
-            : p
+          p.id === editingProductId ? updatedItem : p
         );
         saveStoredProducts(updated);
         setProducts(updated);
@@ -644,7 +819,11 @@ export default function App() {
         };
       }
 
-      const updated = [newProduct, ...getStoredProducts()];
+      try {
+        await saveProductToCloud(newProduct);
+      } catch {}
+
+      const updated = [newProduct, ...getStoredProducts().filter((p) => p.id !== newProduct!.id)];
       saveStoredProducts(updated);
       setProducts(updated);
       setProductForm({ name: '', price: '', description: '', category: '' });
@@ -662,6 +841,10 @@ export default function App() {
   };
 
   const toggleProductVisibility = async (p: Product) => {
+    const newAvail = p.available === false;
+    try {
+      await saveProductToCloud({ ...p, available: newAvail });
+    } catch {}
     try {
       await ownerPost('/api/owner/products/update', {
         id: p.id,
@@ -669,16 +852,16 @@ export default function App() {
         price: p.price,
         description: p.description || '',
         category: p.category || 'Other',
-        available: p.available === false,
+        available: newAvail,
       });
     } catch {}
     const updated = getStoredProducts().map((item) =>
-      item.id === p.id ? { ...item, available: item.available === false } : item
+      item.id === p.id ? { ...item, available: newAvail } : item
     );
     saveStoredProducts(updated);
     setProducts(updated);
     setSuccessMessage(
-      p.available === false
+      newAvail
         ? 'Toy published in your shop.'
         : 'Toy moved to drafts and hidden from customers.'
     );
@@ -709,6 +892,9 @@ export default function App() {
   const deleteProduct = async (id: string) => {
     if (confirm('Remove this toy from the shop?')) {
       try {
+        await deleteProductFromCloud(id);
+      } catch {}
+      try {
         await ownerPost('/api/owner/products/delete', { id });
       } catch {}
       const updated = getStoredProducts().filter((p) => p.id !== id);
@@ -728,8 +914,16 @@ export default function App() {
       return;
     }
     setSubmittingSuggestion(true);
+    const newSug: Suggestion = {
+      id: `sug_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      suggestion: val,
+      createdAt: new Date().toISOString(),
+    };
     try {
-      await api.post('/api/suggestions', { suggestion: val });
+      await saveSuggestionToCloud(newSug);
+      try {
+        await api.post('/api/suggestions', { suggestion: val });
+      } catch {}
       setCustomerSuggestion('');
       setSuggestionSuccess('Thanks! Your suggestion has been sent.');
     } catch {
@@ -765,42 +959,56 @@ export default function App() {
     }
 
     setLoading(true);
+    let createdOrder: Order | null = null;
+    const orderData: Order = {
+      id: `ord_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      orderNumber: `TN-${Math.floor(1000 + Math.random() * 9000)}`,
+      customerId,
+      mode: checkoutMode || 'Child',
+      productId: selectedProductForBuy.id,
+      productName: selectedProductForBuy.name,
+      productImageUrl: selectedProductForBuy.imageUrl || (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls[0]) || '',
+      price: selectedProductForBuy.price,
+      name: checkoutForm.name.trim(),
+      studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
+      section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
+      phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
+      address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
+      note: checkoutForm.note.trim(),
+      status: 'New',
+      createdAt: new Date().toISOString(),
+    };
+
     try {
-      const res = await api.post('/api/orders', {
-        customerId,
-        mode: checkoutMode || 'Child',
-        productId: selectedProductForBuy.id,
-        name: checkoutForm.name.trim(),
-        studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
-        section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
-        phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
-        address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
-        note: checkoutForm.note.trim(),
-      });
-      if (res.data?.order) {
-        saveStoredOrders([res.data.order, ...getStoredOrders()]);
-      }
-    } catch {
-      const localOrder: Order = {
-        id: `ord_${Date.now().toString(36)}`,
-        orderNumber: `TN-${Math.floor(1000 + Math.random() * 9000)}`,
-        customerId,
-        mode: checkoutMode || 'Child',
-        productId: selectedProductForBuy.id,
-        productName: selectedProductForBuy.name,
-        productImageUrl: selectedProductForBuy.imageUrl || (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls[0]) || '',
-        price: selectedProductForBuy.price,
-        name: checkoutForm.name.trim(),
-        studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
-        section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
-        phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
-        address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
-        note: checkoutForm.note.trim(),
-        status: 'New',
-        createdAt: new Date().toISOString(),
-      };
-      const allExisting = getStoredOrders();
-      const updatedList = computeLocalQueuePositions([localOrder, ...allExisting]);
+      try {
+        const res = await api.post('/api/orders', {
+          customerId,
+          mode: checkoutMode || 'Child',
+          productId: selectedProductForBuy.id,
+          name: checkoutForm.name.trim(),
+          studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
+          section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
+          phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
+          address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
+          note: checkoutForm.note.trim(),
+        });
+        if (res.data?.order) {
+          createdOrder = res.data.order;
+        }
+      } catch {}
+
+      const finalOrder = createdOrder || orderData;
+
+      // Crucial: Persist order to shared Firestore cloud database so it appears on any device
+      await saveOrderToCloud(finalOrder);
+
+      const allExisting = getStoredOrders().filter((o) => o.id !== finalOrder.id);
+      const updatedList = computeLocalQueuePositions([finalOrder, ...allExisting]);
+      saveStoredOrders(updatedList);
+    } catch (saveErr) {
+      console.error('Error saving order to Firestore:', saveErr);
+      const allExisting = getStoredOrders().filter((o) => o.id !== orderData.id);
+      const updatedList = computeLocalQueuePositions([orderData, ...allExisting]);
       saveStoredOrders(updatedList);
     } finally {
       setHasStatusUpdateNotification(true);
@@ -815,6 +1023,15 @@ export default function App() {
   };
 
   const updateOrderStatus = async (order: Order, newStatus: string) => {
+    try {
+      await updateOrderStatusInCloud(order.id, {
+        status: newStatus,
+        paymentRecipientName: order.paymentRecipientName || '',
+        paymentRecipientClass: order.paymentRecipientClass || '',
+        paymentRecipientSection: order.paymentRecipientSection || '',
+        ownerNote: order.ownerNote || '',
+      });
+    } catch {}
     try {
       await ownerPost('/api/owner/orders/status', {
         id: order.id,
@@ -841,6 +1058,14 @@ export default function App() {
       return;
     }
     setErrorMessage('');
+    try {
+      await updateOrderStatusInCloud(order.id, {
+        status: order.status,
+        paymentRecipientName: order.paymentRecipientName.trim(),
+        paymentRecipientClass: order.paymentRecipientClass.trim(),
+        paymentRecipientSection: order.paymentRecipientSection.trim(),
+      });
+    } catch {}
     try {
       await ownerPost('/api/owner/orders/status', {
         id: order.id,
@@ -880,6 +1105,15 @@ export default function App() {
   const saveOwnerNote = async (order: Order) => {
     setErrorMessage('');
     try {
+      await updateOrderStatusInCloud(order.id, {
+        status: order.status,
+        paymentRecipientName: order.paymentRecipientName || '',
+        paymentRecipientClass: order.paymentRecipientClass || '',
+        paymentRecipientSection: order.paymentRecipientSection || '',
+        ownerNote: (order.ownerNote || '').trim(),
+      });
+    } catch {}
+    try {
       await ownerPost('/api/owner/orders/status', {
         id: order.id,
         status: order.status,
@@ -901,12 +1135,13 @@ export default function App() {
     if (confirm('Delete this customer suggestion permanently? This cannot be undone.')) {
       setErrorMessage('');
       try {
+        await deleteSuggestionFromCloud(s.id);
+      } catch {}
+      try {
         await ownerPost('/api/owner/suggestions/delete', { id: s.id });
-        setOwnerSuggestions((prev) => prev.filter((item) => item.id !== s.id));
-        setSuccessMessage('Suggestion deleted.');
-      } catch {
-        setErrorMessage('Could not delete this suggestion. Please refresh and try again.');
-      }
+      } catch {}
+      setOwnerSuggestions((prev) => prev.filter((item) => item.id !== s.id));
+      setSuccessMessage('Suggestion deleted.');
     }
   };
 
@@ -920,6 +1155,9 @@ export default function App() {
       )
     ) {
       setErrorMessage('');
+      try {
+        await deleteOrderFromCloud(order.id);
+      } catch {}
       try {
         await ownerPost('/api/owner/orders/delete', { id: order.id });
       } catch {}

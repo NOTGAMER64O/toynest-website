@@ -1,0 +1,89 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "A customer toy order placed on ToyNest",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "orderNumber": { "type": "string", "maxLength": 32 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "mode": { "type": "string", "enum": ["Child", "Adult"] },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "productImageUrl": { "type": "string", "maxLength": 1000 },
+        "price": { "type": "number" },
+        "name": { "type": "string", "maxLength": 100 },
+        "studentClass": { "type": "string", "maxLength": 50 },
+        "section": { "type": "string", "maxLength": 50 },
+        "phone": { "type": "string", "maxLength": 50 },
+        "address": { "type": "string", "maxLength": 500 },
+        "note": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "paymentRecipientName": { "type": "string", "maxLength": 100 },
+        "paymentRecipientClass": { "type": "string", "maxLength": 50 },
+        "paymentRecipientSection": { "type": "string", "maxLength": 50 },
+        "ownerNote": { "type": "string", "maxLength": 500 },
+        "queuePosition": { "type": "number" },
+        "peopleAhead": { "type": "number" }
+      },
+      "required": ["id", "orderNumber", "customerId", "mode", "productId", "productName", "price", "name", "status", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "A toy product available in the store",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "price": { "type": "number" },
+        "category": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "imageUrl": { "type": "string", "maxLength": 1000 },
+        "available": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "price", "category", "createdAt"]
+    },
+    "Suggestion": {
+      "title": "Suggestion",
+      "description": "A customer suggestion or toy request",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "suggestion": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "suggestion", "createdAt"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "Store configuration and modes",
+      "type": "object",
+      "properties": {
+        "adultPublished": { "type": "boolean" },
+        "childPublished": { "type": "boolean" },
+        "paymentQrUrl": { "type": "string", "maxLength": 1000 }
+      }
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Collection of customer orders"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Collection of toy catalog items"
+    },
+    "/suggestions/{suggestionId}": {
+      "schema": { "$ref": "#/entities/Suggestion" },
+      "description": "Customer suggestions"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Setting" },
+      "description": "Global shop settings"
+    }
+  }
+}
