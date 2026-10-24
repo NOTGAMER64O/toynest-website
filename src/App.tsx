@@ -92,7 +92,6 @@ const api = {
   },
 };
 
-import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   DEFAULT_PRODUCTS,
   DEFAULT_OWNER_PIN,
@@ -101,9 +100,6 @@ import {
   type Suggestion,
 } from './defaultData';
 import {
-  auth,
-  signInAdminWithGoogle,
-  signOutAdmin,
   saveOrderToCloud,
   fetchCustomerOrdersByIds,
   fetchCustomerOrdersFromCloud,
@@ -232,14 +228,6 @@ export default function App() {
   const [hasStatusUpdateNotification, setHasStatusUpdateNotification] = useState<boolean>(false);
   const [hasOwnerOrderNotification, setHasOwnerOrderNotification] = useState<boolean>(false);
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
-  const [adminUser, setAdminUser] = useState<User | null>(null);
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      setAdminUser(user);
-    });
-    return () => unsub();
-  }, []);
 
   const shareShop = async () => {
     const url = 'https://toynest-website.vercel.app/';
@@ -511,19 +499,16 @@ export default function App() {
   };
 
   const checkOwnerOrderUpdates = async () => {
-    // Only query Firestore collection if admin is authenticated
-    if (adminUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
-      try {
-        const cloudOrders = await fetchAllOrdersFromCloud();
-        if (cloudOrders && cloudOrders.length > 0) {
-          const seenIds = new Set(getSeenOwnerOrderIds());
-          const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
-          setOwnerNewOrdersCount(unseenNewOrders.length);
-          setHasOwnerOrderNotification(unseenNewOrders.length > 0);
-          return;
-        }
-      } catch {}
-    }
+    try {
+      const cloudOrders = await fetchAllOrdersFromCloud();
+      if (cloudOrders && cloudOrders.length > 0) {
+        const seenIds = new Set(getSeenOwnerOrderIds());
+        const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
+        setOwnerNewOrdersCount(unseenNewOrders.length);
+        setHasOwnerOrderNotification(unseenNewOrders.length > 0);
+        return;
+      }
+    } catch {}
 
     try {
       const res = await api.get('/api/orders/pending-summary');
@@ -563,11 +548,11 @@ export default function App() {
       clearInterval(interval);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [customerId, adminUser]);
+  }, [customerId]);
 
-  // Real-time Firestore sync when owner dashboard is active and authenticated
+  // Real-time Firestore sync when owner dashboard is active
   useEffect(() => {
-    if (page === 'owner' && adminUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
+    if (page === 'owner') {
       const unsubscribe = subscribeToAllOrders((liveOrders) => {
         if (liveOrders && liveOrders.length > 0) {
           setOwnerOrders(liveOrders);
@@ -576,7 +561,7 @@ export default function App() {
       });
       return () => unsubscribe();
     }
-  }, [page, adminUser]);
+  }, [page]);
 
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
@@ -732,33 +717,6 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleGoogleAdminLogin = async () => {
-    setLoading(true);
-    setErrorMessage('');
-    try {
-      const res = await signInAdminWithGoogle();
-      if (!res.success) {
-        setErrorMessage(res.error || 'Google sign in was not completed.');
-      } else {
-        setErrorMessage('');
-        setPage('owner');
-        setOwnerTab('products');
-        loadOwnerProducts().catch(() => {});
-        loadOwnerOrders().catch(() => {});
-      }
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Google sign-in error.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleExitOwner = async () => {
-    setPage('home');
-    setOwnerPin('');
-    await signOutAdmin();
   };
 
   const handleProductSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -2071,46 +2029,9 @@ export default function App() {
               <div className="login-icon">
                 <ShieldCheck size={26} />
               </div>
-              <span className="eyebrow">SECURE OWNER ACCESS</span>
+              <span className="eyebrow">PRIVATE AREA</span>
               <h1>Welcome, owner.</h1>
-              <p>Sign in with your verified owner account or enter your owner PIN.</p>
-
-              {adminUser && adminUser.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com' ? (
-                <div style={{ marginBottom: '1.25rem', padding: '1rem', background: '#ecfdf5', borderRadius: '8px', border: '1px solid #a7f3d0' }}>
-                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem', color: '#065f46', fontWeight: 600 }}>
-                    ✓ Authenticated as {adminUser.email}
-                  </p>
-                  <button
-                    type="button"
-                    className="primary-btn full-btn"
-                    onClick={() => {
-                      setPage('owner');
-                      setOwnerTab('products');
-                      loadOwnerProducts().catch(() => {});
-                      loadOwnerOrders().catch(() => {});
-                    }}
-                  >
-                    Enter dashboard as owner <ArrowLeft size={16} />
-                  </button>
-                </div>
-              ) : (
-                <div style={{ marginBottom: '1.25rem' }}>
-                  <button
-                    type="button"
-                    className="secondary-btn full-btn"
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', marginBottom: '1rem' }}
-                    onClick={handleGoogleAdminLogin}
-                    disabled={loading}
-                  >
-                    <ShieldCheck size={18} /> Sign in with Google (Owner)
-                  </button>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '1rem 0', color: '#6b7280', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    <div style={{ flex: 1, height: '1px', background: '#e5e7eb' }} />
-                    <span>OR ENTER OWNER PIN</span>
-                    <div style={{ flex: 1, height: '1px', background: '#e5e7eb' }} />
-                  </div>
-                </div>
-              )}
+              <p>Enter your owner PIN to manage toys and customer orders.</p>
 
               <form
                 onSubmit={(e) => {
@@ -2154,14 +2075,7 @@ export default function App() {
               <div>
                 <span className="eyebrow">OWNER WORKSPACE</span>
                 <h1>Your dashboard.</h1>
-                <p>
-                  Manage the toy shelf and keep track of orders.
-                  {adminUser?.email && (
-                    <span style={{ display: 'inline-block', marginLeft: '8px', padding: '2px 8px', fontSize: '0.75rem', background: '#dcfce7', color: '#166534', borderRadius: '4px', fontWeight: 600 }}>
-                      Verified Admin ({adminUser.email})
-                    </span>
-                  )}
-                </p>
+                <p>Manage the toy shelf and keep track of orders.</p>
               </div>
               <div className="dashboard-heading-actions">
                 <button
@@ -2174,7 +2088,10 @@ export default function App() {
                 </button>
                 <button
                   className="secondary-btn"
-                  onClick={() => void handleExitOwner()}
+                  onClick={() => {
+                    setPage('home');
+                    setOwnerPin('');
+                  }}
                 >
                   Exit owner area
                 </button>

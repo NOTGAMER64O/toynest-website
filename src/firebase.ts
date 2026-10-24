@@ -139,24 +139,21 @@ export async function fetchCustomerOrdersByIds(orderIds: string[]): Promise<Orde
 
 export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<Order[]> {
   try {
-    if (auth.currentUser?.email?.toLowerCase() === 'sanyukta.mehtaa@gmail.com') {
-      const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
-      const snapshot = await getDocs(q);
-      const userOrders: Order[] = [];
-      snapshot.forEach((d) => {
-        userOrders.push(d.data() as Order);
-      });
-      return userOrders;
-    }
-  } catch {}
-  return [];
+    const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
+    const snapshot = await getDocs(q);
+    const userOrders: Order[] = [];
+    snapshot.forEach((d) => {
+      userOrders.push(d.data() as Order);
+    });
+    return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  } catch (err) {
+    console.warn('Could not query customer orders:', err);
+    return [];
+  }
 }
 
 export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
   try {
-    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
-      return [];
-    }
     const snapshot = await getDocs(collection(db, 'orders'));
     const orders: Order[] = [];
     snapshot.forEach((d) => {
@@ -167,16 +164,13 @@ export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   } catch (error) {
-    console.warn('Could not fetch cloud orders (permission or network):', error);
+    console.warn('Could not fetch cloud orders:', error);
     return [];
   }
 }
 
 export function subscribeToAllOrders(callback: (orders: Order[]) => void): () => void {
   try {
-    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
-      return () => {};
-    }
     return onSnapshot(
       collection(db, 'orders'),
       (snapshot) => {
@@ -231,9 +225,6 @@ export async function saveSuggestionToCloud(suggestion: Suggestion): Promise<voi
 
 export async function fetchSuggestionsFromCloud(): Promise<Suggestion[]> {
   try {
-    if (auth.currentUser?.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
-      return [];
-    }
     const snapshot = await getDocs(collection(db, 'suggestions'));
     const list: Suggestion[] = [];
     snapshot.forEach((d) => {

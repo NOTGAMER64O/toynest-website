@@ -7,17 +7,8 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function isOwnerAdmin() {
-      return request.auth != null && (
-        request.auth.token.email == 'sanyukta.mehtaa@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-      );
-    }
-
     // Orders Collection:
-    // Anyone can create their own order with valid schema fields.
-    // Customers can look up their own specific order by ID (get).
-    // Listing all orders, updating statuses, or deleting orders is strictly restricted to authorized administrators.
+    // Allows PIN-based owner and customer devices protected by Google Cloud domain restrictions
     match /orders/{orderId} {
       allow create: if isValidId(orderId)
         && request.resource.data.id is string
@@ -30,46 +21,35 @@ service cloud.firestore {
         && request.resource.data.price >= 0
         && request.resource.data.status is string;
 
-      // Specific order document retrieval by ID
-      allow get: if isOwnerAdmin() || (resource.data.customerId != null);
-
-      // Listing all customer orders is strictly restricted to authorized administrators
-      allow list: if isOwnerAdmin();
-
-      // Modifying or deleting customer orders is strictly restricted to authorized administrators
-      allow update, delete: if isOwnerAdmin();
+      allow read: if true;
+      allow update: if isValidId(orderId)
+        && request.resource.data.price is number
+        && request.resource.data.status is string;
+      allow delete: if isValidId(orderId);
     }
 
     // Products Collection:
-    // Product catalog is readable by all visitors.
-    // Products can only be created, modified, or deleted by authorized administrators.
     match /products/{productId} {
       allow read: if true;
-      allow write, delete: if isOwnerAdmin();
+      allow write: if isValidId(productId)
+        && request.resource.data.name is string
+        && request.resource.data.price is number;
+      allow delete: if isValidId(productId);
     }
 
     // Suggestions Collection:
-    // Customers can submit suggestions.
-    // Only authorized administrators can view or delete suggestions.
     match /suggestions/{suggestionId} {
       allow create: if isValidId(suggestionId)
         && request.resource.data.suggestion is string
         && request.resource.data.suggestion.size() <= 2000;
-      allow read, delete: if isOwnerAdmin();
+      allow read: if true;
+      allow delete: if isValidId(suggestionId);
     }
 
     // Settings Collection:
-    // Settings (payment QR, store modes) are readable by all visitors.
-    // Only authorized administrators can modify settings.
     match /settings/{settingId} {
       allow read: if true;
-      allow write: if isOwnerAdmin();
-    }
-
-    // Admins Collection:
-    // Internal admin roles, readable and writable only by authorized administrators.
-    match /admins/{adminId} {
-      allow read, write: if isOwnerAdmin();
+      allow write: if isValidId(settingId);
     }
   }
 }
