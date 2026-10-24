@@ -17,6 +17,8 @@ import {
   Share2,
   FileText,
   Palette,
+  ChevronDown,
+  Check,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -136,6 +138,254 @@ function saveStoredColours(colours: string[]) {
   try {
     localStorage.setItem('playnix_colours', JSON.stringify(colours));
   } catch {}
+}
+
+const COLOR_NAME_MAP: Record<string, string> = {
+  'rose gold': '#b76e79',
+  rosegold: '#b76e79',
+  'baby blue': '#89cff0',
+  babyblue: '#89cff0',
+  'baby pink': '#f4c2c2',
+  babypink: '#f4c2c2',
+  'mint green': '#98ff98',
+  mintgreen: '#98ff98',
+  mint: '#3eb489',
+  'neon green': '#39ff14',
+  neongreen: '#39ff14',
+  'electric blue': '#7df9ff',
+  electricblue: '#7df9ff',
+  'sky blue': '#87ceeb',
+  skyblue: '#87ceeb',
+  'royal blue': '#4169e1',
+  royalblue: '#4169e1',
+  'midnight blue': '#191970',
+  midnightblue: '#191970',
+  'forest green': '#228b22',
+  forestgreen: '#228b22',
+  'lime green': '#32cd32',
+  limegreen: '#32cd32',
+  'pastel pink': '#ffd1dc',
+  pastelpink: '#ffd1dc',
+  'pastel blue': '#aec6cf',
+  pastelblue: '#aec6cf',
+  'pastel yellow': '#fdfd96',
+  pastelyellow: '#fdfd96',
+  'pastel green': '#77dd77',
+  pastelgreen: '#77dd77',
+  'pastel purple': '#c3b1e1',
+  pastelpurple: '#c3b1e1',
+  peach: '#ffe5b4',
+  cream: '#fffdd0',
+  charcoal: '#36454f',
+  ruby: '#e0115f',
+  emerald: '#50c878',
+  sapphire: '#0f52ba',
+  copper: '#b87333',
+  bronze: '#cd7f32',
+  mustard: '#ffdb58',
+  burgundy: '#800020',
+  wine: '#722f37',
+  lilac: '#c8a2c8',
+  lavender: '#e6e6fa',
+  magenta: '#ff00ff',
+  cyan: '#00ffff',
+  turquoise: '#40e0d0',
+};
+
+function resolveColourCss(colourName: string): string {
+  if (!colourName) return '#94a3b8';
+  const clean = colourName.trim().toLowerCase();
+  if (clean.startsWith('#') || clean.startsWith('rgb') || clean.startsWith('hsl')) {
+    return clean;
+  }
+  if (COLOR_NAME_MAP[clean]) {
+    return COLOR_NAME_MAP[clean];
+  }
+  const compact = clean.replace(/[\s-_]+/g, '');
+  if (COLOR_NAME_MAP[compact]) {
+    return COLOR_NAME_MAP[compact];
+  }
+  return compact;
+}
+
+function ColourDot({ colour, size = 16 }: { colour: string; size?: number }) {
+  const cssColor = resolveColourCss(colour);
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: `${size}px`,
+        height: `${size}px`,
+        borderRadius: '50%',
+        backgroundColor: cssColor,
+        border: '1px solid #d1d5db',
+        display: 'inline-block',
+        flexShrink: 0,
+        boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.1)',
+      }}
+    />
+  );
+}
+
+interface ColourSelectDropdownProps {
+  value: string;
+  options: string[];
+  onChange: (val: string) => void;
+}
+
+function ColourSelectDropdown({ value, options, onChange }: ColourSelectDropdownProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('touchstart', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
+
+  const selectedColour = options.find((o) => o === value) || (value ? value : '');
+
+  return (
+    <div ref={dropdownRef} style={{ position: 'relative', width: '100%' }}>
+      <button
+        type="button"
+        role="combobox"
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        aria-label="Which colour?"
+        onClick={() => setIsOpen((prev) => !prev)}
+        style={{
+          width: '100%',
+          border: isOpen ? '1px solid #8ba66b' : '1px solid #e7e6dd',
+          borderRadius: '8px',
+          background: '#fffefa',
+          padding: '12px',
+          color: '#30382f',
+          fontSize: '12px',
+          outline: 'none',
+          boxShadow: isOpen ? '0 0 0 3px #e8efd9' : 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          cursor: 'pointer',
+          textAlign: 'left',
+          transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+          {selectedColour ? (
+            <>
+              <ColourDot colour={selectedColour} size={16} />
+              <span style={{ fontWeight: 600, color: '#242b24', fontSize: '13px' }}>
+                {selectedColour}
+              </span>
+            </>
+          ) : (
+            <span style={{ color: '#8a8f84', fontSize: '12px' }}>Select a colour</span>
+          )}
+        </span>
+        <ChevronDown
+          size={16}
+          style={{
+            color: '#6e776a',
+            flexShrink: 0,
+            transform: isOpen ? 'rotate(180deg)' : 'none',
+            transition: 'transform 0.2s ease',
+          }}
+        />
+      </button>
+
+      {isOpen && (
+        <div
+          role="listbox"
+          aria-label="Available colours"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 5px)',
+            left: 0,
+            right: 0,
+            zIndex: 70,
+            background: '#fffefa',
+            border: '1px solid #dfe2d4',
+            borderRadius: '10px',
+            boxShadow: '0 12px 28px rgba(40, 50, 30, 0.14)',
+            maxHeight: '220px',
+            overflowY: 'auto',
+            padding: '6px',
+          }}
+        >
+          {options.map((col) => {
+            const isSelected = col === value;
+            return (
+              <div
+                key={col}
+                role="option"
+                aria-selected={isSelected}
+                tabIndex={0}
+                onClick={() => {
+                  onChange(col);
+                  setIsOpen(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onChange(col);
+                    setIsOpen(false);
+                  }
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '9px 12px',
+                  borderRadius: '7px',
+                  cursor: 'pointer',
+                  background: isSelected ? '#eef2e3' : 'transparent',
+                  fontWeight: isSelected ? 700 : 500,
+                  fontSize: '13px',
+                  color: isSelected ? '#29392b' : '#30382f',
+                  transition: 'background 0.12s ease',
+                  marginBottom: '2px',
+                  outline: 'none',
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#f4f6ed';
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent';
+                }}
+              >
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '10px' }}>
+                  <ColourDot colour={col} size={16} />
+                  <span>{col}</span>
+                </div>
+                {isSelected && (
+                  <Check size={14} style={{ color: '#566b3c', strokeWidth: 2.5 }} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function getStoredProducts(): Product[] {
@@ -1882,23 +2132,18 @@ export default function App() {
 
                   {/* Colour Selection */}
                   {availableColours.length > 0 && (
-                    <label>
-                      Which colour?
-                      <select
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', margin: '15px 0' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 700, color: '#454d41' }}>
+                        Which colour?
+                      </span>
+                      <ColourSelectDropdown
                         value={checkoutForm.colour}
-                        onChange={(e) =>
-                          setCheckoutForm({ ...checkoutForm, colour: e.target.value })
+                        options={availableColours}
+                        onChange={(c) =>
+                          setCheckoutForm({ ...checkoutForm, colour: c })
                         }
-                        required
-                      >
-                        <option value="">Select a colour</option>
-                        {availableColours.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                      />
+                    </div>
                   )}
 
                   <label>
@@ -2041,7 +2286,10 @@ export default function App() {
                       {o.colour && (
                         <span>
                           <b>Colour</b>
-                          {o.colour}
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                            <ColourDot colour={o.colour} size={13} />
+                            <span>{o.colour}</span>
+                          </span>
                         </span>
                       )}
                     </div>
@@ -2864,7 +3112,10 @@ export default function App() {
                             {o.colour && (
                               <span>
                                 <b>Colour</b>
-                                <strong style={{ color: '#15803d' }}>{o.colour}</strong>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <ColourDot colour={o.colour} size={13} />
+                                  <strong style={{ color: '#15803d' }}>{o.colour}</strong>
+                                </span>
                               </span>
                             )}
                           </div>
@@ -3115,17 +3366,7 @@ export default function App() {
                             fontWeight: 600,
                           }}
                         >
-                          <span
-                            style={{
-                              width: '16px',
-                              height: '16px',
-                              borderRadius: '50%',
-                              backgroundColor: colour.toLowerCase(),
-                              border: '1px solid #d1d5db',
-                              display: 'inline-block',
-                              boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.1)',
-                            }}
-                          />
+                          <ColourDot colour={colour} size={16} />
                           <span>{colour}</span>
                           <button
                             type="button"
