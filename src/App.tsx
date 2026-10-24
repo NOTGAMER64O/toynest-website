@@ -230,7 +230,7 @@ export default function App() {
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
 
   const shareShop = async () => {
-    const url = 'https://toynest-website.vercel.app/';
+    const url = 'https://playnixshop-website.vercel.app/';
     if (navigator.share) {
       try {
         await navigator.share({
