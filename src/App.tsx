@@ -234,8 +234,8 @@ export default function App() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'ToyNest - Toy Shop',
-          text: 'Browse the toy shelf and order on ToyNest!',
+          title: 'Playnix - Toy Shop',
+          text: 'Browse the toy shelf and order on Playnix!',
           url,
         });
         return;
@@ -1213,7 +1213,7 @@ export default function App() {
             />
             <Boxes size={23} />
           </span>
-          <span>ToyNest</span>
+          <span>Playnix</span>
         </button>
 
         <div className="top-actions">
@@ -1224,7 +1224,7 @@ export default function App() {
             className="owner-link"
             type="button"
             onClick={shareShop}
-            title="Copy shop link (toynest-website.vercel.app)"
+            title="Copy shop link"
           >
             <Share2 size={16} /> {copiedLink ? 'Copied link!' : 'Share shop'}
           </button>
@@ -1270,7 +1270,7 @@ export default function App() {
         <div className="side-menu-backdrop" onClick={() => setIsSideMenuOpen(false)}>
           <aside
             className="side-menu-panel"
-            aria-label="ToyNest navigation"
+            aria-label="Playnix navigation"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="side-menu-heading">
@@ -1278,7 +1278,7 @@ export default function App() {
                 <span className="brand-icon">
                   <Boxes size={21} />
                 </span>
-                <span>ToyNest</span>
+                <span>Playnix</span>
               </div>
               <button
                 className="side-menu-close"
@@ -1346,7 +1346,7 @@ export default function App() {
                 type="button"
                 onClick={shareShop}
               >
-                <Share2 size={19} /> {copiedLink ? 'Link copied!' : 'Share shop (toynest-website.vercel.app)'}
+                <Share2 size={19} /> {copiedLink ? 'Link copied!' : 'Share shop'}
               </button>
               <button
                 type="button"
@@ -1389,7 +1389,7 @@ export default function App() {
         {/* HOME VIEW: Shop unavailable if both sections draft */}
         {page === 'home' && !adultPublished && !childPublished && (
           <section className="mode-choice">
-            <span className="eyebrow">WELCOME TO TOYNEST</span>
+            <span className="eyebrow">WELCOME TO PLAYNIX</span>
             <h1>Shop temporarily unavailable</h1>
             <p>Please check back later.</p>
           </section>
@@ -1968,7 +1968,7 @@ export default function App() {
                     ) : o.status === 'Completed' ? (
                       <div className="queue-status order-completed-status">
                         <strong>Order completed! 🎉</strong>
-                        <p>Thank you for shopping with ToyNest!</p>
+                        <p>Thank you for shopping with Playnix!</p>
                       </div>
                     ) : o.queuePosition !== null && o.queuePosition !== undefined && o.queuePosition > 0 ? (
                       <div className="queue-status">
@@ -2994,7 +2994,7 @@ export default function App() {
             />
             <Boxes size={18} />
           </span>{' '}
-          ToyNest
+          Playnix
         </div>
         <p>
           Made for little moments of happiness. <span>✦</span>

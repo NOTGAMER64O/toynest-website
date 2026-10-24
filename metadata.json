@@ -1,6 +1,6 @@
 {
   "name": "ToyNest",
-  "description": "ToyNest - toy shop with products, categories, photo gallery, child and adult checkout, order tracking, and owner dashboard.",
+  "description": "Playnix - toy shop with products, categories, photo gallery, child and adult checkout, order tracking, and owner dashboard.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
