@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Share2,
   FileText,
+  Palette,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -115,7 +116,27 @@ import {
   deleteProductFromCloud,
   fetchSettingsFromCloud,
   saveSettingsToCloud,
+  fetchColoursFromCloud,
+  saveColoursToCloud,
+  subscribeToColours,
 } from './firebase';
+
+function getStoredColours(): string[] {
+  try {
+    const raw = localStorage.getItem('playnix_colours');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function saveStoredColours(colours: string[]) {
+  try {
+    localStorage.setItem('playnix_colours', JSON.stringify(colours));
+  } catch {}
+}
 
 function getStoredProducts(): Product[] {
   try {
@@ -191,7 +212,7 @@ export default function App() {
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours'
   >('products');
   const [productFilter, setProductFilter] = useState<'all' | 'published' | 'drafts'>('all');
   const [checkoutMode, setCheckoutMode] = useState<'Child' | 'Adult' | null>(null);
@@ -199,6 +220,8 @@ export default function App() {
   const [childPublished, setChildPublished] = useState<boolean>(true);
   const [paymentQrUrl, setPaymentQrUrl] = useState<string>('');
   const [qrFile, setQrFile] = useState<File | null>(null);
+  const [availableColours, setAvailableColours] = useState<string[]>(() => getStoredColours());
+  const [newColourInput, setNewColourInput] = useState<string>('');
   const [ownerSuggestions, setOwnerSuggestions] = useState<Suggestion[]>([]);
   const [customerSuggestion, setCustomerSuggestion] = useState<string>('');
   const [submittingSuggestion, setSubmittingSuggestion] = useState<boolean>(false);
@@ -211,6 +234,7 @@ export default function App() {
     phone: '',
     address: '',
     note: '',
+    colour: '',
   });
   const [productForm, setProductForm] = useState({
     name: '',
@@ -474,10 +498,107 @@ export default function App() {
     }
   };
 
+  const loadColours = async () => {
+    try {
+      const cloudColours = await fetchColoursFromCloud();
+      if (cloudColours && Array.isArray(cloudColours) && cloudColours.length > 0) {
+        setAvailableColours(cloudColours);
+        saveStoredColours(cloudColours);
+        return;
+      }
+    } catch {}
+    try {
+      const res = await api.get('/api/colours');
+      if (res.data?.colours && Array.isArray(res.data.colours) && res.data.colours.length > 0) {
+        setAvailableColours(res.data.colours);
+        saveStoredColours(res.data.colours);
+        return;
+      }
+    } catch {}
+    setAvailableColours(getStoredColours());
+  };
+
+  const handleAddColour = async () => {
+    const trimmed = newColourInput.trim();
+    if (!trimmed) {
+      setErrorMessage('Please enter a colour name.');
+      return;
+    }
+    const exists = availableColours.some((c) => c.toLowerCase() === trimmed.toLowerCase());
+    if (exists) {
+      setErrorMessage(`Colour "${trimmed}" already exists.`);
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    const updated = [...availableColours, trimmed];
+    setAvailableColours(updated);
+    saveStoredColours(updated);
+    setNewColourInput('');
+
+    try {
+      await saveColoursToCloud(updated);
+    } catch (err) {
+      console.warn('Could not save colour to cloud:', err);
+    }
+
+    try {
+      await ownerPost('/api/owner/colours/add', { colour: trimmed });
+    } catch (err) {
+      console.warn('Could not save colour to backend:', err);
+    }
+
+    setSuccessMessage(`Colour "${trimmed}" added.`);
+    setLoading(false);
+  };
+
+  const handleRemoveColour = async (colourToRemove: string) => {
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    const updated = availableColours.filter(
+      (c) => c.toLowerCase() !== colourToRemove.toLowerCase()
+    );
+    setAvailableColours(updated);
+    saveStoredColours(updated);
+
+    try {
+      await saveColoursToCloud(updated);
+    } catch (err) {
+      console.warn('Could not remove colour from cloud:', err);
+    }
+
+    try {
+      await ownerPost('/api/owner/colours/delete', { colour: colourToRemove });
+    } catch (err) {
+      console.warn('Could not remove colour from backend:', err);
+    }
+
+    setSuccessMessage(`Colour "${colourToRemove}" removed.`);
+    setLoading(false);
+  };
+
   useEffect(() => {
     loadProducts();
     loadPaymentQr();
     loadShopModes();
+    loadColours();
+
+    let unsubColours = () => {};
+    try {
+      unsubColours = subscribeToColours((colours) => {
+        if (Array.isArray(colours)) {
+          setAvailableColours(colours);
+          saveStoredColours(colours);
+        }
+      });
+    } catch {}
+
+    return () => {
+      unsubColours();
+    };
   }, []);
 
   const checkOrderUpdates = async () => {
@@ -656,7 +777,7 @@ export default function App() {
     setIsRefreshing(true);
     setErrorMessage('');
     try {
-      await Promise.all([loadProducts(), loadShopModes()]);
+      await Promise.all([loadProducts(), loadShopModes(), loadColours()]);
       setSuccessMessage('Shop refreshed. You are seeing the latest published toys.');
     } finally {
       setIsRefreshing(false);
@@ -668,10 +789,11 @@ export default function App() {
     setErrorMessage('');
     setSuccessMessage('');
     try {
-      await Promise.all([loadOwnerProducts(), loadOwnerOrders()]);
+      await Promise.all([loadOwnerProducts(), loadOwnerOrders(), loadColours()]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
+      if (ownerTab === 'colours') await loadColours();
       setSuccessMessage('Dashboard refreshed with the latest data.');
     } finally {
       setIsRefreshing(false);
@@ -962,6 +1084,11 @@ export default function App() {
       }
     }
 
+    if (availableColours.length > 0 && !checkoutForm.colour) {
+      setErrorMessage('Please select a colour.');
+      return;
+    }
+
     setLoading(true);
     let createdOrder: Order | null = null;
     const orderData: Order = {
@@ -981,6 +1108,7 @@ export default function App() {
       note: checkoutForm.note.trim(),
       status: 'New',
       createdAt: new Date().toISOString(),
+      colour: checkoutForm.colour || '',
     };
 
     try {
@@ -995,6 +1123,7 @@ export default function App() {
           phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
           address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
           note: checkoutForm.note.trim(),
+          colour: checkoutForm.colour || '',
         });
         if (res.data?.order) {
           createdOrder = res.data.order;
@@ -1020,7 +1149,7 @@ export default function App() {
       setSuccessMessage('');
       setPage('myOrders');
       await loadMyOrders();
-      setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '' });
+      setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '', colour: '' });
       setSelectedProductForBuy(null);
       setLoading(false);
     }
@@ -1544,6 +1673,7 @@ export default function App() {
                                     phone: '',
                                     address: '',
                                     note: '',
+                                    colour: '',
                                   });
                                   setErrorMessage('');
                                   setPage('buy');
@@ -1750,6 +1880,27 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Colour Selection */}
+                  {availableColours.length > 0 && (
+                    <label>
+                      Which colour?
+                      <select
+                        value={checkoutForm.colour}
+                        onChange={(e) =>
+                          setCheckoutForm({ ...checkoutForm, colour: e.target.value })
+                        }
+                        required
+                      >
+                        <option value="">Select a colour</option>
+                        {availableColours.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+
                   <label>
                     Note (optional)
                     <textarea
@@ -1887,6 +2038,12 @@ export default function App() {
                         <b>Section</b>
                         {o.section}
                       </span>
+                      {o.colour && (
+                        <span>
+                          <b>Colour</b>
+                          {o.colour}
+                        </span>
+                      )}
                     </div>
 
                     {o.status === 'Confirmed' && (
@@ -2197,6 +2354,15 @@ export default function App() {
                 }}
               >
                 Payment QR
+              </button>
+              <button
+                className={ownerTab === 'colours' ? 'active' : ''}
+                onClick={() => {
+                  setOwnerTab('colours');
+                  loadColours();
+                }}
+              >
+                Manage Colours ({availableColours.length})
               </button>
             </div>
 
@@ -2695,6 +2861,12 @@ export default function App() {
                               <b>Queue</b>
                               {o.queuePosition ? `#${o.queuePosition} · ${o.peopleAhead} ahead` : 'Finished'}
                             </span>
+                            {o.colour && (
+                              <span>
+                                <b>Colour</b>
+                                <strong style={{ color: '#15803d' }}>{o.colour}</strong>
+                              </span>
+                            )}
                           </div>
 
                           {o.note && <p className="order-note">Note: {o.note}</p>}
@@ -2865,6 +3037,123 @@ export default function App() {
               </section>
             )}
 
+            {/* MANAGE COLOURS TAB */}
+            {ownerTab === 'colours' && (
+              <div className="panel-form add-form">
+                <span className="eyebrow">TOY CUSTOMIZATION</span>
+                <h2>Manage Colours</h2>
+                <p>
+                  Add or remove colour options for customer orders. When at least one colour is available, customers will see the &quot;Which colour?&quot; dropdown in the order form.
+                </p>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleAddColour();
+                  }}
+                  style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap', marginTop: '1rem', marginBottom: '1.5rem' }}
+                >
+                  <label style={{ flex: 1, minWidth: '220px', margin: 0 }}>
+                    Colour name
+                    <input
+                      type="text"
+                      value={newColourInput}
+                      onChange={(e) => setNewColourInput(e.target.value)}
+                      placeholder="e.g. Red, Blue, Black, White, Pink"
+                      maxLength={40}
+                      autoFocus
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="primary-btn"
+                    disabled={loading || !newColourInput.trim()}
+                    style={{ height: '46px', whiteSpace: 'nowrap' }}
+                  >
+                    {loading ? 'Adding…' : '+ Add colour'}
+                  </button>
+                </form>
+
+                <div style={{ marginTop: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>
+                      Available colours ({availableColours.length})
+                    </h3>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => void loadColours()}
+                      style={{ padding: '6px 12px', fontSize: '0.85rem' }}
+                    >
+                      <RefreshCw size={14} /> Refresh colours
+                    </button>
+                  </div>
+
+                  {availableColours.length === 0 ? (
+                    <div className="empty-state compact" style={{ padding: '2rem 1rem', textAlign: 'center', background: '#f9fafb', borderRadius: '10px', border: '1px dashed #d1d5db' }}>
+                      <div className="empty-icon" style={{ fontSize: '32px', marginBottom: '8px' }}>🎨</div>
+                      <h4 style={{ margin: '0 0 6px 0', fontSize: '1rem', fontWeight: 600 }}>No colours added yet</h4>
+                      <p style={{ margin: 0, color: '#6b7280', fontSize: '0.9rem' }}>
+                        When no colours are added, the &quot;Which colour?&quot; field is hidden from customers. Add your first colour above!
+                      </p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                      {availableColours.map((colour) => (
+                        <div
+                          key={colour}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            padding: '10px 16px',
+                            background: '#ffffff',
+                            border: '1px solid #e5e7eb',
+                            borderRadius: '10px',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+                            fontSize: '0.95rem',
+                            fontWeight: 600,
+                          }}
+                        >
+                          <span
+                            style={{
+                              width: '16px',
+                              height: '16px',
+                              borderRadius: '50%',
+                              backgroundColor: colour.toLowerCase(),
+                              border: '1px solid #d1d5db',
+                              display: 'inline-block',
+                              boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.1)',
+                            }}
+                          />
+                          <span>{colour}</span>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveColour(colour)}
+                            className="icon-btn danger"
+                            title={`Remove ${colour}`}
+                            aria-label={`Remove ${colour}`}
+                            style={{
+                              padding: '4px',
+                              marginLeft: '6px',
+                              border: 'none',
+                              background: 'transparent',
+                              cursor: 'pointer',
+                              color: '#ef4444',
+                              display: 'flex',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
           </section>
         )}
       </main>
@@ -2962,6 +3251,16 @@ export default function App() {
                         onClick={() => {
                           setSelectedProductForBuy(galleryProduct);
                           setGalleryProduct(null);
+                          setCheckoutMode(null);
+                          setCheckoutForm({
+                            name: '',
+                            studentClass: '',
+                            section: '',
+                            phone: '',
+                            address: '',
+                            note: '',
+                            colour: '',
+                          });
                           setErrorMessage('');
                           setPage('buy');
                         }}

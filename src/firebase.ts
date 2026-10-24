@@ -309,6 +309,64 @@ export async function saveSettingsToCloud(updates: { adultPublished?: boolean; c
   }
 }
 
+// ----------------- COLOUR MANAGEMENT -----------------
+export async function fetchColoursFromCloud(): Promise<string[]> {
+  const path = 'settings/colours';
+  try {
+    const snap = await getDoc(doc(db, 'settings', 'colours'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (Array.isArray(data.list)) {
+        return data.list.map(String).filter(Boolean);
+      }
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+  return [];
+}
+
+export async function saveColoursToCloud(colours: string[]): Promise<void> {
+  const path = 'settings/colours';
+  try {
+    await setDoc(
+      doc(db, 'settings', 'colours'),
+      {
+        list: colours,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export function subscribeToColours(callback: (colours: string[]) => void): () => void {
+  const path = 'settings/colours';
+  try {
+    return onSnapshot(
+      doc(db, 'settings', 'colours'),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          if (Array.isArray(data?.list)) {
+            callback(data.list.map(String).filter(Boolean));
+            return;
+          }
+        }
+        callback([]);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
+    );
+  } catch (err) {
+    console.warn('Could not subscribe to colours:', err);
+    return () => {};
+  }
+}
+
 // ----------------- ADMIN AUTHENTICATION -----------------
 export async function signInAdminWithGoogle(): Promise<{ success: boolean; email?: string | null; error?: string }> {
   try {

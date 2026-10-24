@@ -26,7 +26,8 @@
         "paymentRecipientSection": { "type": "string", "maxLength": 50 },
         "ownerNote": { "type": "string", "maxLength": 500 },
         "queuePosition": { "type": "number" },
-        "peopleAhead": { "type": "number" }
+        "peopleAhead": { "type": "number" },
+        "colour": { "type": "string", "maxLength": 100 }
       },
       "required": ["id", "orderNumber", "customerId", "mode", "productId", "productName", "price", "name", "status", "createdAt"]
     },
@@ -64,7 +65,8 @@
       "properties": {
         "adultPublished": { "type": "boolean" },
         "childPublished": { "type": "boolean" },
-        "paymentQrUrl": { "type": "string", "maxLength": 1000 }
+        "paymentQrUrl": { "type": "string", "maxLength": 1000 },
+        "list": { "type": "array" }
       }
     }
   },

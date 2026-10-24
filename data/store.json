@@ -101,5 +101,9 @@
     "childPublished": true
   },
   "paymentQrUrl": "/payment/adult-qr.jpg",
-  "ownerPin": "ANAND1904"
+  "ownerPin": "ANAND1904",
+  "colours": [
+    "Red",
+    "Black"
+  ]
 }

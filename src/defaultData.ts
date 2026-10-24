@@ -33,6 +33,7 @@ export interface Order {
   ownerNote?: string;
   queuePosition?: number | null;
   peopleAhead?: number;
+  colour?: string;
 }
 
 export interface Suggestion {

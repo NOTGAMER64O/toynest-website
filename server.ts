@@ -59,6 +59,7 @@ interface Order {
   paymentRecipientClass?: string;
   paymentRecipientSection?: string;
   ownerNote?: string;
+  colour?: string;
 }
 
 interface Suggestion {
@@ -77,6 +78,7 @@ interface DB {
   };
   paymentQrUrl: string;
   ownerPin: string;
+  colours: string[];
 }
 
 // Initial seed products
@@ -179,7 +181,11 @@ const defaultProducts: Product[] = [
 function loadDB(): DB {
   try {
     if (fs.existsSync(DB_PATH)) {
-      return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      if (!Array.isArray(data.colours)) {
+        data.colours = [];
+      }
+      return data;
     }
   } catch (err) {
     console.error('Error reading DB, using defaults:', err);
@@ -194,6 +200,7 @@ function loadDB(): DB {
     },
     paymentQrUrl: '/payment/adult-qr.jpg',
     ownerPin: 'ANAND1904',
+    colours: [],
   };
   saveDB(initial);
   return initial;
@@ -276,7 +283,7 @@ app.get('/api/orders/pending-summary', (req, res) => {
 
 app.post('/api/orders', (req, res) => {
   db = loadDB();
-  const { customerId, mode, productId, name, studentClass, section, phone, address, note } = req.body;
+  const { customerId, mode, productId, name, studentClass, section, phone, address, note, colour } = req.body;
 
   if (!productId || !name || !name.trim()) {
     return res.status(400).json({ error: 'Please enter your name and select a toy.' });
@@ -311,6 +318,7 @@ app.post('/api/orders', (req, res) => {
     paymentRecipientClass: '',
     paymentRecipientSection: '',
     ownerNote: '',
+    colour: (colour || '').trim(),
   };
 
   db.orders.unshift(newOrder);
@@ -571,6 +579,45 @@ app.post('/api/owner/payment-qr', (req, res) => {
     console.error('Error saving QR code:', err);
     res.status(500).json({ error: 'Failed to save QR code.' });
   }
+});
+
+// Colour Management Routes
+app.get('/api/colours', (req, res) => {
+  db = loadDB();
+  res.json({ colours: db.colours || [] });
+});
+
+app.post('/api/owner/colours/add', (req, res) => {
+  const { pin, colour } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+  const name = String(colour || '').trim();
+  if (!name) {
+    return res.status(400).json({ error: 'Please enter a colour name.' });
+  }
+  db = loadDB();
+  if (!Array.isArray(db.colours)) db.colours = [];
+  const exists = db.colours.some((c) => c.toLowerCase() === name.toLowerCase());
+  if (exists) {
+    return res.status(400).json({ error: `Colour "${name}" already exists.` });
+  }
+  db.colours.push(name);
+  saveDB(db);
+  res.json({ success: true, colours: db.colours });
+});
+
+app.post('/api/owner/colours/delete', (req, res) => {
+  const { pin, colour } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+  const name = String(colour || '').trim();
+  db = loadDB();
+  if (!Array.isArray(db.colours)) db.colours = [];
+  db.colours = db.colours.filter((c) => c.toLowerCase() !== name.toLowerCase());
+  saveDB(db);
+  res.json({ success: true, colours: db.colours });
 });
 
 
