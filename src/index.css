@@ -821,5 +821,43 @@
   }
 }
 
+/* Customer Delete Order Option (Only deletes on customer side) */
+.customer-order-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px dashed #e3e6d8;
+}
+
+.customer-delete-order-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 13px;
+  border: 1px solid #e5d2ce;
+  background: #fff8f7;
+  color: #ab3825;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.customer-delete-order-btn:hover {
+  background: #fbeae7;
+  border-color: #dfb2ab;
+  color: #8c2313;
+  transform: translateY(-1px);
+}
+
+.customer-delete-order-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  transform: none;
+}
+
 
 

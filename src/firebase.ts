@@ -144,7 +144,10 @@ export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<
     const snapshot = await getDocs(q);
     const userOrders: Order[] = [];
     snapshot.forEach((d) => {
-      userOrders.push(d.data() as Order);
+      const data = d.data() as Order;
+      if (!data.customerDeleted) {
+        userOrders.push(data);
+      }
     });
     return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   } catch (err) {
@@ -164,7 +167,10 @@ export function subscribeToCustomerOrders(
       (snapshot) => {
         const userOrders: Order[] = [];
         snapshot.forEach((d) => {
-          userOrders.push(d.data() as Order);
+          const data = d.data() as Order;
+          if (!data.customerDeleted) {
+            userOrders.push(data);
+          }
         });
         const sorted = userOrders.sort(
           (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -239,6 +245,18 @@ export async function deleteOrderFromCloud(orderId: string): Promise<void> {
     await deleteDoc(doc(db, 'orders', orderId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function markOrderDeletedByCustomerInCloud(orderId: string): Promise<void> {
+  const path = `orders/${orderId}`;
+  try {
+    await updateDoc(doc(db, 'orders', orderId), {
+      customerDeleted: true,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
 

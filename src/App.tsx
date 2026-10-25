@@ -92,6 +92,30 @@ function saveSeenOrderStatuses(statuses: Record<string, string>) {
   } catch {}
 }
 
+function getCustomerDeletedOrderIds(): string[] {
+  try {
+    const raw = localStorage.getItem('toynest_customer_deleted_order_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function saveCustomerDeletedOrderIds(ids: string[]) {
+  try {
+    localStorage.setItem('toynest_customer_deleted_order_ids', JSON.stringify(ids));
+  } catch {}
+}
+
+function markOrderDeletedByCustomerLocally(orderId: string) {
+  const current = getCustomerDeletedOrderIds();
+  if (!current.includes(orderId)) {
+    saveCustomerDeletedOrderIds([...current, orderId]);
+  }
+}
+
 function getSeenOwnerOrderIds(): string[] {
   try {
     const raw = localStorage.getItem('toynest_seen_owner_order_ids');
@@ -152,6 +176,7 @@ import {
   subscribeToCustomerOrders,
   updateOrderStatusInCloud,
   deleteOrderFromCloud,
+  markOrderDeletedByCustomerInCloud,
   saveSuggestionToCloud,
   fetchSuggestionsFromCloud,
   deleteSuggestionFromCloud,
@@ -582,6 +607,7 @@ export default function App() {
   const [hasStatusUpdateNotification, setHasStatusUpdateNotification] = useState<boolean>(false);
   const [hasOwnerOrderNotification, setHasOwnerOrderNotification] = useState<boolean>(false);
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
+  const [deletingCustomerOrderId, setDeletingCustomerOrderId] = useState<string | null>(null);
 
   const shareShop = async () => {
     const url = 'https://playnixshop-website.vercel.app/';
@@ -697,6 +723,38 @@ export default function App() {
       seen[o.id] = o.status;
     });
     saveSeenOrderStatuses(seen);
+  };
+
+  const handleDeleteCustomerOrder = async (orderId: string) => {
+    const confirmed = window.confirm('Are you sure you want to delete this order from your view?');
+    if (!confirmed) return;
+
+    setDeletingCustomerOrderId(orderId);
+    try {
+      await markOrderDeletedByCustomerInCloud(orderId);
+    } catch (err) {
+      console.warn('Could not update Firestore for customer delete:', err);
+    }
+
+    try {
+      await api.post('/api/orders/customer-delete', { orderId, customerId });
+    } catch (err) {
+      console.warn('Could not update server for customer delete:', err);
+    }
+
+    // Mark locally in customer deleted list
+    markOrderDeletedByCustomerLocally(orderId);
+
+    // Update stored local orders: preserve order for owner, but mark customerDeleted: true
+    const currentStored = getStoredOrders();
+    const updatedStored = currentStored.map((o) =>
+      o.id === orderId ? { ...o, customerDeleted: true } : o
+    );
+    saveStoredOrders(updatedStored);
+
+    // Update myOrders state immediately
+    setMyOrders((prev) => prev.filter((o) => o.id !== orderId));
+    setDeletingCustomerOrderId(null);
   };
 
   const loadOwnerOrders = async () => {
@@ -957,21 +1015,26 @@ export default function App() {
 
   const checkOrderUpdates = async () => {
     if (!customerId) return;
+    const deletedIds = new Set(getCustomerDeletedOrderIds());
     try {
       const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
       if (Array.isArray(cloudOrders)) {
-        // Sync local storage by purging orders for this customer that are no longer in Firestore
+        const visibleOrders = cloudOrders.filter(
+          (o) => !o.customerDeleted && !deletedIds.has(o.id)
+        );
         const otherOrders = getStoredOrders().filter((o) => o.customerId !== customerId);
         saveStoredOrders([...cloudOrders, ...otherOrders]);
 
         const seen = getSeenOrderStatuses();
-        const hasUnseenStatus = cloudOrders.some((o) => seen[o.id] !== o.status);
+        const hasUnseenStatus = visibleOrders.some((o) => seen[o.id] !== o.status);
         setHasStatusUpdateNotification(hasUnseenStatus);
         return;
       }
     } catch {}
 
-    const stored = getStoredOrders().filter((o) => o.customerId === customerId);
+    const stored = getStoredOrders().filter(
+      (o) => o.customerId === customerId && !o.customerDeleted && !deletedIds.has(o.id)
+    );
     if (stored.length === 0) return;
     const seen = getSeenOrderStatuses();
     const hasUnseenStatus = stored.some((o) => seen[o.id] !== o.status);
@@ -1074,7 +1137,11 @@ export default function App() {
     try {
       unsub = subscribeToCustomerOrders(customerId, (liveOrders) => {
         if (Array.isArray(liveOrders)) {
-          const enriched = computeLocalQueuePositions(liveOrders);
+          const deletedIds = new Set(getCustomerDeletedOrderIds());
+          const visibleOrders = liveOrders.filter(
+            (o) => !o.customerDeleted && !deletedIds.has(o.id)
+          );
+          const enriched = computeLocalQueuePositions(visibleOrders);
           setMyOrders(enriched);
           const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
           saveStoredOrders([...liveOrders, ...otherStored]);
@@ -1104,16 +1171,20 @@ export default function App() {
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
     setMyOrdersError('');
+    const deletedIds = new Set(getCustomerDeletedOrderIds());
     try {
       await loadPaymentQr();
       
       // 1. Fetch latest orders directly from Cloud Firestore (shared database)
       const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
       if (Array.isArray(cloudOrders)) {
-        const enriched = computeLocalQueuePositions(cloudOrders);
+        const visibleOrders = cloudOrders.filter(
+          (o) => !o.customerDeleted && !deletedIds.has(o.id)
+        );
+        const enriched = computeLocalQueuePositions(visibleOrders);
         setMyOrders(enriched);
         
-        // Purge any deleted orders for this customer from local storage
+        // Save cloud orders without wiping other records
         const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
         saveStoredOrders([...cloudOrders, ...otherStored]);
 
@@ -1134,11 +1205,13 @@ export default function App() {
     try {
       const res = await api.post('/api/orders/mine', { customerId });
       if (res.data?.orders && Array.isArray(res.data.orders)) {
-        const orders: Order[] = res.data.orders;
+        const orders: Order[] = res.data.orders.filter(
+          (o: Order) => !o.customerDeleted && !deletedIds.has(o.id)
+        );
         const enriched = computeLocalQueuePositions(orders);
         setMyOrders(enriched);
         const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
-        saveStoredOrders([...orders, ...otherStored]);
+        saveStoredOrders([...res.data.orders, ...otherStored]);
 
         const seen = getSeenOrderStatuses();
         orders.forEach((o) => {
@@ -1153,11 +1226,13 @@ export default function App() {
 
     // 3. Fallback to local storage only if network failed
     const allStoredOrders = getStoredOrders();
-    const enrichedStored = computeLocalQueuePositions(allStoredOrders);
-    const localOrders = enrichedStored.filter((o) => o.customerId === customerId);
-    setMyOrders(localOrders);
+    const activeStored = allStoredOrders.filter(
+      (o) => o.customerId === customerId && !o.customerDeleted && !deletedIds.has(o.id)
+    );
+    const enrichedStored = computeLocalQueuePositions(activeStored);
+    setMyOrders(enrichedStored);
     const seen = getSeenOrderStatuses();
-    localOrders.forEach((o) => {
+    activeStored.forEach((o) => {
       seen[o.id] = o.status;
     });
     saveSeenOrderStatuses(seen);
@@ -2906,6 +2981,23 @@ export default function App() {
                             ? 'Your toy is on the way!'
                             : 'Your order is active in the shop queue.'}
                         </p>
+                      </div>
+                    )}
+
+                    {['completed', 'complete', 'delivered', 'collected', 'cancelled'].includes(
+                      (o.status || '').trim().toLowerCase()
+                    ) && (
+                      <div className="customer-order-actions">
+                        <button
+                          type="button"
+                          className="customer-delete-order-btn"
+                          onClick={() => void handleDeleteCustomerOrder(o.id)}
+                          disabled={deletingCustomerOrderId === o.id}
+                          title="Delete this order from your order history"
+                        >
+                          <Trash2 size={13} />
+                          {deletingCustomerOrderId === o.id ? 'Deleting…' : 'Delete order'}
+                        </button>
                       </div>
                     )}
                   </article>

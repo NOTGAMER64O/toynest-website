@@ -60,6 +60,7 @@ interface Order {
   paymentRecipientSection?: string;
   ownerNote?: string;
   colour?: string;
+  customerDeleted?: boolean;
 }
 
 interface Suggestion {
@@ -335,9 +336,30 @@ app.post('/api/orders/mine', (req, res) => {
     return res.json({ orders: [] });
   }
 
-  const userOrders = db.orders.filter((o) => o.customerId === customerId);
+  const userOrders = db.orders.filter((o) => o.customerId === customerId && !o.customerDeleted);
   const enrichedOrders = computeQueuePositions(userOrders, db.orders);
   res.json({ orders: enrichedOrders });
+});
+
+app.post('/api/orders/customer-delete', (req, res) => {
+  db = loadDB();
+  const { orderId } = req.body;
+  if (!orderId) {
+    return res.status(400).json({ error: 'Order ID is required' });
+  }
+  const order = db.orders.find((o) => o.id === orderId);
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found' });
+  }
+  const canDelete = ['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(order.status);
+  if (!canDelete) {
+    return res.status(400).json({
+      error: 'Only completed or cancelled orders can be removed from customer view.',
+    });
+  }
+  order.customerDeleted = true;
+  saveDB(db);
+  res.json({ success: true });
 });
 
 app.post('/api/suggestions', (req, res) => {

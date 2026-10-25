@@ -34,6 +34,7 @@ export interface Order {
   queuePosition?: number | null;
   peopleAhead?: number;
   colour?: string;
+  customerDeleted?: boolean;
 }
 
 export interface Suggestion {
