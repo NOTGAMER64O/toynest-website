@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Menu,
   Boxes,
@@ -19,9 +19,46 @@ import {
   Palette,
   ChevronDown,
   Check,
+  IndianRupee,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
+
+export const EARNED_ORDER_STATUSES = new Set(['completed', 'delivered', 'collected']);
+
+export function isOrderEarned(order: { status?: string } | null | undefined): boolean {
+  if (!order || !order.status) return false;
+  return EARNED_ORDER_STATUSES.has(order.status.trim().toLowerCase());
+}
+
+export function parseOrderPrice(rawPrice: any): number {
+  if (typeof rawPrice === 'number') {
+    return isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 0;
+  }
+  if (typeof rawPrice === 'string') {
+    const cleaned = rawPrice.replace(/[^\d.]/g, '');
+    const num = parseFloat(cleaned);
+    return !isNaN(num) && isFinite(num) && num > 0 ? num : 0;
+  }
+  return 0;
+}
+
+export function calculateTotalMoneyEarned(orders: Order[] = []): number {
+  if (!Array.isArray(orders) || orders.length === 0) return 0;
+  const seenIds = new Set<string>();
+  let total = 0;
+
+  for (const order of orders) {
+    if (!order || !order.id || seenIds.has(order.id)) continue;
+    seenIds.add(order.id);
+
+    if (isOrderEarned(order)) {
+      total += parseOrderPrice(order.price);
+    }
+  }
+
+  return total;
+}
 
 function getCustomerKey(): string {
   const KEY = 'toynest_customer_key';
@@ -423,7 +460,7 @@ function saveStoredOrders(orders: Order[]) {
 }
 
 function computeLocalQueuePositions(orders: Order[]): Order[] {
-  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched', 'Ready for pickup', 'Contacted'];
   const activeOrders = [...orders]
     .filter((o) => activeStatuses.includes(o.status))
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -452,6 +489,7 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
+  const totalMoneyEarned = useMemo(() => calculateTotalMoneyEarned(ownerOrders), [ownerOrders]);
   const [ownerPin, setOwnerPin] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
@@ -598,7 +636,7 @@ export default function App() {
   const loadOwnerOrders = async () => {
     try {
       const cloudOrders = await fetchAllOrdersFromCloud();
-      if (cloudOrders && cloudOrders.length > 0) {
+      if (Array.isArray(cloudOrders)) {
         setOwnerOrders(cloudOrders);
         saveStoredOrders(cloudOrders);
         markAllOwnerOrdersSeen(cloudOrders);
@@ -925,7 +963,7 @@ export default function App() {
   useEffect(() => {
     if (page === 'owner') {
       const unsubscribe = subscribeToAllOrders((liveOrders) => {
-        if (liveOrders && liveOrders.length > 0) {
+        if (Array.isArray(liveOrders)) {
           setOwnerOrders(liveOrders);
           saveStoredOrders(liveOrders);
         }
@@ -1425,9 +1463,11 @@ export default function App() {
         ownerNote: order.ownerNote || '',
       });
     } catch {}
+    setOwnerOrders((prev) =>
+      prev.map((o) => (o.id === order.id ? { ...o, status: newStatus } : o))
+    );
     const updated = getStoredOrders().map((o) => (o.id === order.id ? { ...o, status: newStatus } : o));
     saveStoredOrders(updated);
-    setOwnerOrders(updated);
     setSuccessMessage('Order status updated.');
   };
 
@@ -1530,7 +1570,7 @@ export default function App() {
 
   const deleteOldOrder = async (order: Order) => {
     if (
-      ['Completed', 'Cancelled'].includes(order.status) &&
+      ['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(order.status) &&
       confirm(
         `Delete finished order ${order.orderNumber || order.id.slice(0, 8)} for ${
           order.name
@@ -1544,10 +1584,10 @@ export default function App() {
       try {
         await ownerPost('/api/owner/orders/delete', { id: order.id });
       } catch {}
+      setOwnerOrders((prev) => prev.filter((o) => o.id !== order.id));
       const updated = getStoredOrders().filter((o) => o.id !== order.id);
       saveStoredOrders(updated);
-      setOwnerOrders(updated);
-      setSuccessMessage('Old order deleted.');
+      setSuccessMessage('Order deleted.');
     }
   };
 
@@ -2505,6 +2545,19 @@ export default function App() {
 
             <div className="stats-row">
               <div
+                className="stat-card stat-card-earned"
+                onClick={() => {
+                  setOwnerTab('orders');
+                  setOrderStatusFilter('Completed');
+                }}
+                style={{ cursor: 'pointer' }}
+                title="View completed & fulfilled orders"
+              >
+                <span>Total Money Earned</span>
+                <strong style={{ color: '#273824' }}>{da(totalMoneyEarned)}</strong>
+                <IndianRupee size={20} />
+              </div>
+              <div
                 className="stat-card"
                 onClick={() => setOwnerTab('products')}
                 style={{ cursor: 'pointer' }}
@@ -3012,7 +3065,7 @@ export default function App() {
                     Pending (
                     {
                       ownerOrders.filter(
-                        (o) => !['Completed', 'Cancelled'].includes(o.status)
+                        (o) => !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
                       ).length
                     }
                     )
@@ -3021,7 +3074,7 @@ export default function App() {
                     className={orderStatusFilter === 'Completed' ? 'active' : ''}
                     onClick={() => setOrderStatusFilter('Completed')}
                   >
-                    Completed ({ownerOrders.filter((o) => o.status === 'Completed').length})
+                    Completed ({ownerOrders.filter((o) => ['Completed', 'Delivered', 'Collected'].includes(o.status)).length})
                   </button>
                   <button
                     className={orderStatusFilter === 'Cancelled' ? 'active' : ''}
@@ -3031,10 +3084,39 @@ export default function App() {
                   </button>
                 </div>
 
+                {orderStatusFilter === 'Completed' && (
+                  <div
+                    style={{
+                      background: '#f4f6ec',
+                      border: '1px solid #dfe5cd',
+                      borderRadius: '10px',
+                      padding: '12px 16px',
+                      marginBottom: '18px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IndianRupee size={18} style={{ color: '#4f6937' }} />
+                      <span style={{ fontSize: '13px', fontWeight: 600, color: '#2f3d24' }}>
+                        Total Money Earned from Fulfilled Orders:
+                      </span>
+                    </div>
+                    <strong style={{ fontSize: '17px', color: '#273824', fontFamily: 'Manrope, sans-serif' }}>
+                      {da(totalMoneyEarned)}
+                    </strong>
+                  </div>
+                )}
+
                 <div className="orders-list">
                   {ownerOrders.filter((o) =>
                     orderStatusFilter === 'Pending'
-                      ? !['Completed', 'Cancelled'].includes(o.status)
+                      ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
+                      : orderStatusFilter === 'Completed'
+                      ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
                       : o.status === orderStatusFilter
                   ).length === 0 ? (
                     <div className="empty-state compact">
@@ -3050,7 +3132,9 @@ export default function App() {
                     ownerOrders
                       .filter((o) =>
                         orderStatusFilter === 'Pending'
-                          ? !['Completed', 'Cancelled'].includes(o.status)
+                          ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
+                          : orderStatusFilter === 'Completed'
+                          ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
                           : o.status === orderStatusFilter
                       )
                       .map((o) => (
@@ -3132,8 +3216,10 @@ export default function App() {
                               <option>Confirmed</option>
                               <option>Preparing</option>
                               <option>Dispatched</option>
-                              {o.status === 'Ready for pickup' && <option>Ready for pickup</option>}
+                              <option>Ready for pickup</option>
                               <option>Completed</option>
+                              <option>Delivered</option>
+                              <option>Collected</option>
                               <option>Cancelled</option>
                               {o.status === 'Contacted' && <option>Contacted</option>}
                             </select>
@@ -3203,7 +3289,7 @@ export default function App() {
                             </button>
                           </div>
 
-                          {['Completed', 'Cancelled'].includes(o.status) && (
+                          {['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status) && (
                             <button className="secondary-btn" onClick={() => void deleteOldOrder(o)}>
                               <Trash2 size={16} /> Delete old order
                             </button>

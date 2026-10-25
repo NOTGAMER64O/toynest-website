@@ -350,4 +350,39 @@
   color: #15803d;
 }
 
+/* Total Money Earned Card and Responsive Stats Grid */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)) !important;
+  gap: 14px !important;
+  margin-bottom: 28px !important;
+}
+
+.stat-card.stat-card-earned {
+  background: #edf3e4;
+  border-color: #dbe4cb;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.stat-card.stat-card-earned:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(45, 60, 30, 0.08);
+}
+
+.stat-card.stat-card-earned strong {
+  color: #273824;
+}
+
+.stat-card.stat-card-earned svg {
+  color: #55723b;
+}
+
+@media (max-width: 760px) {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+}
+
+
 

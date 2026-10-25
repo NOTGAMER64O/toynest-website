@@ -226,7 +226,7 @@ function verifyPin(pin: unknown): boolean {
 
 // Helper to compute queue positions accurately relative to all active orders
 function computeQueuePositions(orders: Order[], allOrders: Order[] = orders) {
-  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched', 'Ready for pickup', 'Contacted'];
   const activeOrders = allOrders
     .filter((o) => activeStatuses.includes(o.status))
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -505,14 +505,42 @@ app.post('/api/owner/orders/delete', (req, res) => {
     return res.status(404).json({ error: 'Order not found.' });
   }
 
-  if (!['Completed', 'Cancelled'].includes(order.status)) {
-    return res.status(400).json({ error: 'Only completed or cancelled orders can be deleted.' });
+  if (!['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(order.status)) {
+    return res.status(400).json({ error: 'Only completed, delivered, collected, or cancelled orders can be deleted.' });
   }
 
   db.orders = db.orders.filter((o) => o.id !== id);
   saveDB(db);
 
   res.json({ success: true });
+});
+
+app.post('/api/owner/earnings', (req, res) => {
+  const { pin } = req.body;
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  db = loadDB();
+  const earnedStatuses = new Set(['completed', 'delivered', 'collected']);
+  const seenIds = new Set<string>();
+  let total = 0;
+  let fulfilledCount = 0;
+
+  for (const order of db.orders) {
+    if (!order || !order.id || seenIds.has(order.id)) continue;
+    seenIds.add(order.id);
+
+    if (order.status && earnedStatuses.has(order.status.trim().toLowerCase())) {
+      const p = Number(order.price);
+      if (!isNaN(p) && isFinite(p) && p > 0) {
+        total += p;
+        fulfilledCount++;
+      }
+    }
+  }
+
+  res.json({ totalMoneyEarned: total, totalFulfilledOrders: fulfilledCount });
 });
 
 app.post('/api/owner/suggestions', (req, res) => {

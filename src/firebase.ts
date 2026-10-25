@@ -85,7 +85,7 @@ testConnection();
 
 // Compute queue positions relative to all active orders
 export function computeQueue(orders: Order[]): Order[] {
-  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched'];
+  const activeStatuses = ['New', 'Confirmed', 'Preparing', 'Dispatched', 'Ready for pickup', 'Contacted'];
   const active = orders
     .filter((o) => activeStatuses.includes(o.status))
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
