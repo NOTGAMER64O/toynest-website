@@ -23,6 +23,7 @@ import {
   MoreVertical,
   Layers,
   QrCode,
+  Search,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -526,6 +527,36 @@ export default function App() {
   const [submittingSuggestion, setSubmittingSuggestion] = useState<boolean>(false);
   const [suggestionSuccess, setSuggestionSuccess] = useState<string>('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<'Pending' | 'Completed' | 'Cancelled'>('Pending');
+  const [orderSearchQuery, setOrderSearchQuery] = useState<string>('');
+
+  const filteredOwnerOrders = useMemo(() => {
+    const q = orderSearchQuery.trim().toLowerCase();
+    return ownerOrders.filter((o) => {
+      const matchesStatus =
+        orderStatusFilter === 'Pending'
+          ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
+          : orderStatusFilter === 'Completed'
+          ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
+          : o.status === orderStatusFilter;
+
+      if (!matchesStatus) return false;
+
+      if (q) {
+        const customerName = (o.name || '').toLowerCase();
+        const productName = (o.productName || '').toLowerCase();
+        const orderNumber = (o.orderNumber || '').toLowerCase();
+        const orderId = (o.id || '').toLowerCase();
+        return (
+          customerName.includes(q) ||
+          productName.includes(q) ||
+          orderNumber.includes(q) ||
+          orderId.includes(q)
+        );
+      }
+
+      return true;
+    });
+  }, [ownerOrders, orderStatusFilter, orderSearchQuery]);
   const [checkoutForm, setCheckoutForm] = useState({
     name: '',
     studentClass: '',
@@ -3476,32 +3507,72 @@ export default function App() {
             {/* ORDERS TAB */}
             {ownerTab === 'orders' && (
               <>
-                <div className="dashboard-tabs order-filters">
-                  <button
-                    className={orderStatusFilter === 'Pending' ? 'active' : ''}
-                    onClick={() => setOrderStatusFilter('Pending')}
-                  >
-                    Pending (
-                    {
-                      ownerOrders.filter(
-                        (o) => !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
-                      ).length
-                    }
-                    )
-                  </button>
-                  <button
-                    className={orderStatusFilter === 'Completed' ? 'active' : ''}
-                    onClick={() => setOrderStatusFilter('Completed')}
-                  >
-                    Completed ({ownerOrders.filter((o) => ['Completed', 'Delivered', 'Collected'].includes(o.status)).length})
-                  </button>
-                  <button
-                    className={orderStatusFilter === 'Cancelled' ? 'active' : ''}
-                    onClick={() => setOrderStatusFilter('Cancelled')}
-                  >
-                    Cancelled ({ownerOrders.filter((o) => o.status === 'Cancelled').length})
-                  </button>
+                <div className="orders-toolbar">
+                  <div className="dashboard-tabs order-filters">
+                    <button
+                      className={orderStatusFilter === 'Pending' ? 'active' : ''}
+                      onClick={() => setOrderStatusFilter('Pending')}
+                    >
+                      Pending (
+                      {
+                        ownerOrders.filter(
+                          (o) => !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
+                        ).length
+                      }
+                      )
+                    </button>
+                    <button
+                      className={orderStatusFilter === 'Completed' ? 'active' : ''}
+                      onClick={() => setOrderStatusFilter('Completed')}
+                    >
+                      Completed ({ownerOrders.filter((o) => ['Completed', 'Delivered', 'Collected'].includes(o.status)).length})
+                    </button>
+                    <button
+                      className={orderStatusFilter === 'Cancelled' ? 'active' : ''}
+                      onClick={() => setOrderStatusFilter('Cancelled')}
+                    >
+                      Cancelled ({ownerOrders.filter((o) => o.status === 'Cancelled').length})
+                    </button>
+                  </div>
+
+                  <div className="orders-search-wrapper">
+                    <Search size={16} className="orders-search-icon" aria-hidden="true" />
+                    <input
+                      type="text"
+                      className="orders-search-input"
+                      value={orderSearchQuery}
+                      onChange={(e) => setOrderSearchQuery(e.target.value)}
+                      placeholder="Search customer or product name…"
+                      aria-label="Filter orders by customer name or product name"
+                    />
+                    {orderSearchQuery && (
+                      <button
+                        type="button"
+                        className="orders-search-clear"
+                        onClick={() => setOrderSearchQuery('')}
+                        title="Clear search"
+                        aria-label="Clear search"
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
                 </div>
+
+                {orderSearchQuery.trim() && (
+                  <div className="orders-search-feedback">
+                    <span>
+                      Found <strong>{filteredOwnerOrders.length}</strong> {filteredOwnerOrders.length === 1 ? 'order' : 'orders'} matching &ldquo;{orderSearchQuery.trim()}&rdquo; in {orderStatusFilter}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOrderSearchQuery('')}
+                      className="orders-search-feedback-clear"
+                    >
+                      Clear search
+                    </button>
+                  </div>
+                )}
 
                 {orderStatusFilter === 'Completed' && (
                   <div
@@ -3531,32 +3602,34 @@ export default function App() {
                 )}
 
                 <div className="orders-list">
-                  {ownerOrders.filter((o) =>
-                    orderStatusFilter === 'Pending'
-                      ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
-                      : orderStatusFilter === 'Completed'
-                      ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
-                      : o.status === orderStatusFilter
-                  ).length === 0 ? (
+                  {filteredOwnerOrders.length === 0 ? (
                     <div className="empty-state compact">
-                      <div className="empty-icon">📦</div>
+                      <div className="empty-icon">{orderSearchQuery.trim() ? '🔍' : '📦'}</div>
                       <h3>
-                        {orderStatusFilter === 'Pending'
+                        {orderSearchQuery.trim()
+                          ? `No orders matching "${orderSearchQuery.trim()}"`
+                          : orderStatusFilter === 'Pending'
                           ? 'No pending orders'
                           : `No ${orderStatusFilter.toLowerCase()} orders`}
                       </h3>
-                      <p>Orders will appear here when their status matches this section.</p>
+                      <p>
+                        {orderSearchQuery.trim()
+                          ? `We couldn't find any orders matching this customer name or product name in the ${orderStatusFilter} tab.`
+                          : 'Orders will appear here when their status matches this section.'}
+                      </p>
+                      {orderSearchQuery.trim() && (
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          style={{ marginTop: '10px' }}
+                          onClick={() => setOrderSearchQuery('')}
+                        >
+                          Clear search
+                        </button>
+                      )}
                     </div>
                   ) : (
-                    ownerOrders
-                      .filter((o) =>
-                        orderStatusFilter === 'Pending'
-                          ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
-                          : orderStatusFilter === 'Completed'
-                          ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
-                          : o.status === orderStatusFilter
-                      )
-                      .map((o) => (
+                    filteredOwnerOrders.map((o) => (
                         <article className="order-card" key={o.id}>
                           {o.productImageUrl && (
                             <div className="order-product-preview">
