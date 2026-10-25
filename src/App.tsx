@@ -20,6 +20,9 @@ import {
   ChevronDown,
   Check,
   IndianRupee,
+  MoreVertical,
+  Layers,
+  QrCode,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -502,6 +505,7 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isSideMenuOpen, setIsSideMenuOpen] = useState<boolean>(false);
+  const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState<boolean>(false);
   const [selectedProductForBuy, setSelectedProductForBuy] = useState<Product | null>(null);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
@@ -1093,6 +1097,34 @@ export default function App() {
       }
     });
   }, [galleryProduct]);
+
+  // Escape key and body scroll lock for owner menu panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsOwnerMenuOpen(false);
+      }
+    };
+    if (isOwnerMenuOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = 'hidden';
+    } else if (!isSideMenuOpen) {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (!isSideMenuOpen) {
+        document.body.style.overflow = '';
+      }
+    };
+  }, [isOwnerMenuOpen, isSideMenuOpen]);
+
+  // Ensure owner menu panel is closed if owner exits dashboard
+  useEffect(() => {
+    if (page !== 'owner') {
+      setIsOwnerMenuOpen(false);
+    }
+  }, [page]);
 
   const ownerPost = async (url: string, body: any) => {
     let pinToSend = ownerPin;
@@ -1744,51 +1776,78 @@ export default function App() {
         </button>
 
         <div className="top-actions">
-          <span className="open-label">
-            <span className="dot"></span> Toy shop
-          </span>
-          <button
-            className="owner-link"
-            type="button"
-            onClick={shareShop}
-            title="Copy shop link"
-          >
-            <Share2 size={16} /> {copiedLink ? 'Copied link!' : 'Share shop'}
-          </button>
-          <button
-            className="owner-link"
-            style={{ position: 'relative' }}
-            onClick={() => {
-              setPage('myOrders');
-              setErrorMessage('');
-            }}
-          >
-            <PackageCheck size={16} /> My Orders
-            {hasStatusUpdateNotification && (
-              <span
-                className="blinking-green-dot"
-                title="Your active order is in progress!"
-                aria-label="Order status update notification"
-              />
-            )}
-          </button>
-          <button
-            className="owner-link"
-            style={{ position: 'relative' }}
-            onClick={() => {
-              setPage('ownerLogin');
-              setErrorMessage('');
-            }}
-          >
-            <ShieldCheck size={16} /> Owner
-            {hasOwnerOrderNotification && (
-              <span
-                className="blinking-green-dot"
-                title={`${ownerNewOrdersCount} new order request(s)!`}
-                aria-label="New order notification"
-              />
-            )}
-          </button>
+          {page !== 'owner' ? (
+            <>
+              <span className="open-label">
+                <span className="dot"></span> Toy shop
+              </span>
+              <button
+                className="owner-link"
+                type="button"
+                onClick={shareShop}
+                title="Copy shop link"
+              >
+                <Share2 size={16} /> {copiedLink ? 'Copied link!' : 'Share shop'}
+              </button>
+              <button
+                className="owner-link"
+                style={{ position: 'relative' }}
+                onClick={() => {
+                  setPage('myOrders');
+                  setErrorMessage('');
+                }}
+              >
+                <PackageCheck size={16} /> My Orders
+                {hasStatusUpdateNotification && (
+                  <span
+                    className="blinking-green-dot"
+                    title="Your active order is in progress!"
+                    aria-label="Order status update notification"
+                  />
+                )}
+              </button>
+              <button
+                className="owner-link"
+                style={{ position: 'relative' }}
+                onClick={() => {
+                  setPage('ownerLogin');
+                  setErrorMessage('');
+                }}
+              >
+                <ShieldCheck size={16} /> Owner
+                {hasOwnerOrderNotification && (
+                  <span
+                    className="blinking-green-dot"
+                    title={`${ownerNewOrdersCount} new order request(s)!`}
+                    aria-label="New order notification"
+                  />
+                )}
+              </button>
+            </>
+          ) : (
+            <div className="owner-topbar-actions">
+              <button
+                className="owner-link"
+                type="button"
+                onClick={() => {
+                  setPage('home');
+                  setOwnerPin('');
+                  setIsOwnerMenuOpen(false);
+                }}
+              >
+                Exit owner
+              </button>
+              <button
+                className="owner-dots-btn"
+                type="button"
+                onClick={() => setIsOwnerMenuOpen(true)}
+                title="Owner options menu (Shop Sections, Payment QR, Manage Colours)"
+                aria-label="Owner options menu"
+              >
+                <MoreVertical size={20} />
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1906,6 +1965,196 @@ export default function App() {
 
             <div className="side-menu-footer">
               A little joy for every day <span>✦</span>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* Owner Right-Side Slide-Out Panel */}
+      {page === 'owner' && isOwnerMenuOpen && (
+        <div
+          className="owner-panel-backdrop"
+          onClick={() => setIsOwnerMenuOpen(false)}
+          role="presentation"
+        >
+          <aside
+            className="owner-panel-drawer"
+            aria-label="Owner Settings and Options"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="owner-panel-header">
+              <div className="owner-panel-title">
+                <span className="owner-panel-icon">
+                  <ShieldCheck size={20} />
+                </span>
+                <div>
+                  <h3>Owner Menu</h3>
+                  <small>Configuration & Tools</small>
+                </div>
+              </div>
+              <button
+                className="owner-panel-close-btn"
+                type="button"
+                onClick={() => setIsOwnerMenuOpen(false)}
+                aria-label="Close owner panel"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="owner-panel-content">
+              <span className="owner-panel-section-label">STORE CONFIGURATION</span>
+
+              <div className="owner-panel-items">
+                {/* 1. Shop Sections */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'sections' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('sections');
+                    loadShopModes();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon">
+                    <Layers size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Shop Sections</strong>
+                    <span>Adult & Child section visibility</span>
+                  </div>
+                  {ownerTab === 'sections' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {adultPublished && childPublished
+                        ? 'Both on'
+                        : adultPublished
+                        ? 'Adult'
+                        : childPublished
+                        ? 'Child'
+                        : 'Draft'}
+                    </span>
+                  )}
+                </button>
+
+                {/* 2. Payment QR */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'payment' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('payment');
+                    loadPaymentQr();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon">
+                    <QrCode size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Payment QR</strong>
+                    <span>UPI QR code for adult orders</span>
+                  </div>
+                  {ownerTab === 'payment' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {paymentQrUrl ? 'Uploaded' : 'Not set'}
+                    </span>
+                  )}
+                </button>
+
+                {/* 3. Manage Colours */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'colours' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('colours');
+                    loadColours();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon">
+                    <Palette size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Manage Colours</strong>
+                    <span>Toy color choices for orders</span>
+                  </div>
+                  {ownerTab === 'colours' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {availableColours.length} colours
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              <div className="owner-panel-divider" />
+
+              <span className="owner-panel-section-label">MAIN DASHBOARD</span>
+              <div className="owner-panel-quick-nav">
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'products' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('products');
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <Store size={15} /> Products ({products.filter((p) => p.available !== false).length})
+                </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'drafts' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('drafts');
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <FileText size={15} /> Drafts ({products.filter((p) => p.available === false).length})
+                </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'orders' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('orders');
+                    loadOwnerOrders();
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <PackageCheck size={15} /> Orders ({ownerOrders.length})
+                </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'suggestions' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('suggestions');
+                    loadOwnerSuggestions();
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <MessageSquare size={15} /> Suggestions ({ownerSuggestions.length})
+                </button>
+              </div>
+            </div>
+
+            <div className="owner-panel-footer">
+              <button
+                type="button"
+                className="owner-panel-exit-btn"
+                onClick={() => {
+                  setIsOwnerMenuOpen(false);
+                  setPage('home');
+                  setOwnerPin('');
+                }}
+              >
+                Exit owner area
+              </button>
             </div>
           </aside>
         </div>
@@ -2651,9 +2900,19 @@ export default function App() {
                   onClick={() => {
                     setPage('home');
                     setOwnerPin('');
+                    setIsOwnerMenuOpen(false);
                   }}
                 >
                   Exit owner area
+                </button>
+                <button
+                  className="owner-dots-btn-inline"
+                  type="button"
+                  onClick={() => setIsOwnerMenuOpen(true)}
+                  title="Owner options (Shop Sections, Payment QR, Manage Colours)"
+                  aria-label="Owner options menu"
+                >
+                  <MoreVertical size={19} />
                 </button>
               </div>
             </div>
@@ -2753,33 +3012,18 @@ export default function App() {
               >
                 Suggestions ({ownerSuggestions.length})
               </button>
-              <button
-                className={ownerTab === 'sections' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('sections');
-                  loadShopModes();
-                }}
-              >
-                Shop sections
-              </button>
-              <button
-                className={ownerTab === 'payment' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('payment');
-                  loadPaymentQr();
-                }}
-              >
-                Payment QR
-              </button>
-              <button
-                className={ownerTab === 'colours' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('colours');
-                  loadColours();
-                }}
-              >
-                Manage Colours ({availableColours.length})
-              </button>
+              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours') && (
+                <button
+                  className="active panel-active-tab-indicator"
+                  type="button"
+                  onClick={() => setIsOwnerMenuOpen(true)}
+                  title="Active section opened from Owner Menu (Tap to change)"
+                >
+                  {ownerTab === 'sections' && '⚙️ Shop Sections'}
+                  {ownerTab === 'payment' && '💳 Payment QR'}
+                  {ownerTab === 'colours' && '🎨 Manage Colours'}
+                </button>
+              )}
             </div>
 
             {successMessage && <p className="success-msg">{successMessage}</p>}
