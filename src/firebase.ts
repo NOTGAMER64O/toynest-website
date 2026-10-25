@@ -138,6 +138,7 @@ export async function fetchCustomerOrdersByIds(orderIds: string[]): Promise<Orde
 }
 
 export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<Order[]> {
+  const path = `orders (customerId: ${customerId})`;
   try {
     const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
     const snapshot = await getDocs(q);
@@ -147,12 +148,40 @@ export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<
     });
     return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   } catch (err) {
-    console.warn('Could not query customer orders:', err);
+    handleFirestoreError(err, OperationType.LIST, path);
     return [];
   }
 }
 
+export function subscribeToCustomerOrders(
+  customerId: string,
+  callback: (orders: Order[]) => void
+): () => void {
+  try {
+    const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const userOrders: Order[] = [];
+        snapshot.forEach((d) => {
+          userOrders.push(d.data() as Order);
+        });
+        const sorted = userOrders.sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        callback(sorted);
+      },
+      (error) => {
+        console.warn('Customer orders subscription error:', error);
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
 export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
+  const path = 'orders';
   try {
     const snapshot = await getDocs(collection(db, 'orders'));
     const orders: Order[] = [];
@@ -164,7 +193,7 @@ export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   } catch (error) {
-    console.warn('Could not fetch cloud orders:', error);
+    handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
 }

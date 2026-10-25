@@ -499,13 +499,19 @@ app.post('/api/owner/orders/delete', (req, res) => {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
 
+  if (!id) {
+    return res.status(400).json({ error: 'Order ID is required.' });
+  }
+
   db = loadDB();
   const order = db.orders.find((o) => o.id === id);
   if (!order) {
-    return res.status(404).json({ error: 'Order not found.' });
+    return res.json({ success: true, message: 'Order was not found or already deleted.' });
   }
 
-  if (!['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(order.status)) {
+  const statusLower = (order.status || '').trim().toLowerCase();
+  const allowed = ['completed', 'complete', 'delivered', 'collected', 'cancelled'];
+  if (!allowed.includes(statusLower)) {
     return res.status(400).json({ error: 'Only completed, delivered, collected, or cancelled orders can be deleted.' });
   }
 

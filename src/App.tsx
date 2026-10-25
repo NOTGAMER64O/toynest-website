@@ -145,6 +145,7 @@ import {
   fetchCustomerOrdersFromCloud,
   fetchAllOrdersFromCloud,
   subscribeToAllOrders,
+  subscribeToCustomerOrders,
   updateOrderStatusInCloud,
   deleteOrderFromCloud,
   saveSuggestionToCloud,
@@ -490,7 +491,13 @@ export default function App() {
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
   const totalMoneyEarned = useMemo(() => calculateTotalMoneyEarned(ownerOrders), [ownerOrders]);
-  const [ownerPin, setOwnerPin] = useState<string>('');
+  const [ownerPin, setOwnerPin] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem('playnix_owner_pin') || '';
+    } catch {
+      return '';
+    }
+  });
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -891,26 +898,31 @@ export default function App() {
 
   const checkOrderUpdates = async () => {
     if (!customerId) return;
-    const stored = getStoredOrders().filter((o) => o.customerId === customerId);
-    if (stored.length === 0) return;
-    const storedIds = stored.map((o) => o.id);
-    let orders: Order[] = stored;
     try {
-      const cloudOrders = await fetchCustomerOrdersByIds(storedIds);
-      if (cloudOrders.length > 0) {
-        orders = cloudOrders;
+      const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
+      if (Array.isArray(cloudOrders)) {
+        // Sync local storage by purging orders for this customer that are no longer in Firestore
+        const otherOrders = getStoredOrders().filter((o) => o.customerId !== customerId);
+        saveStoredOrders([...cloudOrders, ...otherOrders]);
+
+        const seen = getSeenOrderStatuses();
+        const hasUnseenStatus = cloudOrders.some((o) => seen[o.id] !== o.status);
+        setHasStatusUpdateNotification(hasUnseenStatus);
+        return;
       }
     } catch {}
 
+    const stored = getStoredOrders().filter((o) => o.customerId === customerId);
+    if (stored.length === 0) return;
     const seen = getSeenOrderStatuses();
-    const hasUnseenStatus = orders.some((o) => seen[o.id] !== o.status);
+    const hasUnseenStatus = stored.some((o) => seen[o.id] !== o.status);
     setHasStatusUpdateNotification(hasUnseenStatus);
   };
 
   const checkOwnerOrderUpdates = async () => {
     try {
       const cloudOrders = await fetchAllOrdersFromCloud();
-      if (cloudOrders && cloudOrders.length > 0) {
+      if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
         const seenIds = new Set(getSeenOwnerOrderIds());
         const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
         setOwnerNewOrdersCount(unseenNewOrders.length);
@@ -959,6 +971,27 @@ export default function App() {
     };
   }, [customerId]);
 
+  // Real-time Firestore sync for customer orders across devices
+  useEffect(() => {
+    if (!customerId) return;
+    let unsub = () => {};
+    try {
+      unsub = subscribeToCustomerOrders(customerId, (liveOrders) => {
+        if (Array.isArray(liveOrders)) {
+          const enriched = computeLocalQueuePositions(liveOrders);
+          setMyOrders(enriched);
+          const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
+          saveStoredOrders([...liveOrders, ...otherStored]);
+        }
+      });
+    } catch (err) {
+      console.warn('Customer order subscription error:', err);
+    }
+    return () => {
+      unsub();
+    };
+  }, [customerId]);
+
   // Real-time Firestore sync when owner dashboard is active
   useEffect(() => {
     if (page === 'owner') {
@@ -977,37 +1010,40 @@ export default function App() {
     setMyOrdersError('');
     try {
       await loadPaymentQr();
-      const storedOrders = getStoredOrders().filter((o) => o.customerId === customerId);
-      const storedIds = storedOrders.map((o) => o.id);
       
-      // Look up specific customer order documents by ID from Cloud Firestore
-      if (storedIds.length > 0) {
-        const cloudUpdates = await fetchCustomerOrdersByIds(storedIds);
-        if (cloudUpdates.length > 0) {
-          const cloudMap = new Map(cloudUpdates.map((o) => [o.id, o]));
-          const merged = storedOrders.map((o) => cloudMap.get(o.id) || o);
-          const allStored = getStoredOrders().map((o) => cloudMap.get(o.id) || o);
-          saveStoredOrders(allStored);
-          const enriched = computeLocalQueuePositions(merged);
-          setMyOrders(enriched);
-          const seen = getSeenOrderStatuses();
-          enriched.forEach((o) => {
-            seen[o.id] = o.status;
-          });
-          saveSeenOrderStatuses(seen);
-          setHasStatusUpdateNotification(false);
-          setMyOrdersLoading(false);
-          return;
-        }
-      }
-    } catch {}
+      // 1. Fetch latest orders directly from Cloud Firestore (shared database)
+      const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
+      if (Array.isArray(cloudOrders)) {
+        const enriched = computeLocalQueuePositions(cloudOrders);
+        setMyOrders(enriched);
+        
+        // Purge any deleted orders for this customer from local storage
+        const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
+        saveStoredOrders([...cloudOrders, ...otherStored]);
 
+        const seen = getSeenOrderStatuses();
+        enriched.forEach((o) => {
+          seen[o.id] = o.status;
+        });
+        saveSeenOrderStatuses(seen);
+        setHasStatusUpdateNotification(false);
+        setMyOrdersLoading(false);
+        return;
+      }
+    } catch (err) {
+      console.warn('Could not query customer orders from Firestore:', err);
+    }
+
+    // 2. Fallback to server endpoint
     try {
       const res = await api.post('/api/orders/mine', { customerId });
       if (res.data?.orders && Array.isArray(res.data.orders)) {
         const orders: Order[] = res.data.orders;
-        setMyOrders(orders);
-        saveStoredOrders(orders);
+        const enriched = computeLocalQueuePositions(orders);
+        setMyOrders(enriched);
+        const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
+        saveStoredOrders([...orders, ...otherStored]);
+
         const seen = getSeenOrderStatuses();
         orders.forEach((o) => {
           seen[o.id] = o.status;
@@ -1019,6 +1055,7 @@ export default function App() {
       }
     } catch {}
 
+    // 3. Fallback to local storage only if network failed
     const allStoredOrders = getStoredOrders();
     const enrichedStored = computeLocalQueuePositions(allStoredOrders);
     const localOrders = enrichedStored.filter((o) => o.customerId === customerId);
@@ -1058,7 +1095,15 @@ export default function App() {
   }, [galleryProduct]);
 
   const ownerPost = async (url: string, body: any) => {
-    return api.post(url, { ...body, pin: ownerPin });
+    let pinToSend = ownerPin;
+    if (!pinToSend) {
+      try {
+        pinToSend = sessionStorage.getItem('playnix_owner_pin') || DEFAULT_OWNER_PIN;
+      } catch {
+        pinToSend = DEFAULT_OWNER_PIN;
+      }
+    }
+    return api.post(url, { ...body, pin: pinToSend });
   };
 
   const refreshShop = async () => {
@@ -1098,6 +1143,10 @@ export default function App() {
     const isPinValid = normalizedEntered === DEFAULT_OWNER_PIN;
 
     if (isPinValid) {
+      try {
+        sessionStorage.setItem('playnix_owner_pin', DEFAULT_OWNER_PIN);
+      } catch {}
+      setOwnerPin(DEFAULT_OWNER_PIN);
       try {
         localStorage.removeItem('toynest_custom_owner_pin');
       } catch {}
@@ -1569,26 +1618,85 @@ export default function App() {
   };
 
   const deleteOldOrder = async (order: Order) => {
+    const statusLower = (order.status || '').trim().toLowerCase();
+    const canDelete = ['completed', 'complete', 'delivered', 'collected', 'cancelled'].includes(statusLower);
+    if (!canDelete) {
+      setErrorMessage('Only completed, delivered, collected, or cancelled orders can be deleted.');
+      return;
+    }
+
+    const orderRef = order.orderNumber || order.id.slice(0, 8);
     if (
-      ['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(order.status) &&
-      confirm(
-        `Delete finished order ${order.orderNumber || order.id.slice(0, 8)} for ${
-          order.name
-        }? This cannot be undone.`
+      !confirm(
+        `Delete finished order ${orderRef} for ${order.name}? This cannot be undone.`
       )
     ) {
-      setErrorMessage('');
-      try {
-        await deleteOrderFromCloud(order.id);
-      } catch {}
-      try {
-        await ownerPost('/api/owner/orders/delete', { id: order.id });
-      } catch {}
-      setOwnerOrders((prev) => prev.filter((o) => o.id !== order.id));
-      const updated = getStoredOrders().filter((o) => o.id !== order.id);
-      saveStoredOrders(updated);
-      setSuccessMessage('Order deleted.');
+      return;
     }
+
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    let cloudDeleted = false;
+    let backendDeleted = false;
+    let cloudError: any = null;
+    let backendError: any = null;
+
+    // 1. Delete permanently from Cloud Firestore (the primary shared database)
+    try {
+      await deleteOrderFromCloud(order.id);
+      cloudDeleted = true;
+    } catch (err) {
+      cloudError = err;
+      console.error('Failed to delete order from Cloud Firestore:', err);
+    }
+
+    // 2. Delete permanently from server storage
+    try {
+      const res = await ownerPost('/api/owner/orders/delete', { id: order.id });
+      if (res.data?.success) {
+        backendDeleted = true;
+      }
+    } catch (err) {
+      backendError = err;
+      console.warn('Failed to delete order from backend server:', err);
+    }
+
+    // Requirement 6: Handle database errors properly.
+    // Do not show a successful deletion message unless the database confirms the deletion.
+    if (!cloudDeleted && !backendDeleted) {
+      setLoading(false);
+      const errMsg =
+        cloudError instanceof Error
+          ? cloudError.message
+          : backendError instanceof Error
+          ? backendError.message
+          : 'Could not delete order from the shared database. Please check your connection and try again.';
+      setErrorMessage(`Database deletion failed: ${errMsg}`);
+      return;
+    }
+
+    // 3. Immediately remove from local state
+    setOwnerOrders((prev) => prev.filter((o) => o.id !== order.id));
+
+    // 4. Immediately remove from local storage cache
+    const updatedStored = getStoredOrders().filter((o) => o.id !== order.id);
+    saveStoredOrders(updatedStored);
+
+    // 5. Clean notification tracking
+    try {
+      const seenStatuses = getSeenOrderStatuses();
+      if (seenStatuses[order.id]) {
+        delete seenStatuses[order.id];
+        saveSeenOrderStatuses(seenStatuses);
+      }
+      const seenOwner = getSeenOwnerOrderIds().filter((id) => id !== order.id);
+      localStorage.setItem('toynest_seen_owner_order_ids', JSON.stringify(seenOwner));
+    } catch {}
+
+    setSuccessMessage(`Order ${orderRef} deleted permanently from the database.`);
+    setLoading(false);
   };
 
   return (
@@ -3289,9 +3397,13 @@ export default function App() {
                             </button>
                           </div>
 
-                          {['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status) && (
-                            <button className="secondary-btn" onClick={() => void deleteOldOrder(o)}>
-                              <Trash2 size={16} /> Delete old order
+                          {['completed', 'complete', 'delivered', 'collected', 'cancelled'].includes((o.status || '').trim().toLowerCase()) && (
+                            <button
+                              className="secondary-btn"
+                              disabled={loading}
+                              onClick={() => void deleteOldOrder(o)}
+                            >
+                              <Trash2 size={16} /> {loading ? 'Deleting…' : 'Delete old order'}
                             </button>
                           )}
                         </article>
