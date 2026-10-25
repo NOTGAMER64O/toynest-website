@@ -2202,6 +2202,13 @@ export default function App() {
                     </p>
                   )}
 
+                  {/* Adult Warning */}
+                  {checkoutMode === 'Adult' && (
+                    <p className="child-eligibility-warning" role="note">
+                      ⚠️ If you are BCS student please use child option
+                    </p>
+                  )}
+
                   <label>
                     Your name
                     <input
