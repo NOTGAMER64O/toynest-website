@@ -627,11 +627,35 @@ export default function App() {
 
   const dismissOwnerNotification = () => {
     setHasOwnerOrderNotification(false);
+    setOwnerNewOrdersCount(0);
+    const nowIso = new Date().toISOString();
+    try {
+      localStorage.setItem('toynest_owner_acknowledged_time', nowIso);
+    } catch {}
+
     const stored = getStoredOrders();
     markAllOwnerOrdersSeen(stored);
     if (ownerOrders.length > 0) {
       markAllOwnerOrdersSeen(ownerOrders);
     }
+
+    // Also fetch latest orders from cloud to record all existing IDs as seen
+    fetchAllOrdersFromCloud()
+      .then((cloudOrders) => {
+        if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
+          saveStoredOrders(cloudOrders);
+          markAllOwnerOrdersSeen(cloudOrders);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const handleOpenOwnerAccess = () => {
+    setPage('ownerLogin');
+    setErrorMessage('');
+    setIsSideMenuOpen(false);
+    dismissOwnerNotification();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const dismissCustomerNotification = () => {
@@ -924,11 +948,33 @@ export default function App() {
   };
 
   const checkOwnerOrderUpdates = async () => {
+    const getAcknowledgedTime = (): number => {
+      try {
+        const raw = localStorage.getItem('toynest_owner_acknowledged_time');
+        if (raw) {
+          const t = new Date(raw).getTime();
+          if (!isNaN(t)) return t;
+        }
+      } catch {}
+      return 0;
+    };
+    const ackTime = getAcknowledgedTime();
+
     try {
       const cloudOrders = await fetchAllOrdersFromCloud();
       if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
+        saveStoredOrders(cloudOrders);
         const seenIds = new Set(getSeenOwnerOrderIds());
-        const unseenNewOrders = cloudOrders.filter((o) => o.status === 'New' && !seenIds.has(o.id));
+        const unseenNewOrders = cloudOrders.filter((o) => {
+          if (o.status !== 'New') return false;
+          if (seenIds.has(o.id)) return false;
+          if (ackTime > 0) {
+            const orderTime = new Date(o.createdAt).getTime();
+            if (!isNaN(orderTime) && orderTime <= ackTime) return false;
+          }
+          return true;
+        });
+
         setOwnerNewOrdersCount(unseenNewOrders.length);
         setHasOwnerOrderNotification(unseenNewOrders.length > 0);
         return;
@@ -937,11 +983,18 @@ export default function App() {
 
     try {
       const res = await api.get('/api/orders/pending-summary');
-      const { newCount, latestOrderId } = res.data || {};
+      const { newCount, latestOrderId, latestOrderTime } = res.data || {};
       const seenIds = new Set(getSeenOwnerOrderIds());
 
       if (newCount > 0 && latestOrderId) {
-        if (!seenIds.has(latestOrderId)) {
+        let isAcknowledged = seenIds.has(latestOrderId);
+        if (!isAcknowledged && ackTime > 0 && latestOrderTime) {
+          const orderTime = new Date(latestOrderTime).getTime();
+          if (!isNaN(orderTime) && orderTime <= ackTime) {
+            isAcknowledged = true;
+          }
+        }
+        if (!isAcknowledged) {
           setHasOwnerOrderNotification(true);
           setOwnerNewOrdersCount(newCount);
           return;
@@ -951,7 +1004,15 @@ export default function App() {
 
     const stored = getStoredOrders();
     const seenIds = new Set(getSeenOwnerOrderIds());
-    const unseenNewOrders = stored.filter((o) => o.status === 'New' && !seenIds.has(o.id));
+    const unseenNewOrders = stored.filter((o) => {
+      if (o.status !== 'New') return false;
+      if (seenIds.has(o.id)) return false;
+      if (ackTime > 0) {
+        const orderTime = new Date(o.createdAt).getTime();
+        if (!isNaN(orderTime) && orderTime <= ackTime) return false;
+      }
+      return true;
+    });
 
     setOwnerNewOrdersCount(unseenNewOrders.length);
     setHasOwnerOrderNotification(unseenNewOrders.length > 0);
@@ -1078,6 +1139,13 @@ export default function App() {
       loadMyOrders();
     }
   }, [page, customerId]);
+
+  // Stop green blinking indicator when visiting owner access (welcome owner screen)
+  useEffect(() => {
+    if (page === 'ownerLogin') {
+      dismissOwnerNotification();
+    }
+  }, [page]);
 
   // Preload images when viewing gallery
   useEffect(() => {
@@ -1809,10 +1877,7 @@ export default function App() {
               <button
                 className="owner-link"
                 style={{ position: 'relative' }}
-                onClick={() => {
-                  setPage('ownerLogin');
-                  setErrorMessage('');
-                }}
+                onClick={handleOpenOwnerAccess}
               >
                 <ShieldCheck size={16} /> Owner
                 {hasOwnerOrderNotification && (
@@ -1943,12 +2008,7 @@ export default function App() {
                   justifyContent: 'space-between',
                   width: '100%',
                 }}
-                onClick={() => {
-                  setPage('ownerLogin');
-                  setErrorMessage('');
-                  setIsSideMenuOpen(false);
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
+                onClick={handleOpenOwnerAccess}
               >
                 <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <ShieldCheck size={19} /> Owner access
