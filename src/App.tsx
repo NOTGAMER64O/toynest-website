@@ -3793,19 +3793,21 @@ export default function App() {
                           <label className="status-select">
                             Order status
                             <select
-                              value={o.status}
+                              value={
+                                ['Delivered', 'Collected'].includes(o.status)
+                                  ? 'Completed'
+                                  : o.status === 'Ready for pickup'
+                                  ? 'Dispatched'
+                                  : o.status
+                              }
                               onChange={(e) => void updateOrderStatus(o, e.target.value)}
                             >
                               <option>New</option>
                               <option>Confirmed</option>
                               <option>Preparing</option>
                               <option>Dispatched</option>
-                              <option>Ready for pickup</option>
                               <option>Completed</option>
-                              <option>Delivered</option>
-                              <option>Collected</option>
                               <option>Cancelled</option>
-                              {o.status === 'Contacted' && <option>Contacted</option>}
                             </select>
                           </label>
 
