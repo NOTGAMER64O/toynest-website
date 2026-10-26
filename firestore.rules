@@ -32,8 +32,10 @@ service cloud.firestore {
     match /products/{productId} {
       allow read: if true;
       allow write: if isValidId(productId)
-        && request.resource.data.name is string
-        && request.resource.data.price is number;
+        && (
+          request.resource.data.deleted == true ||
+          (request.resource.data.name is string && request.resource.data.price is number)
+        );
       allow delete: if isValidId(productId);
     }
 

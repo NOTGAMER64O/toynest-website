@@ -435,8 +435,8 @@ app.post('/api/owner/products', (req, res) => {
     price: Number(price),
     description: (description || '').trim(),
     category: (category || '').trim() || 'Other',
-    imageUrl: imageUrls[0] || '',
-    imageUrls,
+    imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+    imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
     available: available !== false,
     createdAt: new Date().toISOString(),
   };

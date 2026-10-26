@@ -298,13 +298,28 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
   try {
     const snapshot = await getDocs(collection(db, 'products'));
     const list: Product[] = [];
+    const deletedIds = new Set<string>();
     snapshot.forEach((d) => {
-      list.push(d.data() as Product);
+      const data = d.data() as any;
+      if (data && data.deleted === true) {
+        deletedIds.add(data.id || d.id);
+      } else if (data && data.id && data.name) {
+        list.push(data as Product);
+      }
     });
-    if (list.length === 0) {
-      return DEFAULT_PRODUCTS;
+
+    // Merge default products that have not been explicitly modified or deleted
+    const cloudIds = new Set(list.map((p) => p.id));
+    const merged = [...list];
+    for (const def of DEFAULT_PRODUCTS) {
+      if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+        merged.push(def);
+      }
     }
-    return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+    return merged.sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
   } catch (error) {
     return DEFAULT_PRODUCTS;
   }
@@ -313,7 +328,11 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
 export async function saveProductToCloud(product: Product): Promise<void> {
   const path = `products/${product.id}`;
   try {
-    await setDoc(doc(db, 'products', product.id), product);
+    await setDoc(doc(db, 'products', product.id), {
+      ...product,
+      deleted: false,
+      updatedAt: new Date().toISOString(),
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -322,7 +341,12 @@ export async function saveProductToCloud(product: Product): Promise<void> {
 export async function deleteProductFromCloud(productId: string): Promise<void> {
   const path = `products/${productId}`;
   try {
-    await deleteDoc(doc(db, 'products', productId));
+    await setDoc(doc(db, 'products', productId), {
+      id: productId,
+      deleted: true,
+      available: false,
+      updatedAt: new Date().toISOString(),
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }

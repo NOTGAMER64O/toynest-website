@@ -513,6 +513,59 @@ function computeLocalQueuePositions(orders: Order[]): Order[] {
   });
 }
 
+async function compressImageFile(file: File): Promise<File> {
+  if (file.size <= 350 * 1024 && !file.type.includes('heic')) {
+    return file;
+  }
+  return new Promise<File>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX_DIM = 1200;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > MAX_DIM) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          }
+        } else {
+          if (height > MAX_DIM) {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(file);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              resolve(file);
+              return;
+            }
+            const cleanName = file.name.replace(/\.[^/.]+$/, '') + '.jpg';
+            resolve(new File([blob], cleanName, { type: 'image/jpeg', lastModified: Date.now() }));
+          },
+          'image/jpeg',
+          0.82
+        );
+      };
+      img.onerror = () => resolve(file);
+      img.src = String(e.target?.result || '');
+    };
+    reader.onerror = () => resolve(file);
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function App() {
   const [page, setPage] = useState<'home' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
   const [products, setProducts] = useState<Product[]>([]);
@@ -1414,10 +1467,48 @@ export default function App() {
           products.find((p) => p.id === editingProductId) ||
           getStoredProducts().find((p) => p.id === editingProductId);
 
+        let imageUrl = existing?.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+        let imageUrls = existing?.imageUrls || ['/toys/toy-40ba4ba9-1.jpg'];
+
+        if (productImages.length > 0) {
+          try {
+            const imagesData = await Promise.all(
+              productImages.map(
+                (file) =>
+                  new Promise<{ data: string; contentType: string }>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () =>
+                      resolve({
+                        data: String(reader.result).split(',')[1] || '',
+                        contentType: file.type || 'image/jpeg',
+                      });
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                  })
+              )
+            );
+
+            const res = await ownerPost('/api/owner/products', {
+              name: productForm.name.trim(),
+              price: Number(productForm.price),
+              description: productForm.description.trim(),
+              category: productForm.category.trim() || 'Other',
+              images: imagesData,
+              available: targetAvailable,
+            });
+            if (res.data?.product?.imageUrl) {
+              imageUrl = res.data.product.imageUrl;
+              imageUrls = res.data.product.imageUrls || [imageUrl];
+            }
+          } catch (imgErr) {
+            console.warn('Could not upload new edit images to backend:', imgErr);
+          }
+        }
+
         const updatedItem: Product = {
           id: existing?.id || editingProductId,
-          imageUrl: existing?.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
-          imageUrls: existing?.imageUrls || ['/toys/toy-40ba4ba9-1.jpg'],
+          imageUrl,
+          imageUrls,
           createdAt: existing?.createdAt || new Date().toISOString(),
           name: productForm.name.trim(),
           price: Number(productForm.price),
@@ -1454,6 +1545,7 @@ export default function App() {
 
         setEditingProductId(null);
         setProductForm({ name: '', price: '', description: '', category: '' });
+        setProductImages([]);
         setProductSubmitTarget('published');
         setSuccessMessage(
           targetAvailable
@@ -1472,7 +1564,7 @@ export default function App() {
               reader.onload = () =>
                 resolve({
                   data: String(reader.result).split(',')[1] || '',
-                  contentType: file.type,
+                  contentType: file.type || 'image/jpeg',
                 });
               reader.onerror = reject;
               reader.readAsDataURL(file);
@@ -1497,7 +1589,7 @@ export default function App() {
           };
         }
       } catch (err) {
-        console.warn('Could not save product to backend API:', err);
+        console.warn('Could not save product to backend API, using client fallback:', err);
       }
 
       if (!newProduct) {
@@ -1505,7 +1597,7 @@ export default function App() {
           (img) => `data:${img.contentType};base64,${img.data}`
         );
         newProduct = {
-          id: `toy_${Date.now().toString(36)}`,
+          id: `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
           name: productForm.name.trim(),
           price: Number(productForm.price),
           description: productForm.description.trim(),
@@ -1517,6 +1609,14 @@ export default function App() {
         };
       } else {
         newProduct.available = targetAvailable;
+      }
+
+      // Ensure valid image fallback
+      if (!newProduct.imageUrl) {
+        newProduct.imageUrl = '/toys/toy-40ba4ba9-1.jpg';
+      }
+      if (!newProduct.imageUrls || newProduct.imageUrls.length === 0) {
+        newProduct.imageUrls = [newProduct.imageUrl];
       }
 
       // Update local state and storage immediately
@@ -1538,10 +1638,18 @@ export default function App() {
       setSuccessMessage(
         isDraft
           ? 'Toy saved as a draft. Customers cannot see it yet.'
-          : 'Toy published in your shop!'
+          : 'Toy added and published in your shop!'
       );
-    } catch {
-      setErrorMessage('Could not add toy. Check the image file and try again.');
+
+      // Automatically show the relevant tab/filter so the new product is immediately seen
+      if (isDraft) {
+        setProductFilter('drafts');
+      } else {
+        setProductFilter('published');
+      }
+    } catch (err: any) {
+      console.error('Error adding toy:', err);
+      setErrorMessage(err?.message || 'Could not add toy. Please check the details and try again.');
     } finally {
       setLoading(false);
     }
@@ -3394,54 +3502,121 @@ export default function App() {
                     />
                   </label>
 
-                  {!editingProductId && (
-                    <label className="upload-box">
+                  <div className="upload-box-wrapper" style={{ margin: '14px 0' }}>
+                    <label className="upload-box" style={{ cursor: 'pointer' }}>
                       <span className="upload-symbol">＋</span>
                       <strong>
                         {productImages.length
-                          ? `${productImages.length}/5 photos selected — tap to add more`
-                          : 'Choose toy pictures'}
+                          ? `${productImages.length}/5 photos chosen — tap to add more`
+                          : editingProductId
+                          ? 'Add or change toy photos (optional)'
+                          : 'Choose toy pictures (up to 5)'}
                       </strong>
                       <small>
-                        You can select photos together or add them one at a time. Up to 5 JPG, PNG or WebP photos · max 1 MB each
+                        Any phone camera or gallery photo · Auto-optimized for instant upload
                       </small>
-                      {productImages.length > 0 && (
-                        <span className="selected-file-names">
-                          {productImages.map((f) => f.name).join(' · ')}
-                        </span>
-                      )}
                       <input
                         type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        accept="image/png,image/jpeg,image/webp,image/*"
                         multiple
-                        onChange={(e) => {
-                          const files = Array.from(e.target.files || []);
-                          const merged = [...productImages];
-                          for (const f of files) {
-                            if (
-                              !merged.some(
-                                (m) =>
-                                  m.name === f.name &&
-                                  m.size === f.size &&
-                                  m.lastModified === f.lastModified
-                              )
-                            ) {
-                              merged.push(f);
+                        onChange={async (e) => {
+                          const rawFiles = Array.from(e.target.files || []);
+                          if (rawFiles.length === 0) return;
+                          setLoading(true);
+                          setErrorMessage('');
+                          try {
+                            const compressed = await Promise.all(rawFiles.map(compressImageFile));
+                            const merged = [...productImages];
+                            for (const f of compressed) {
+                              if (!merged.some((m) => m.name === f.name && m.size === f.size)) {
+                                merged.push(f);
+                              }
                             }
+                            if (merged.length > 5) {
+                              setErrorMessage('Please choose no more than 5 photos in total.');
+                              setProductImages(merged.slice(0, 5));
+                            } else {
+                              setProductImages(merged);
+                            }
+                          } catch {
+                            setErrorMessage('Could not process selected image(s).');
+                          } finally {
+                            setLoading(false);
+                            e.currentTarget.value = '';
                           }
-                          if (merged.length > 5) {
-                            setErrorMessage('Please choose no more than 5 photos in total.');
-                          } else if (merged.some((f) => f.size > 1024 * 1024)) {
-                            setErrorMessage('Each photo must be smaller than 1 MB.');
-                          } else {
-                            setErrorMessage('');
-                            setProductImages(merged);
-                          }
-                          e.currentTarget.value = '';
                         }}
                       />
                     </label>
-                  )}
+
+                    {productImages.length > 0 && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: '10px',
+                          flexWrap: 'wrap',
+                          marginTop: '10px',
+                          padding: '10px',
+                          background: '#f7f8f2',
+                          borderRadius: '10px',
+                          border: '1px solid #e2e6d6',
+                        }}
+                      >
+                        {productImages.map((f, idx) => {
+                          const previewUrl = URL.createObjectURL(f);
+                          return (
+                            <div
+                              key={`${f.name}-${idx}`}
+                              style={{
+                                position: 'relative',
+                                width: '60px',
+                                height: '60px',
+                                borderRadius: '8px',
+                                overflow: 'hidden',
+                                border: '1px solid #ced5c2',
+                                background: '#fff',
+                              }}
+                            >
+                              <img
+                                src={previewUrl}
+                                alt={`Preview ${idx + 1}`}
+                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                onLoad={() => URL.revokeObjectURL(previewUrl)}
+                              />
+                              <button
+                                type="button"
+                                onClick={(ev) => {
+                                  ev.preventDefault();
+                                  ev.stopPropagation();
+                                  setProductImages((prev) => prev.filter((_, i) => i !== idx));
+                                }}
+                                style={{
+                                  position: 'absolute',
+                                  top: '2px',
+                                  right: '2px',
+                                  width: '20px',
+                                  height: '20px',
+                                  borderRadius: '50%',
+                                  background: 'rgba(20,25,18,0.75)',
+                                  color: '#fff',
+                                  border: 0,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  fontSize: '11px',
+                                  fontWeight: 'bold',
+                                  lineHeight: 1,
+                                }}
+                                title="Remove this photo"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="product-save-actions">
                     <button
