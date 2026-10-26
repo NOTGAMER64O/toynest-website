@@ -4775,8 +4775,8 @@ export default function App() {
           </span>{' '}
           Playnix
         </div>
-        <p>
-          Made for little moments of happiness. <span>✦</span>
+        <p className="footer-tagline">
+          TECHNOBLADE NEVER DIES
         </p>
         <button
           onClick={() => {
