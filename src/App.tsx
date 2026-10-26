@@ -598,6 +598,11 @@ export default function App() {
     category: '',
   });
   const [productImages, setProductImages] = useState<File[]>([]);
+  const [productSubmitTarget, setProductSubmitTarget] = useState<'published' | 'draft'>('published');
+  const editingProduct = useMemo(
+    () => (editingProductId ? products.find((p) => p.id === editingProductId) || null : null),
+    [editingProductId, products]
+  );
   const [successMessage, setSuccessMessage] = useState<string>('');
   const [customerId] = useState<string>(() => getCustomerKey());
   const [myOrders, setMyOrders] = useState<Order[]>([]);
@@ -640,8 +645,14 @@ export default function App() {
     try {
       const res = await api.get('/api/products');
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
-        setProducts(res.data.products);
-        saveStoredProducts(res.data.products);
+        const currentStored = getStoredProducts();
+        const drafts = currentStored.filter((p) => p.available === false);
+        const merged = [
+          ...res.data.products,
+          ...drafts.filter((d) => !res.data.products.some((p: Product) => p.id === d.id)),
+        ];
+        setProducts(merged);
+        saveStoredProducts(merged);
         return;
       }
     } catch {}
@@ -1386,9 +1397,9 @@ export default function App() {
 
   const handleProductSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
-    const visibilityVal =
-      submitter?.value === 'draft' ? false : submitter?.value === 'published' ? true : undefined;
+    const submitter = (e.nativeEvent as any)?.submitter as HTMLButtonElement | null;
+    const isDraft = submitter?.value ? submitter.value === 'draft' : productSubmitTarget === 'draft';
+    const targetAvailable = !isDraft;
 
     setErrorMessage('');
     setSuccessMessage('');
@@ -1399,8 +1410,10 @@ export default function App() {
     setLoading(true);
     try {
       if (editingProductId) {
-        const currentProducts = getStoredProducts();
-        const existing = currentProducts.find((p) => p.id === editingProductId);
+        const existing =
+          products.find((p) => p.id === editingProductId) ||
+          getStoredProducts().find((p) => p.id === editingProductId);
+
         const updatedItem: Product = {
           id: existing?.id || editingProductId,
           imageUrl: existing?.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
@@ -1410,32 +1423,43 @@ export default function App() {
           price: Number(productForm.price),
           description: productForm.description.trim(),
           category: productForm.category.trim() || 'Other',
-          available: typeof visibilityVal === 'boolean' ? visibilityVal : (existing?.available !== false),
+          available: targetAvailable,
         };
+
+        // Update local React state and storage immediately
+        setProducts((prev) => {
+          const next = prev.map((p) => (p.id === editingProductId ? updatedItem : p));
+          saveStoredProducts(next);
+          return next;
+        });
 
         try {
           await saveProductToCloud(updatedItem);
-        } catch {}
+        } catch (err) {
+          console.warn('Could not update product in Firestore:', err);
+        }
 
         try {
           await ownerPost('/api/owner/products/update', {
             id: editingProductId,
-            name: productForm.name.trim(),
-            price: Number(productForm.price),
-            description: productForm.description.trim(),
-            category: productForm.category.trim() || 'Other',
-            ...(typeof visibilityVal === 'boolean' ? { available: visibilityVal } : {}),
+            name: updatedItem.name,
+            price: updatedItem.price,
+            description: updatedItem.description,
+            category: updatedItem.category,
+            available: targetAvailable,
           });
-        } catch {}
+        } catch (err) {
+          console.warn('Could not update product on backend:', err);
+        }
 
-        const updated = currentProducts.map((p) =>
-          p.id === editingProductId ? updatedItem : p
-        );
-        saveStoredProducts(updated);
-        setProducts(updated);
         setEditingProductId(null);
         setProductForm({ name: '', price: '', description: '', category: '' });
-        setSuccessMessage('Toy details updated!');
+        setProductSubmitTarget('published');
+        setSuccessMessage(
+          targetAvailable
+            ? 'Toy details updated and published in your shop!'
+            : 'Toy details saved in drafts. Hidden from customers.'
+        );
         setLoading(false);
         return;
       }
@@ -1464,12 +1488,17 @@ export default function App() {
           description: productForm.description.trim(),
           category: productForm.category.trim() || 'Other',
           images: imagesData,
-          available: visibilityVal !== false,
+          available: targetAvailable,
         });
         if (res.data?.product) {
-          newProduct = res.data.product;
+          newProduct = {
+            ...res.data.product,
+            available: targetAvailable,
+          };
         }
-      } catch {}
+      } catch (err) {
+        console.warn('Could not save product to backend API:', err);
+      }
 
       if (!newProduct) {
         const fallbackUrls = imagesData.map(
@@ -1483,22 +1512,31 @@ export default function App() {
           category: productForm.category.trim() || 'Other',
           imageUrl: fallbackUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
           imageUrls: fallbackUrls.length > 0 ? fallbackUrls : ['/toys/toy-40ba4ba9-1.jpg'],
-          available: visibilityVal !== false,
+          available: targetAvailable,
           createdAt: new Date().toISOString(),
         };
+      } else {
+        newProduct.available = targetAvailable;
       }
+
+      // Update local state and storage immediately
+      setProducts((prev) => {
+        const next = [newProduct!, ...prev.filter((p) => p.id !== newProduct!.id)];
+        saveStoredProducts(next);
+        return next;
+      });
 
       try {
         await saveProductToCloud(newProduct);
-      } catch {}
+      } catch (err) {
+        console.warn('Could not save product to Firestore:', err);
+      }
 
-      const updated = [newProduct, ...getStoredProducts().filter((p) => p.id !== newProduct!.id)];
-      saveStoredProducts(updated);
-      setProducts(updated);
       setProductForm({ name: '', price: '', description: '', category: '' });
       setProductImages([]);
+      setProductSubmitTarget('published');
       setSuccessMessage(
-        visibilityVal === false
+        isDraft
           ? 'Toy saved as a draft. Customers cannot see it yet.'
           : 'Toy published in your shop!'
       );
@@ -1511,9 +1549,20 @@ export default function App() {
 
   const toggleProductVisibility = async (p: Product) => {
     const newAvail = p.available === false;
+    setProducts((prev) => {
+      const next = prev.map((item) =>
+        item.id === p.id ? { ...item, available: newAvail } : item
+      );
+      saveStoredProducts(next);
+      return next;
+    });
+
     try {
       await saveProductToCloud({ ...p, available: newAvail });
-    } catch {}
+    } catch (err) {
+      console.warn('Could not update product in Firestore:', err);
+    }
+
     try {
       await ownerPost('/api/owner/products/update', {
         id: p.id,
@@ -1523,16 +1572,14 @@ export default function App() {
         category: p.category || 'Other',
         available: newAvail,
       });
-    } catch {}
-    const updated = getStoredProducts().map((item) =>
-      item.id === p.id ? { ...item, available: newAvail } : item
-    );
-    saveStoredProducts(updated);
-    setProducts(updated);
+    } catch (err) {
+      console.warn('Could not update product on backend:', err);
+    }
+
     setSuccessMessage(
       newAvail
-        ? 'Toy published in your shop.'
-        : 'Toy moved to drafts and hidden from customers.'
+        ? `"${p.name}" published to shop!`
+        : `"${p.name}" moved to drafts and hidden from customers.`
     );
     setErrorMessage('');
   };
@@ -1546,6 +1593,7 @@ export default function App() {
       category: p.category || 'Other',
     });
     setProductImages([]);
+    setProductSubmitTarget(p.available === false ? 'draft' : 'published');
     setErrorMessage('');
     setSuccessMessage('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1555,20 +1603,30 @@ export default function App() {
     setEditingProductId(null);
     setProductForm({ name: '', price: '', description: '', category: '' });
     setProductImages([]);
+    setProductSubmitTarget('published');
     setErrorMessage('');
   };
 
   const deleteProduct = async (id: string) => {
     if (confirm('Remove this toy from the shop?')) {
+      setProducts((prev) => {
+        const next = prev.filter((p) => p.id !== id);
+        saveStoredProducts(next);
+        return next;
+      });
+
       try {
         await deleteProductFromCloud(id);
-      } catch {}
+      } catch (err) {
+        console.warn('Could not delete product from Firestore:', err);
+      }
+
       try {
         await ownerPost('/api/owner/products/delete', { id });
-      } catch {}
-      const updated = getStoredProducts().filter((p) => p.id !== id);
-      saveStoredProducts(updated);
-      setProducts(updated);
+      } catch (err) {
+        console.warn('Could not delete product on backend:', err);
+      }
+
       setSuccessMessage('Toy removed.');
     }
   };
@@ -3265,8 +3323,33 @@ export default function App() {
             {ownerTab === 'products' && (
               <div className="manage-layout">
                 <form className="panel-form add-form" onSubmit={handleProductSubmit}>
-                  <span className="eyebrow">{editingProductId ? 'UPDATE LISTING' : 'NEW ARRIVAL'}</span>
+                  <span className="eyebrow">
+                    {editingProductId
+                      ? `UPDATE LISTING · ${editingProduct?.available === false ? 'DRAFT' : 'PUBLISHED'}`
+                      : 'NEW ARRIVAL'}
+                  </span>
                   <h2>{editingProductId ? 'Edit toy details' : 'Add a toy'}</h2>
+                  {editingProduct && (
+                    <div
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        marginBottom: '12px',
+                        background: editingProduct.available === false ? '#fef3c7' : '#ecfdf5',
+                        color: editingProduct.available === false ? '#92400e' : '#065f46',
+                        border: `1px solid ${editingProduct.available === false ? '#fde68a' : '#a7f3d0'}`,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      {editingProduct.available === false
+                        ? '📝 Currently saved as draft (hidden from customers)'
+                        : '✓ Currently published and visible in shop'}
+                    </div>
+                  )}
                   <label>
                     Toy name
                     <input
@@ -3367,11 +3450,15 @@ export default function App() {
                       value="published"
                       className="primary-btn full-btn"
                       disabled={loading}
+                      onClick={() => setProductSubmitTarget('published')}
+                      onTouchStart={() => setProductSubmitTarget('published')}
                     >
                       {loading
                         ? 'Saving…'
                         : editingProductId
-                        ? 'Save changes & publish'
+                        ? editingProduct?.available === false
+                          ? 'Publish to shop'
+                          : 'Save changes (published)'
                         : 'Publish product'}
                     </button>
                     <button
@@ -3380,8 +3467,16 @@ export default function App() {
                       value="draft"
                       className="secondary-btn full-btn"
                       disabled={loading}
+                      onClick={() => setProductSubmitTarget('draft')}
+                      onTouchStart={() => setProductSubmitTarget('draft')}
                     >
-                      {loading ? 'Saving…' : 'Save as draft'}
+                      {loading
+                        ? 'Saving…'
+                        : editingProductId
+                        ? editingProduct?.available === false
+                          ? 'Save changes as draft'
+                          : 'Move to drafts'
+                        : 'Save as draft'}
                     </button>
                   </div>
 
