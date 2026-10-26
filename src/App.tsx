@@ -651,6 +651,7 @@ export default function App() {
     category: '',
   });
   const [productImages, setProductImages] = useState<File[]>([]);
+  const [editExistingImages, setEditExistingImages] = useState<string[]>([]);
   const [productSubmitTarget, setProductSubmitTarget] = useState<'published' | 'draft'>('published');
   const editingProduct = useMemo(
     () => (editingProductId ? products.find((p) => p.id === editingProductId) || null : null),
@@ -1467,48 +1468,60 @@ export default function App() {
           products.find((p) => p.id === editingProductId) ||
           getStoredProducts().find((p) => p.id === editingProductId);
 
-        let imageUrl = existing?.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
-        let imageUrls = existing?.imageUrls || ['/toys/toy-40ba4ba9-1.jpg'];
+        let finalImageUrls = [...editExistingImages];
+        let imagesData: { data: string; contentType: string }[] = [];
 
         if (productImages.length > 0) {
-          try {
-            const imagesData = await Promise.all(
-              productImages.map(
-                (file) =>
-                  new Promise<{ data: string; contentType: string }>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () =>
-                      resolve({
-                        data: String(reader.result).split(',')[1] || '',
-                        contentType: file.type || 'image/jpeg',
-                      });
-                    reader.onerror = reject;
-                    reader.readAsDataURL(file);
-                  })
-              )
-            );
+          imagesData = await Promise.all(
+            productImages.map(
+              (file) =>
+                new Promise<{ data: string; contentType: string }>((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload = () =>
+                    resolve({
+                      data: String(reader.result).split(',')[1] || '',
+                      contentType: file.type || 'image/jpeg',
+                    });
+                  reader.onerror = reject;
+                  reader.readAsDataURL(file);
+                })
+            )
+          );
+        }
 
-            const res = await ownerPost('/api/owner/products', {
-              name: productForm.name.trim(),
-              price: Number(productForm.price),
-              description: productForm.description.trim(),
-              category: productForm.category.trim() || 'Other',
-              images: imagesData,
-              available: targetAvailable,
-            });
-            if (res.data?.product?.imageUrl) {
-              imageUrl = res.data.product.imageUrl;
-              imageUrls = res.data.product.imageUrls || [imageUrl];
-            }
-          } catch (imgErr) {
-            console.warn('Could not upload new edit images to backend:', imgErr);
+        try {
+          const res = await ownerPost('/api/owner/products/update', {
+            id: editingProductId,
+            name: productForm.name.trim(),
+            price: Number(productForm.price),
+            description: productForm.description.trim(),
+            category: productForm.category.trim() || 'Other',
+            available: targetAvailable,
+            imageUrls: editExistingImages,
+            newImages: imagesData,
+          });
+          if (res.data?.product?.imageUrls && Array.isArray(res.data.product.imageUrls)) {
+            finalImageUrls = res.data.product.imageUrls;
+          }
+        } catch (updateErr) {
+          console.warn('Could not update product on backend API:', updateErr);
+          if (imagesData.length > 0) {
+            const fallbackNewUrls = imagesData.map(
+              (img) => `data:${img.contentType};base64,${img.data}`
+            );
+            finalImageUrls = [...editExistingImages, ...fallbackNewUrls];
           }
         }
 
+        if (finalImageUrls.length === 0) {
+          finalImageUrls = ['/toys/toy-40ba4ba9-1.jpg'];
+        }
+        const finalImageUrl = finalImageUrls[0];
+
         const updatedItem: Product = {
           id: existing?.id || editingProductId,
-          imageUrl,
-          imageUrls,
+          imageUrl: finalImageUrl,
+          imageUrls: finalImageUrls,
           createdAt: existing?.createdAt || new Date().toISOString(),
           name: productForm.name.trim(),
           price: Number(productForm.price),
@@ -1530,27 +1543,15 @@ export default function App() {
           console.warn('Could not update product in Firestore:', err);
         }
 
-        try {
-          await ownerPost('/api/owner/products/update', {
-            id: editingProductId,
-            name: updatedItem.name,
-            price: updatedItem.price,
-            description: updatedItem.description,
-            category: updatedItem.category,
-            available: targetAvailable,
-          });
-        } catch (err) {
-          console.warn('Could not update product on backend:', err);
-        }
-
         setEditingProductId(null);
         setProductForm({ name: '', price: '', description: '', category: '' });
         setProductImages([]);
+        setEditExistingImages([]);
         setProductSubmitTarget('published');
         setSuccessMessage(
           targetAvailable
-            ? 'Toy details updated and published in your shop!'
-            : 'Toy details saved in drafts. Hidden from customers.'
+            ? 'Toy details and pictures updated!'
+            : 'Toy details and pictures saved in drafts. Hidden from customers.'
         );
         setLoading(false);
         return;
@@ -1700,6 +1701,13 @@ export default function App() {
       description: p.description || '',
       category: p.category || 'Other',
     });
+    const currentImgs =
+      p.imageUrls && p.imageUrls.length > 0
+        ? [...p.imageUrls]
+        : p.imageUrl
+        ? [p.imageUrl]
+        : [];
+    setEditExistingImages(currentImgs);
     setProductImages([]);
     setProductSubmitTarget(p.available === false ? 'draft' : 'published');
     setErrorMessage('');
@@ -1711,6 +1719,7 @@ export default function App() {
     setEditingProductId(null);
     setProductForm({ name: '', price: '', description: '', category: '' });
     setProductImages([]);
+    setEditExistingImages([]);
     setProductSubmitTarget('published');
     setErrorMessage('');
   };
@@ -3502,121 +3511,405 @@ export default function App() {
                     />
                   </label>
 
-                  <div className="upload-box-wrapper" style={{ margin: '14px 0' }}>
-                    <label className="upload-box" style={{ cursor: 'pointer' }}>
-                      <span className="upload-symbol">＋</span>
-                      <strong>
-                        {productImages.length
-                          ? `${productImages.length}/5 photos chosen — tap to add more`
-                          : editingProductId
-                          ? 'Add or change toy photos (optional)'
-                          : 'Choose toy pictures (up to 5)'}
-                      </strong>
-                      <small>
-                        Any phone camera or gallery photo · Auto-optimized for instant upload
-                      </small>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp,image/*"
-                        multiple
-                        onChange={async (e) => {
-                          const rawFiles = Array.from(e.target.files || []);
-                          if (rawFiles.length === 0) return;
-                          setLoading(true);
-                          setErrorMessage('');
-                          try {
-                            const compressed = await Promise.all(rawFiles.map(compressImageFile));
-                            const merged = [...productImages];
-                            for (const f of compressed) {
-                              if (!merged.some((m) => m.name === f.name && m.size === f.size)) {
-                                merged.push(f);
-                              }
-                            }
-                            if (merged.length > 5) {
-                              setErrorMessage('Please choose no more than 5 photos in total.');
-                              setProductImages(merged.slice(0, 5));
-                            } else {
-                              setProductImages(merged);
-                            }
-                          } catch {
-                            setErrorMessage('Could not process selected image(s).');
-                          } finally {
-                            setLoading(false);
-                            e.currentTarget.value = '';
-                          }
-                        }}
-                      />
-                    </label>
-
-                    {productImages.length > 0 && (
+                  {/* PHOTO MANAGEMENT (ADD & REMOVE PICTURES) */}
+                  {editingProductId ? (
+                    <div
+                      className="edit-photos-manager"
+                      style={{
+                        margin: '18px 0',
+                        padding: '15px',
+                        background: '#f8faf3',
+                        borderRadius: '12px',
+                        border: '1px solid #dce4d0',
+                      }}
+                    >
                       <div
                         style={{
                           display: 'flex',
-                          gap: '10px',
-                          flexWrap: 'wrap',
-                          marginTop: '10px',
-                          padding: '10px',
-                          background: '#f7f8f2',
-                          borderRadius: '10px',
-                          border: '1px solid #e2e6d6',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          marginBottom: '12px',
                         }}
                       >
-                        {productImages.map((f, idx) => {
-                          const previewUrl = URL.createObjectURL(f);
-                          return (
-                            <div
-                              key={`${f.name}-${idx}`}
-                              style={{
-                                position: 'relative',
-                                width: '60px',
-                                height: '60px',
-                                borderRadius: '8px',
-                                overflow: 'hidden',
-                                border: '1px solid #ced5c2',
-                                background: '#fff',
-                              }}
-                            >
-                              <img
-                                src={previewUrl}
-                                alt={`Preview ${idx + 1}`}
-                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                                onLoad={() => URL.revokeObjectURL(previewUrl)}
-                              />
-                              <button
-                                type="button"
-                                onClick={(ev) => {
-                                  ev.preventDefault();
-                                  ev.stopPropagation();
-                                  setProductImages((prev) => prev.filter((_, i) => i !== idx));
-                                }}
-                                style={{
-                                  position: 'absolute',
-                                  top: '2px',
-                                  right: '2px',
-                                  width: '20px',
-                                  height: '20px',
-                                  borderRadius: '50%',
-                                  background: 'rgba(20,25,18,0.75)',
-                                  color: '#fff',
-                                  border: 0,
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  lineHeight: 1,
-                                }}
-                                title="Remove this photo"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                          );
-                        })}
+                        <span
+                          style={{
+                            fontSize: '12px',
+                            fontWeight: 800,
+                            color: '#273824',
+                            letterSpacing: '0.5px',
+                            textTransform: 'uppercase',
+                          }}
+                        >
+                          Toy Pictures ({editExistingImages.length + productImages.length}/5)
+                        </span>
+                        <small style={{ color: '#687462', fontSize: '11px', fontWeight: 600 }}>
+                          Up to 5 pictures total
+                        </small>
                       </div>
-                    )}
-                  </div>
+
+                      {/* 1. Existing saved pictures with remove option */}
+                      {editExistingImages.length > 0 && (
+                        <div style={{ marginBottom: '14px' }}>
+                          <span
+                            style={{
+                              display: 'block',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              color: '#465440',
+                              marginBottom: '8px',
+                            }}
+                          >
+                            Current photos ({editExistingImages.length}) — tap ✕ to remove:
+                          </span>
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            {editExistingImages.map((imgUrl, idx) => (
+                              <div
+                                key={`existing-${idx}-${imgUrl}`}
+                                style={{
+                                  position: 'relative',
+                                  width: '74px',
+                                  height: '74px',
+                                  borderRadius: '10px',
+                                  overflow: 'hidden',
+                                  border: idx === 0 ? '2px solid #58733d' : '1px solid #d5dbc9',
+                                  background: '#fff',
+                                  boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+                                }}
+                              >
+                                <img
+                                  src={imgUrl}
+                                  alt={`Current picture ${idx + 1}`}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                />
+                                <span
+                                  style={{
+                                    position: 'absolute',
+                                    bottom: '0',
+                                    left: '0',
+                                    right: '0',
+                                    background: idx === 0 ? '#3f592a' : 'rgba(25,35,20,0.75)',
+                                    color: '#fff',
+                                    fontSize: '9px',
+                                    textAlign: 'center',
+                                    padding: '1px 0',
+                                    fontWeight: 700,
+                                  }}
+                                >
+                                  {idx === 0 ? 'Cover' : `#${idx + 1}`}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditExistingImages((prev) =>
+                                      prev.filter((_, i) => i !== idx)
+                                    );
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    top: '3px',
+                                    right: '3px',
+                                    width: '22px',
+                                    height: '22px',
+                                    borderRadius: '50%',
+                                    background: '#dc2626',
+                                    color: '#ffffff',
+                                    border: '1.5px solid #fff',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: '11px',
+                                    fontWeight: 'bold',
+                                    boxShadow: '0 2px 5px rgba(0,0,0,0.3)',
+                                  }}
+                                  title="Remove this photo"
+                                  aria-label={`Remove photo ${idx + 1}`}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {editExistingImages.length === 0 && (
+                        <p
+                          style={{
+                            fontSize: '12px',
+                            color: '#b45309',
+                            margin: '4px 0 12px 0',
+                            fontWeight: 600,
+                          }}
+                        >
+                          ⚠️ All previous pictures removed. Add at least 1 new photo below, or a default toy picture will be used.
+                        </p>
+                      )}
+
+                      {/* 2. Newly added pictures with remove option */}
+                      {productImages.length > 0 && (
+                        <div style={{ marginBottom: '14px' }}>
+                          <span
+                            style={{
+                              display: 'block',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              color: '#275225',
+                              marginBottom: '8px',
+                            }}
+                          >
+                            Newly added photos ({productImages.length}) — tap ✕ to remove:
+                          </span>
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            {productImages.map((f, idx) => {
+                              const previewUrl = URL.createObjectURL(f);
+                              return (
+                                <div
+                                  key={`new-${f.name}-${idx}`}
+                                  style={{
+                                    position: 'relative',
+                                    width: '74px',
+                                    height: '74px',
+                                    borderRadius: '10px',
+                                    overflow: 'hidden',
+                                    border: '2px dashed #628741',
+                                    background: '#fff',
+                                    boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+                                  }}
+                                >
+                                  <img
+                                    src={previewUrl}
+                                    alt={`New preview ${idx + 1}`}
+                                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                    onLoad={() => URL.revokeObjectURL(previewUrl)}
+                                  />
+                                  <span
+                                    style={{
+                                      position: 'absolute',
+                                      bottom: '0',
+                                      left: '0',
+                                      right: '0',
+                                      background: '#3a5929',
+                                      color: '#fff',
+                                      fontSize: '9px',
+                                      textAlign: 'center',
+                                      padding: '1px 0',
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    + New
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setProductImages((prev) => prev.filter((_, i) => i !== idx));
+                                    }}
+                                    style={{
+                                      position: 'absolute',
+                                      top: '3px',
+                                      right: '3px',
+                                      width: '22px',
+                                      height: '22px',
+                                      borderRadius: '50%',
+                                      background: '#dc2626',
+                                      color: '#ffffff',
+                                      border: '1.5px solid #fff',
+                                      cursor: 'pointer',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      fontSize: '11px',
+                                      fontWeight: 'bold',
+                                      boxShadow: '0 2px 5px rgba(0,0,0,0.3)',
+                                    }}
+                                    title="Remove this new photo"
+                                    aria-label="Remove new photo"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 3. Add more pictures button if under 5 total */}
+                      {editExistingImages.length + productImages.length < 5 ? (
+                        <label className="upload-box" style={{ cursor: 'pointer', marginTop: '6px' }}>
+                          <span className="upload-symbol">＋</span>
+                          <strong>
+                            Add pictures (can add {5 - (editExistingImages.length + productImages.length)} more)
+                          </strong>
+                          <small>Pick from camera or gallery · Auto-optimized for quick upload</small>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp,image/*"
+                            multiple
+                            onChange={async (e) => {
+                              const rawFiles = Array.from(e.target.files || []);
+                              if (rawFiles.length === 0) return;
+                              setLoading(true);
+                              setErrorMessage('');
+                              try {
+                                const compressed = await Promise.all(rawFiles.map(compressImageFile));
+                                const currentTotal = editExistingImages.length + productImages.length;
+                                const availableSlots = 5 - currentTotal;
+                                if (availableSlots <= 0) {
+                                  setErrorMessage('Maximum 5 pictures allowed.');
+                                  return;
+                                }
+                                const toAdd = compressed.slice(0, availableSlots);
+                                if (compressed.length > availableSlots) {
+                                  setErrorMessage(
+                                    `Only added ${availableSlots} picture(s) to stay within the 5-picture limit.`
+                                  );
+                                }
+                                setProductImages((prev) => [...prev, ...toAdd]);
+                              } catch {
+                                setErrorMessage('Could not process selected image(s).');
+                              } finally {
+                                setLoading(false);
+                                e.currentTarget.value = '';
+                              }
+                            }}
+                          />
+                        </label>
+                      ) : (
+                        <p style={{ fontSize: '12px', color: '#4d5d47', margin: '6px 0 0', fontWeight: 600 }}>
+                          ✓ Maximum 5 photos selected. Remove any photo above if you want to add another.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="upload-box-wrapper" style={{ margin: '14px 0' }}>
+                      <label className="upload-box" style={{ cursor: 'pointer' }}>
+                        <span className="upload-symbol">＋</span>
+                        <strong>
+                          {productImages.length
+                            ? `${productImages.length}/5 photos chosen — tap to add more`
+                            : 'Choose toy pictures (up to 5)'}
+                        </strong>
+                        <small>Any phone camera or gallery photo · Auto-optimized for instant upload</small>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/*"
+                          multiple
+                          onChange={async (e) => {
+                            const rawFiles = Array.from(e.target.files || []);
+                            if (rawFiles.length === 0) return;
+                            setLoading(true);
+                            setErrorMessage('');
+                            try {
+                              const compressed = await Promise.all(rawFiles.map(compressImageFile));
+                              const merged = [...productImages];
+                              for (const f of compressed) {
+                                if (!merged.some((m) => m.name === f.name && m.size === f.size)) {
+                                  merged.push(f);
+                                }
+                              }
+                              if (merged.length > 5) {
+                                setErrorMessage('Please choose no more than 5 photos in total.');
+                                setProductImages(merged.slice(0, 5));
+                              } else {
+                                setProductImages(merged);
+                              }
+                            } catch {
+                              setErrorMessage('Could not process selected image(s).');
+                            } finally {
+                              setLoading(false);
+                              e.currentTarget.value = '';
+                            }
+                          }}
+                        />
+                      </label>
+
+                      {productImages.length > 0 && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: '10px',
+                            flexWrap: 'wrap',
+                            marginTop: '10px',
+                            padding: '10px',
+                            background: '#f7f8f2',
+                            borderRadius: '10px',
+                            border: '1px solid #e2e6d6',
+                          }}
+                        >
+                          {productImages.map((f, idx) => {
+                            const previewUrl = URL.createObjectURL(f);
+                            return (
+                              <div
+                                key={`${f.name}-${idx}`}
+                                style={{
+                                  position: 'relative',
+                                  width: '64px',
+                                  height: '64px',
+                                  borderRadius: '8px',
+                                  overflow: 'hidden',
+                                  border: '1px solid #ced5c2',
+                                  background: '#fff',
+                                }}
+                              >
+                                <img
+                                  src={previewUrl}
+                                  alt={`Preview ${idx + 1}`}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  onLoad={() => URL.revokeObjectURL(previewUrl)}
+                                />
+                                <span
+                                  style={{
+                                    position: 'absolute',
+                                    bottom: '0',
+                                    left: '0',
+                                    right: '0',
+                                    background: 'rgba(20,25,18,0.75)',
+                                    color: '#fff',
+                                    fontSize: '9px',
+                                    textAlign: 'center',
+                                    padding: '1px 0',
+                                    fontWeight: 700,
+                                  }}
+                                >
+                                  {idx === 0 ? 'Cover' : `#${idx + 1}`}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(ev) => {
+                                    ev.preventDefault();
+                                    ev.stopPropagation();
+                                    setProductImages((prev) => prev.filter((_, i) => i !== idx));
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    top: '2px',
+                                    right: '2px',
+                                    width: '20px',
+                                    height: '20px',
+                                    borderRadius: '50%',
+                                    background: '#dc2626',
+                                    color: '#fff',
+                                    border: '1.5px solid #fff',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: '11px',
+                                    fontWeight: 'bold',
+                                    lineHeight: 1,
+                                  }}
+                                  title="Remove this photo"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="product-save-actions">
                     <button

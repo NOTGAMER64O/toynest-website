@@ -448,7 +448,7 @@ app.post('/api/owner/products', (req, res) => {
 });
 
 app.post('/api/owner/products/update', (req, res) => {
-  const { pin, id, name, price, description, category, available } = req.body;
+  const { pin, id, name, price, description, category, available, imageUrl, imageUrls, newImages } = req.body;
   if (!verifyPin(pin)) {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
@@ -464,6 +464,38 @@ app.post('/api/owner/products/update', (req, res) => {
   if (description !== undefined) product.description = description.trim();
   if (category !== undefined) product.category = category.trim() || 'Other';
   if (available !== undefined) product.available = Boolean(available);
+
+  let currentUrls: string[] = Array.isArray(imageUrls)
+    ? [...imageUrls]
+    : product.imageUrls && product.imageUrls.length > 0
+    ? [...product.imageUrls]
+    : product.imageUrl
+    ? [product.imageUrl]
+    : [];
+
+  if (Array.isArray(newImages) && newImages.length > 0) {
+    newImages.forEach((img, idx) => {
+      try {
+        if (img && img.data) {
+          const ext = img.contentType?.includes('png') ? 'png' : img.contentType?.includes('webp') ? 'webp' : 'jpg';
+          const filename = `toy-${id}-${Date.now().toString(36)}-${idx + 1}.${ext}`;
+          const filepath = path.join(__dirname, 'public/toys', filename);
+          fs.writeFileSync(filepath, Buffer.from(img.data, 'base64'));
+          currentUrls.push(`/toys/${filename}`);
+        }
+      } catch (err) {
+        console.error('Error saving new edit image:', err);
+      }
+    });
+  }
+
+  if (currentUrls.length > 0) {
+    product.imageUrls = currentUrls;
+    product.imageUrl = currentUrls[0];
+  } else if (imageUrl !== undefined) {
+    product.imageUrl = imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+    product.imageUrls = [product.imageUrl];
+  }
 
   saveDB(db);
   res.json({ success: true, product });
