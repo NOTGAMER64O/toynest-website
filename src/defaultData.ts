@@ -19,6 +19,8 @@ export interface Order {
   productName: string;
   productImageUrl: string;
   price: number;
+  quantity?: number;
+  unitPrice?: number;
   name: string;
   studentClass: string;
   section: string;

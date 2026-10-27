@@ -24,6 +24,8 @@ import {
   Layers,
   QrCode,
   Search,
+  Minus,
+  Plus,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -35,7 +37,7 @@ export function isOrderEarned(order: { status?: string } | null | undefined): bo
   return EARNED_ORDER_STATUSES.has(order.status.trim().toLowerCase());
 }
 
-export function parseOrderPrice(rawPrice: any): number {
+export function parseOrderPrice(rawPrice: any, quantity?: number, unitPrice?: number): number {
   if (typeof rawPrice === 'number') {
     return isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 0;
   }
@@ -43,6 +45,10 @@ export function parseOrderPrice(rawPrice: any): number {
     const cleaned = rawPrice.replace(/[^\d.]/g, '');
     const num = parseFloat(cleaned);
     return !isNaN(num) && isFinite(num) && num > 0 ? num : 0;
+  }
+  if (typeof unitPrice === 'number' && unitPrice > 0) {
+    const qty = typeof quantity === 'number' && quantity > 0 ? quantity : 1;
+    return unitPrice * qty;
   }
   return 0;
 }
@@ -57,7 +63,7 @@ export function calculateTotalMoneyEarned(orders: Order[] = []): number {
     seenIds.add(order.id);
 
     if (isOrderEarned(order)) {
-      total += parseOrderPrice(order.price);
+      total += parseOrderPrice(order.price, order.quantity, order.unitPrice);
     }
   }
 
@@ -586,6 +592,7 @@ export default function App() {
   const [isSideMenuOpen, setIsSideMenuOpen] = useState<boolean>(false);
   const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState<boolean>(false);
   const [selectedProductForBuy, setSelectedProductForBuy] = useState<Product | null>(null);
+  const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
@@ -1785,6 +1792,17 @@ export default function App() {
       setErrorMessage('Please enter your name.');
       return;
     }
+
+    // Strictly validate quantity between 1 and 5
+    const parsedQty = parseInt(String(orderQuantity), 10);
+    if (isNaN(parsedQty) || parsedQty < 1 || parsedQty > 5) {
+      setErrorMessage('Please select a quantity between 1 and 5.');
+      return;
+    }
+    const validatedQuantity = Math.min(5, Math.max(1, parsedQty));
+    const unitPrice = selectedProductForBuy.price;
+    const totalPrice = unitPrice * validatedQuantity;
+
     if (checkoutMode === 'Adult') {
       const phoneDigits = checkoutForm.phone.replace(/\D/g, '').length;
       if (phoneDigits < 7 || phoneDigits > 15) {
@@ -1817,7 +1835,9 @@ export default function App() {
       productId: selectedProductForBuy.id,
       productName: selectedProductForBuy.name,
       productImageUrl: selectedProductForBuy.imageUrl || (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls[0]) || '',
-      price: selectedProductForBuy.price,
+      price: totalPrice,
+      quantity: validatedQuantity,
+      unitPrice: unitPrice,
       name: checkoutForm.name.trim(),
       studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
       section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
@@ -1842,6 +1862,9 @@ export default function App() {
           address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
           note: checkoutForm.note.trim(),
           colour: checkoutForm.colour || '',
+          quantity: validatedQuantity,
+          unitPrice: unitPrice,
+          price: totalPrice,
         });
         if (res.data?.order) {
           createdOrder = res.data.order;
@@ -1869,6 +1892,7 @@ export default function App() {
       await loadMyOrders();
       setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '', colour: '' });
       setSelectedProductForBuy(null);
+      setOrderQuantity(1);
       setLoading(false);
     }
   };
@@ -2653,6 +2677,7 @@ export default function App() {
                                 className="buy-btn"
                                 onClick={() => {
                                   setSelectedProductForBuy(p);
+                                  setOrderQuantity(1);
                                   setCheckoutMode(null);
                                   setCheckoutForm({
                                     name: '',
@@ -2765,9 +2790,23 @@ export default function App() {
                   <h2>{selectedProductForBuy.name}</h2>
                   <p>{selectedProductForBuy.description || 'A little bundle of fun.'}</p>
 
-                  <div className="summary-price">
-                    <span>Price</span>
-                    <strong>{da(selectedProductForBuy.price)}</strong>
+                  <div className="summary-price-box">
+                    {orderQuantity > 1 && (
+                      <div className="summary-price-breakdown">
+                        <div className="summary-breakdown-row">
+                          <span>Unit price</span>
+                          <span>{da(selectedProductForBuy.price)}</span>
+                        </div>
+                        <div className="summary-breakdown-row">
+                          <span>Quantity</span>
+                          <span>{orderQuantity} toys</span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="summary-price">
+                      <span>{orderQuantity > 1 ? 'Total Price' : 'Price'}</span>
+                      <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
+                    </div>
                   </div>
 
                   <div className="secure-note">
@@ -2798,6 +2837,62 @@ export default function App() {
                       ⚠️ If you are BCS student please use child option
                     </p>
                   )}
+
+                  {/* Quantity Selector (1 to 5) */}
+                  <div className="quantity-field-wrapper">
+                    <div className="quantity-field-header">
+                      <span className="quantity-label" id="quantity-control-label">
+                        Quantity
+                      </span>
+                      <span className="quantity-badge">Limit: 1 – 5</span>
+                    </div>
+
+                    <div
+                      className="quantity-selector-box"
+                      role="group"
+                      aria-labelledby="quantity-control-label"
+                    >
+                      <button
+                        type="button"
+                        className="quantity-stepper-btn minus"
+                        onClick={() => setOrderQuantity((q) => Math.max(1, q - 1))}
+                        disabled={orderQuantity <= 1}
+                        aria-label="Decrease quantity"
+                        title="Decrease quantity (minimum 1)"
+                      >
+                        <Minus size={18} strokeWidth={2.5} />
+                      </button>
+
+                      <div className="quantity-display" aria-live="polite">
+                        <span className="quantity-num">{orderQuantity}</span>
+                        <span className="quantity-unit">
+                          {orderQuantity === 1 ? 'toy' : 'toys'}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="quantity-stepper-btn plus"
+                        onClick={() => setOrderQuantity((q) => Math.min(5, q + 1))}
+                        disabled={orderQuantity >= 5}
+                        aria-label="Increase quantity"
+                        title="Increase quantity (maximum 5)"
+                      >
+                        <Plus size={18} strokeWidth={2.5} />
+                      </button>
+                    </div>
+
+                    {orderQuantity > 1 ? (
+                      <div className="quantity-calc-hint">
+                        {da(selectedProductForBuy.price)} × {orderQuantity} ={' '}
+                        <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
+                      </div>
+                    ) : (
+                      <div className="quantity-calc-hint">
+                        Unit price: <strong>{da(selectedProductForBuy.price)}</strong>
+                      </div>
+                    )}
+                  </div>
 
                   <label>
                     Your name
@@ -2908,7 +3003,7 @@ export default function App() {
                       'Placing order…'
                     ) : (
                       <>
-                        Place order · {da(selectedProductForBuy.price)} <ArrowLeft size={16} />
+                        Place order · {orderQuantity > 1 ? `${orderQuantity} toys · ` : ''}{da(selectedProductForBuy.price * orderQuantity)} <ArrowLeft size={16} />
                       </>
                     )}
                   </button>
@@ -3006,7 +3101,12 @@ export default function App() {
                     <div className="order-top">
                       <div>
                         <span className="order-id">ORDER NUMBER · {o.orderNumber || o.id}</span>
-                        <h3>{o.productName}</h3>
+                        <h3>
+                          {o.productName}
+                          {(o.quantity || 1) > 1 && (
+                            <span className="order-qty-tag">× {o.quantity}</span>
+                          )}
+                        </h3>
                       </div>
                       <strong>{da(o.price)}</strong>
                     </div>
@@ -3015,6 +3115,15 @@ export default function App() {
                       <span>
                         <b>Status</b>
                         {o.status}
+                      </span>
+                      <span>
+                        <b>Quantity</b>
+                        {o.quantity || 1} {o.quantity && o.quantity > 1 ? 'items' : 'item'}
+                        {o.quantity && o.quantity > 1 && (
+                          <small style={{ display: 'block', color: '#78816f', fontSize: '10px' }}>
+                            ({da(o.unitPrice || Math.round(o.price / o.quantity))} each)
+                          </small>
+                        )}
                       </span>
                       <span>
                         <b>Placed</b>
@@ -4295,19 +4404,31 @@ export default function App() {
                           <div className="order-top">
                             <div>
                               <span className="order-id">ORDER · {o.orderNumber || o.id.slice(0, 8)}</span>
-                              <h3>{o.productName}</h3>
+                              <h3>
+                                {o.productName}
+                                {(o.quantity || 1) > 1 && (
+                                  <span className="order-qty-tag">Qty: {o.quantity}</span>
+                                )}
+                              </h3>
                             </div>
                             <strong>{da(o.price)}</strong>
                           </div>
 
                           <div className="order-details">
                             <span>
-                              <b>Student</b>
+                              <b>{o.mode === 'Adult' ? 'Customer' : 'Student'}</b>
                               {o.name}
                             </span>
                             <span>
-                              <b>Class</b>
-                              {o.studentClass}
+                              <b>Quantity</b>
+                              <strong style={{ color: '#273824' }}>
+                                {o.quantity || 1} {o.quantity && o.quantity > 1 ? 'items' : 'item'}
+                              </strong>
+                              {o.quantity && o.quantity > 1 && (
+                                <small style={{ display: 'block', color: '#78816f', fontSize: '10px' }}>
+                                  ({da(o.unitPrice || Math.round(o.price / o.quantity))} each)
+                                </small>
+                              )}
                             </span>
                             {o.mode === 'Adult' ? (
                               <>
@@ -4730,6 +4851,7 @@ export default function App() {
                         type="button"
                         onClick={() => {
                           setSelectedProductForBuy(galleryProduct);
+                          setOrderQuantity(1);
                           setGalleryProduct(null);
                           setCheckoutMode(null);
                           setCheckoutForm({

@@ -47,6 +47,8 @@ interface Order {
   productName: string;
   productImageUrl: string;
   price: number;
+  quantity?: number;
+  unitPrice?: number;
   name: string;
   studentClass: string;
   section: string;
@@ -284,7 +286,7 @@ app.get('/api/orders/pending-summary', (req, res) => {
 
 app.post('/api/orders', (req, res) => {
   db = loadDB();
-  const { customerId, mode, productId, name, studentClass, section, phone, address, note, colour } = req.body;
+  const { customerId, mode, productId, name, studentClass, section, phone, address, note, colour, quantity } = req.body;
 
   if (!productId || !name || !name.trim()) {
     return res.status(400).json({ error: 'Please enter your name and select a toy.' });
@@ -294,6 +296,11 @@ app.post('/api/orders', (req, res) => {
   if (!product) {
     return res.status(404).json({ error: 'Product not found.' });
   }
+
+  const parsedQty = parseInt(quantity, 10);
+  const qty = isNaN(parsedQty) ? 1 : Math.min(5, Math.max(1, parsedQty));
+  const unitPrice = product.price;
+  const totalPrice = unitPrice * qty;
 
   const orderId = 'ord_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const orderNumber = 'TN-' + (Math.floor(1000 + Math.random() * 9000));
@@ -306,7 +313,9 @@ app.post('/api/orders', (req, res) => {
     productId,
     productName: product.name,
     productImageUrl: product.imageUrl || (product.imageUrls && product.imageUrls[0]) || '',
-    price: product.price,
+    price: totalPrice,
+    quantity: qty,
+    unitPrice: unitPrice,
     name: name.trim(),
     studentClass: mode === 'Adult' ? '' : (studentClass || ''),
     section: mode === 'Adult' ? '' : (section || '').trim(),

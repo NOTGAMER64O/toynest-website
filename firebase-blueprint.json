@@ -13,6 +13,8 @@
         "productName": { "type": "string", "maxLength": 200 },
         "productImageUrl": { "type": "string", "maxLength": 1000 },
         "price": { "type": "number" },
+        "quantity": { "type": "number", "minimum": 1, "maximum": 5 },
+        "unitPrice": { "type": "number" },
         "name": { "type": "string", "maxLength": 100 },
         "studentClass": { "type": "string", "maxLength": 50 },
         "section": { "type": "string", "maxLength": 50 },
