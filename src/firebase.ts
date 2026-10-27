@@ -294,7 +294,28 @@ export async function deleteSuggestionFromCloud(id: string): Promise<void> {
 }
 
 // ----------------- PRODUCTS -----------------
+function normalizeProductData(data: any, docId: string): Product {
+  const imageUrls = Array.isArray(data.imageUrls) && data.imageUrls.length > 0
+    ? data.imageUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
+    : data.imageUrl
+    ? [String(data.imageUrl)]
+    : ['/toys/toy-40ba4ba9-1.jpg'];
+
+  return {
+    id: data.id || docId,
+    name: String(data.name || '').trim(),
+    price: typeof data.price === 'number' ? data.price : parseFloat(data.price) || 0,
+    category: String(data.category || 'Other').trim(),
+    description: String(data.description || '').trim(),
+    imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+    imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
+    available: data.available === false ? false : true,
+    createdAt: data.createdAt || new Date().toISOString(),
+  };
+}
+
 export async function fetchProductsFromCloud(): Promise<Product[]> {
+  const path = 'products';
   try {
     const snapshot = await getDocs(collection(db, 'products'));
     const list: Product[] = [];
@@ -303,8 +324,8 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
       const data = d.data() as any;
       if (data && data.deleted === true) {
         deletedIds.add(data.id || d.id);
-      } else if (data && data.id && data.name) {
-        list.push(data as Product);
+      } else if (data && (data.name || data.id)) {
+        list.push(normalizeProductData(data, d.id));
       }
     });
 
@@ -321,18 +342,101 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
       (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
     );
   } catch (error) {
-    return DEFAULT_PRODUCTS;
+    console.error('Firestore products fetch error:', error);
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToProducts(callback: (products: Product[]) => void): () => void {
+  const path = 'products';
+  try {
+    return onSnapshot(
+      collection(db, 'products'),
+      (snapshot) => {
+        const list: Product[] = [];
+        const deletedIds = new Set<string>();
+        snapshot.forEach((d) => {
+          const data = d.data() as any;
+          if (data && data.deleted === true) {
+            deletedIds.add(data.id || d.id);
+          } else if (data && (data.name || data.id)) {
+            list.push(normalizeProductData(data, d.id));
+          }
+        });
+
+        const cloudIds = new Set(list.map((p) => p.id));
+        const merged = [...list];
+        for (const def of DEFAULT_PRODUCTS) {
+          if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+            merged.push(def);
+          }
+        }
+
+        const sorted = merged.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        callback(sorted);
+      },
+      (error) => {
+        console.warn('Firestore products subscription warning:', error);
+        handleFirestoreError(error, OperationType.LIST, path);
+      }
+    );
+  } catch (err) {
+    console.warn('Could not subscribe to products:', err);
+    return () => {};
+  }
+}
+
+export async function updateProductAvailabilityInCloud(productId: string, available: boolean): Promise<void> {
+  const path = `products/${productId}`;
+  const isAvailable = Boolean(available);
+  try {
+    await updateDoc(doc(db, 'products', productId), {
+      available: isAvailable,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    // If the doc did not exist in cloud yet (e.g., toggling a seed default product), create it
+    const def = DEFAULT_PRODUCTS.find((p) => p.id === productId);
+    if (def) {
+      await setDoc(doc(db, 'products', productId), {
+        ...def,
+        available: isAvailable,
+        deleted: false,
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
 
 export async function saveProductToCloud(product: Product): Promise<void> {
   const path = `products/${product.id}`;
   try {
-    await setDoc(doc(db, 'products', product.id), {
-      ...product,
+    const imageUrls = Array.isArray(product.imageUrls) && product.imageUrls.length > 0
+      ? product.imageUrls.filter((u) => typeof u === 'string' && u.trim().length > 0)
+      : product.imageUrl
+      ? [product.imageUrl]
+      : ['/toys/toy-40ba4ba9-1.jpg'];
+
+    const cleanData = {
+      id: product.id,
+      name: String(product.name || '').trim(),
+      price: typeof product.price === 'number' ? product.price : parseFloat(String(product.price)) || 0,
+      category: String(product.category || 'Other').trim(),
+      description: String(product.description || '').trim(),
+      imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+      imageUrls: imageUrls,
+      available: product.available === false ? false : true,
+      createdAt: product.createdAt || new Date().toISOString(),
       deleted: false,
       updatedAt: new Date().toISOString(),
-    });
+    };
+
+    await setDoc(doc(db, 'products', product.id), cleanData);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -341,12 +445,16 @@ export async function saveProductToCloud(product: Product): Promise<void> {
 export async function deleteProductFromCloud(productId: string): Promise<void> {
   const path = `products/${productId}`;
   try {
-    await setDoc(doc(db, 'products', productId), {
-      id: productId,
-      deleted: true,
-      available: false,
-      updatedAt: new Date().toISOString(),
-    });
+    await setDoc(
+      doc(db, 'products', productId),
+      {
+        id: productId,
+        deleted: true,
+        available: false,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }

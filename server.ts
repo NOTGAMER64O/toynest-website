@@ -292,14 +292,35 @@ app.post('/api/orders', (req, res) => {
     return res.status(400).json({ error: 'Please enter your name and select a toy.' });
   }
 
-  const product = db.products.find((p) => p.id === productId);
+  let product = db.products.find((p) => p.id === productId);
+  if (!product && req.body.productName && (req.body.price || req.body.unitPrice)) {
+    const fallbackPrice = typeof req.body.unitPrice === 'number' && req.body.unitPrice > 0
+      ? req.body.unitPrice
+      : typeof req.body.price === 'number' && req.body.price > 0
+      ? req.body.price
+      : 50;
+    product = {
+      id: productId,
+      name: String(req.body.productName).trim(),
+      price: fallbackPrice,
+      category: req.body.category || 'Other',
+      description: '',
+      imageUrl: req.body.productImageUrl || '/toys/toy-40ba4ba9-1.jpg',
+      imageUrls: [req.body.productImageUrl || '/toys/toy-40ba4ba9-1.jpg'],
+      available: true,
+      createdAt: new Date().toISOString(),
+    };
+    db.products.push(product);
+    saveDB(db);
+  }
+
   if (!product) {
     return res.status(404).json({ error: 'Product not found.' });
   }
 
   const parsedQty = parseInt(quantity, 10);
   const qty = isNaN(parsedQty) ? 1 : Math.min(5, Math.max(1, parsedQty));
-  const unitPrice = product.price;
+  const unitPrice = typeof product.price === 'number' ? product.price : parseFloat(product.price) || 0;
   const totalPrice = unitPrice * qty;
 
   const orderId = 'ord_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -463,9 +484,20 @@ app.post('/api/owner/products/update', (req, res) => {
   }
 
   db = loadDB();
-  const product = db.products.find((p) => p.id === id);
+  let product = db.products.find((p) => p.id === id);
   if (!product) {
-    return res.status(404).json({ error: 'Product not found.' });
+    product = {
+      id,
+      name: name ? String(name).trim() : 'Toy',
+      price: price !== undefined ? Number(price) : 0,
+      description: description ? String(description).trim() : '',
+      category: category ? String(category).trim() : 'Other',
+      imageUrl: imageUrl || (Array.isArray(imageUrls) && imageUrls[0]) || '/toys/toy-40ba4ba9-1.jpg',
+      imageUrls: Array.isArray(imageUrls) && imageUrls.length > 0 ? imageUrls : [imageUrl || '/toys/toy-40ba4ba9-1.jpg'],
+      available: available !== undefined ? Boolean(available) : true,
+      createdAt: new Date().toISOString(),
+    };
+    db.products.unshift(product);
   }
 
   if (name !== undefined) product.name = name.trim();

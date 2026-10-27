@@ -187,6 +187,8 @@ import {
   fetchSuggestionsFromCloud,
   deleteSuggestionFromCloud,
   fetchProductsFromCloud,
+  subscribeToProducts,
+  updateProductAvailabilityInCloud,
   saveProductToCloud,
   deleteProductFromCloud,
   fetchSettingsFromCloud,
@@ -519,27 +521,23 @@ function computeLocalQueuePositions(orders: Order[]): Order[] {
   });
 }
 
-async function compressImageFile(file: File): Promise<File> {
-  if (file.size <= 350 * 1024 && !file.type.includes('heic')) {
-    return file;
-  }
+async function compressImageFile(file: File, maxDim = 800, quality = 0.72): Promise<File> {
   return new Promise<File>((resolve) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const img = new Image();
       img.onload = () => {
-        const MAX_DIM = 1200;
         let width = img.width;
         let height = img.height;
         if (width > height) {
-          if (width > MAX_DIM) {
-            height = Math.round((height * MAX_DIM) / width);
-            width = MAX_DIM;
+          if (width > maxDim) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
           }
         } else {
-          if (height > MAX_DIM) {
-            width = Math.round((width * MAX_DIM) / height);
-            height = MAX_DIM;
+          if (height > maxDim) {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
           }
         }
         const canvas = document.createElement('canvas');
@@ -561,7 +559,7 @@ async function compressImageFile(file: File): Promise<File> {
             resolve(new File([blob], cleanName, { type: 'image/jpeg', lastModified: Date.now() }));
           },
           'image/jpeg',
-          0.82
+          quality
         );
       };
       img.onerror = () => resolve(file);
@@ -570,6 +568,86 @@ async function compressImageFile(file: File): Promise<File> {
     reader.onerror = () => resolve(file);
     reader.readAsDataURL(file);
   });
+}
+
+async function fileToOptimizedDataUrl(file: File, maxDim = 800, quality = 0.72): Promise<string> {
+  return new Promise<string>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxDim) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          }
+        } else {
+          if (height > maxDim) {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(e.target?.result || ''));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(String(e.target?.result || ''));
+      img.src = String(e.target?.result || '');
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(file);
+  });
+}
+
+async function guaranteeSafeImagePayload(imageUrls: string[]): Promise<string[]> {
+  if (!imageUrls || imageUrls.length === 0) return ['/toys/toy-40ba4ba9-1.jpg'];
+  const totalLength = imageUrls.reduce((acc, u) => acc + (u?.length || 0), 0);
+  if (totalLength < 550000) return imageUrls;
+
+  // Recompress oversized data URLs to strictly stay under 500KB
+  const recompressed = await Promise.all(
+    imageUrls.map(async (url) => {
+      if (!url.startsWith('data:')) return url;
+      return new Promise<string>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 500;
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
+          } else {
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return resolve(url);
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.62));
+        };
+        img.onerror = () => resolve(url);
+        img.src = url;
+      });
+    })
+  );
+  return recompressed;
 }
 
 export default function App() {
@@ -697,12 +775,14 @@ export default function App() {
   const loadProducts = async () => {
     try {
       const cloudProds = await fetchProductsFromCloud();
-      if (cloudProds && cloudProds.length > 0) {
+      if (Array.isArray(cloudProds) && cloudProds.length > 0) {
         setProducts(cloudProds);
         saveStoredProducts(cloudProds);
         return;
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Could not load products from cloud:', err);
+    }
     try {
       const res = await api.get('/api/products');
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
@@ -723,15 +803,17 @@ export default function App() {
   const loadOwnerProducts = async () => {
     try {
       const cloudProds = await fetchProductsFromCloud();
-      if (cloudProds && cloudProds.length > 0) {
+      if (Array.isArray(cloudProds) && cloudProds.length > 0) {
         setProducts(cloudProds);
         saveStoredProducts(cloudProds);
         return;
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Could not load owner products from cloud:', err);
+    }
     try {
       const res = await ownerPost('/api/owner/products/list', {});
-      if (res.data?.products && Array.isArray(res.data.products)) {
+      if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
         setProducts(res.data.products);
         saveStoredProducts(res.data.products);
         return;
@@ -1070,6 +1152,18 @@ export default function App() {
     loadShopModes();
     loadColours();
 
+    let unsubProducts = () => {};
+    try {
+      unsubProducts = subscribeToProducts((cloudProds) => {
+        if (Array.isArray(cloudProds) && cloudProds.length > 0) {
+          setProducts(cloudProds);
+          saveStoredProducts(cloudProds);
+        }
+      });
+    } catch (err) {
+      console.warn('Real-time products subscription error:', err);
+    }
+
     let unsubColours = () => {};
     try {
       unsubColours = subscribeToColours((colours) => {
@@ -1081,6 +1175,7 @@ export default function App() {
     } catch {}
 
     return () => {
+      unsubProducts();
       unsubColours();
     };
   }, []);
@@ -1456,99 +1551,72 @@ export default function App() {
     }
   };
 
-  const handleProductSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const submitter = (e.nativeEvent as any)?.submitter as HTMLButtonElement | null;
-    const isDraft = submitter?.value ? submitter.value === 'draft' : productSubmitTarget === 'draft';
+  const handleSaveProduct = async (isDraft: boolean) => {
     const targetAvailable = !isDraft;
-
     setErrorMessage('');
     setSuccessMessage('');
-    if (!productForm.name.trim() || !productForm.price || Number(productForm.price) <= 0) {
-      setErrorMessage('Enter a toy name and a valid price.');
+
+    const cleanName = productForm.name.trim();
+    const cleanPrice = Number(productForm.price);
+    if (!cleanName || isNaN(cleanPrice) || cleanPrice <= 0) {
+      setErrorMessage('Please enter a toy name and a valid price (greater than ₹0).');
       return;
     }
+
     setLoading(true);
+
     try {
+      // 1. Process all newly added pictures directly into clean optimized JPEG data URLs
+      const newOptimizedDataUrls: string[] = [];
+      if (productImages.length > 0) {
+        for (const file of productImages) {
+          const dataUrl = await fileToOptimizedDataUrl(file, 800, 0.72);
+          if (dataUrl) newOptimizedDataUrls.push(dataUrl);
+        }
+      }
+
       if (editingProductId) {
+        // ---- EDIT EXISTING PRODUCT / DRAFT ----
         const existing =
           products.find((p) => p.id === editingProductId) ||
           getStoredProducts().find((p) => p.id === editingProductId);
 
-        let finalImageUrls = [...editExistingImages];
-        let imagesData: { data: string; contentType: string }[] = [];
-
-        if (productImages.length > 0) {
-          imagesData = await Promise.all(
-            productImages.map(
-              (file) =>
-                new Promise<{ data: string; contentType: string }>((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onload = () =>
-                    resolve({
-                      data: String(reader.result).split(',')[1] || '',
-                      contentType: file.type || 'image/jpeg',
-                    });
-                  reader.onerror = reject;
-                  reader.readAsDataURL(file);
-                })
-            )
-          );
-        }
-
-        try {
-          const res = await ownerPost('/api/owner/products/update', {
-            id: editingProductId,
-            name: productForm.name.trim(),
-            price: Number(productForm.price),
-            description: productForm.description.trim(),
-            category: productForm.category.trim() || 'Other',
-            available: targetAvailable,
-            imageUrls: editExistingImages,
-            newImages: imagesData,
-          });
-          if (res.data?.product?.imageUrls && Array.isArray(res.data.product.imageUrls)) {
-            finalImageUrls = res.data.product.imageUrls;
-          }
-        } catch (updateErr) {
-          console.warn('Could not update product on backend API:', updateErr);
-          if (imagesData.length > 0) {
-            const fallbackNewUrls = imagesData.map(
-              (img) => `data:${img.contentType};base64,${img.data}`
-            );
-            finalImageUrls = [...editExistingImages, ...fallbackNewUrls];
-          }
-        }
-
+        let finalImageUrls = [...editExistingImages, ...newOptimizedDataUrls];
         if (finalImageUrls.length === 0) {
-          finalImageUrls = ['/toys/toy-40ba4ba9-1.jpg'];
+          finalImageUrls = existing?.imageUrls?.length
+            ? existing.imageUrls
+            : existing?.imageUrl
+            ? [existing.imageUrl]
+            : ['/toys/toy-40ba4ba9-1.jpg'];
         }
-        const finalImageUrl = finalImageUrls[0];
+
+        // Guarantee payload is safely under Firestore limit
+        finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
         const updatedItem: Product = {
-          id: existing?.id || editingProductId,
-          imageUrl: finalImageUrl,
-          imageUrls: finalImageUrls,
-          createdAt: existing?.createdAt || new Date().toISOString(),
-          name: productForm.name.trim(),
-          price: Number(productForm.price),
+          id: editingProductId,
+          name: cleanName,
+          price: cleanPrice,
           description: productForm.description.trim(),
           category: productForm.category.trim() || 'Other',
+          imageUrl: finalImageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+          imageUrls: finalImageUrls,
           available: targetAvailable,
+          createdAt: existing?.createdAt || new Date().toISOString(),
         };
 
-        // Update local React state and storage immediately
+        // CRITICAL: Await Firestore write first! If Firestore write fails, DO NOT falsely claim success!
+        await saveProductToCloud(updatedItem);
+
+        // Notify server backend as secondary sync
+        ownerPost('/api/owner/products/update', updatedItem).catch(() => {});
+
+        // Update local React state and storage
         setProducts((prev) => {
           const next = prev.map((p) => (p.id === editingProductId ? updatedItem : p));
           saveStoredProducts(next);
           return next;
         });
-
-        try {
-          await saveProductToCloud(updatedItem);
-        } catch (err) {
-          console.warn('Could not update product in Firestore:', err);
-        }
 
         setEditingProductId(null);
         setProductForm({ name: '', price: '', description: '', category: '' });
@@ -1557,107 +1625,75 @@ export default function App() {
         setProductSubmitTarget('published');
         setSuccessMessage(
           targetAvailable
-            ? 'Toy details and pictures updated!'
-            : 'Toy details and pictures saved in drafts. Hidden from customers.'
+            ? `"${updatedItem.name}" published to shop!`
+            : `"${updatedItem.name}" saved as draft. Hidden from customers.`
         );
+
+        if (isDraft) {
+          setOwnerTab('drafts');
+          setProductFilter('drafts');
+        } else {
+          setProductFilter('published');
+        }
         setLoading(false);
         return;
       }
 
-      const imagesData = await Promise.all(
-        productImages.map(
-          (file) =>
-            new Promise<{ data: string; contentType: string }>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () =>
-                resolve({
-                  data: String(reader.result).split(',')[1] || '',
-                  contentType: file.type || 'image/jpeg',
-                });
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
-      );
-
-      let newProduct: Product | null = null;
-      try {
-        const res = await ownerPost('/api/owner/products', {
-          name: productForm.name.trim(),
-          price: Number(productForm.price),
-          description: productForm.description.trim(),
-          category: productForm.category.trim() || 'Other',
-          images: imagesData,
-          available: targetAvailable,
-        });
-        if (res.data?.product) {
-          newProduct = {
-            ...res.data.product,
-            available: targetAvailable,
-          };
-        }
-      } catch (err) {
-        console.warn('Could not save product to backend API, using client fallback:', err);
+      // ---- CREATE NEW PRODUCT / DRAFT ----
+      let finalImageUrls = [...newOptimizedDataUrls];
+      if (finalImageUrls.length === 0) {
+        finalImageUrls = ['/toys/toy-40ba4ba9-1.jpg'];
       }
+      finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
-      if (!newProduct) {
-        const fallbackUrls = imagesData.map(
-          (img) => `data:${img.contentType};base64,${img.data}`
-        );
-        newProduct = {
-          id: `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          name: productForm.name.trim(),
-          price: Number(productForm.price),
-          description: productForm.description.trim(),
-          category: productForm.category.trim() || 'Other',
-          imageUrl: fallbackUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
-          imageUrls: fallbackUrls.length > 0 ? fallbackUrls : ['/toys/toy-40ba4ba9-1.jpg'],
-          available: targetAvailable,
-          createdAt: new Date().toISOString(),
-        };
-      } else {
-        newProduct.available = targetAvailable;
-      }
+      const productId = `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      const newProduct: Product = {
+        id: productId,
+        name: cleanName,
+        price: cleanPrice,
+        description: productForm.description.trim(),
+        category: productForm.category.trim() || 'Other',
+        imageUrl: finalImageUrls[0],
+        imageUrls: finalImageUrls,
+        available: targetAvailable,
+        createdAt: new Date().toISOString(),
+      };
 
-      // Ensure valid image fallback
-      if (!newProduct.imageUrl) {
-        newProduct.imageUrl = '/toys/toy-40ba4ba9-1.jpg';
-      }
-      if (!newProduct.imageUrls || newProduct.imageUrls.length === 0) {
-        newProduct.imageUrls = [newProduct.imageUrl];
-      }
+      // CRITICAL: Await Firestore write first!
+      await saveProductToCloud(newProduct);
 
-      // Update local state and storage immediately
+      // Notify server backend as secondary sync
+      ownerPost('/api/owner/products', newProduct).catch(() => {});
+
       setProducts((prev) => {
-        const next = [newProduct!, ...prev.filter((p) => p.id !== newProduct!.id)];
+        const next = [newProduct, ...prev.filter((p) => p.id !== productId)];
         saveStoredProducts(next);
         return next;
       });
 
-      try {
-        await saveProductToCloud(newProduct);
-      } catch (err) {
-        console.warn('Could not save product to Firestore:', err);
-      }
-
       setProductForm({ name: '', price: '', description: '', category: '' });
       setProductImages([]);
+      setEditExistingImages([]);
       setProductSubmitTarget('published');
       setSuccessMessage(
         isDraft
-          ? 'Toy saved as a draft. Customers cannot see it yet.'
-          : 'Toy added and published in your shop!'
+          ? `"${newProduct.name}" saved as draft. You can find it in the Drafts tab.`
+          : `"${newProduct.name}" added and published in your shop!`
       );
 
-      // Automatically show the relevant tab/filter so the new product is immediately seen
       if (isDraft) {
+        setOwnerTab('drafts');
         setProductFilter('drafts');
       } else {
         setProductFilter('published');
       }
     } catch (err: any) {
-      console.error('Error adding toy:', err);
-      setErrorMessage(err?.message || 'Could not add toy. Please check the details and try again.');
+      console.error('Error saving product to database:', err);
+      setErrorMessage(
+        err?.message
+          ? `Could not save toy to cloud database: ${err.message}`
+          : 'Could not save toy to the cloud database. Please check your network and try again.'
+      );
     } finally {
       setLoading(false);
     }
@@ -1665,39 +1701,35 @@ export default function App() {
 
   const toggleProductVisibility = async (p: Product) => {
     const newAvail = p.available === false;
-    setProducts((prev) => {
-      const next = prev.map((item) =>
-        item.id === p.id ? { ...item, available: newAvail } : item
-      );
-      saveStoredProducts(next);
-      return next;
-    });
-
-    try {
-      await saveProductToCloud({ ...p, available: newAvail });
-    } catch (err) {
-      console.warn('Could not update product in Firestore:', err);
-    }
-
-    try {
-      await ownerPost('/api/owner/products/update', {
-        id: p.id,
-        name: p.name,
-        price: p.price,
-        description: p.description || '',
-        category: p.category || 'Other',
-        available: newAvail,
-      });
-    } catch (err) {
-      console.warn('Could not update product on backend:', err);
-    }
-
-    setSuccessMessage(
-      newAvail
-        ? `"${p.name}" published to shop!`
-        : `"${p.name}" moved to drafts and hidden from customers.`
-    );
+    setLoading(true);
     setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      await updateProductAvailabilityInCloud(p.id, newAvail);
+
+      setProducts((prev) => {
+        const next = prev.map((item) =>
+          item.id === p.id ? { ...item, available: newAvail } : item
+        );
+        saveStoredProducts(next);
+        return next;
+      });
+
+      ownerPost('/api/owner/products/update', { id: p.id, available: newAvail }).catch(() => {});
+
+      setSuccessMessage(
+        newAvail
+          ? `"${p.name}" published to shop!`
+          : `"${p.name}" moved to drafts and hidden from customers.`
+      );
+    } catch (err: any) {
+      console.error('Could not update product availability:', err);
+      setErrorMessage(
+        err?.message ? `Failed to update status: ${err.message}` : 'Failed to update visibility in cloud database.'
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   const startEditProduct = (p: Product) => {
@@ -1719,7 +1751,8 @@ export default function App() {
     setProductSubmitTarget(p.available === false ? 'draft' : 'published');
     setErrorMessage('');
     setSuccessMessage('');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setOwnerTab('products');
+    window.scrollTo({ top: 320, behavior: 'smooth' });
   };
 
   const cancelEditProduct = () => {
@@ -1732,26 +1765,30 @@ export default function App() {
   };
 
   const deleteProduct = async (id: string) => {
-    if (confirm('Remove this toy from the shop?')) {
+    const p = products.find((item) => item.id === id);
+    const toyName = p?.name || 'this toy';
+    if (!window.confirm(`Are you sure you want to delete "${toyName}"?`)) {
+      return;
+    }
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      await deleteProductFromCloud(id);
+      ownerPost('/api/owner/products/delete', { id }).catch(() => {});
       setProducts((prev) => {
-        const next = prev.filter((p) => p.id !== id);
+        const next = prev.filter((item) => item.id !== id);
         saveStoredProducts(next);
         return next;
       });
-
-      try {
-        await deleteProductFromCloud(id);
-      } catch (err) {
-        console.warn('Could not delete product from Firestore:', err);
-      }
-
-      try {
-        await ownerPost('/api/owner/products/delete', { id });
-      } catch (err) {
-        console.warn('Could not delete product on backend:', err);
-      }
-
-      setSuccessMessage('Toy removed.');
+      setSuccessMessage(`"${toyName}" was removed.`);
+    } catch (err: any) {
+      console.error('Could not delete toy from cloud:', err);
+      setErrorMessage(
+        err?.message ? `Failed to delete: ${err.message}` : 'Failed to delete toy from cloud database.'
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -3548,7 +3585,13 @@ export default function App() {
             {/* PRODUCTS TAB */}
             {ownerTab === 'products' && (
               <div className="manage-layout">
-                <form className="panel-form add-form" onSubmit={handleProductSubmit}>
+                <form
+                  className="panel-form add-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleSaveProduct(false);
+                  }}
+                >
                   <span className="eyebrow">
                     {editingProductId
                       ? `UPDATE LISTING · ${editingProduct?.available === false ? 'DRAFT' : 'PUBLISHED'}`
@@ -3861,7 +3904,7 @@ export default function App() {
                               setLoading(true);
                               setErrorMessage('');
                               try {
-                                const compressed = await Promise.all(rawFiles.map(compressImageFile));
+                                const compressed = await Promise.all(rawFiles.map((f) => compressImageFile(f)));
                                 const currentTotal = editExistingImages.length + productImages.length;
                                 const availableSlots = 5 - currentTotal;
                                 if (availableSlots <= 0) {
@@ -3910,7 +3953,7 @@ export default function App() {
                             setLoading(true);
                             setErrorMessage('');
                             try {
-                              const compressed = await Promise.all(rawFiles.map(compressImageFile));
+                              const compressed = await Promise.all(rawFiles.map((f) => compressImageFile(f)));
                               const merged = [...productImages];
                               for (const f of compressed) {
                                 if (!merged.some((m) => m.name === f.name && m.size === f.size)) {
@@ -4022,13 +4065,10 @@ export default function App() {
 
                   <div className="product-save-actions">
                     <button
-                      type="submit"
-                      name="visibility"
-                      value="published"
+                      type="button"
                       className="primary-btn full-btn"
                       disabled={loading}
-                      onClick={() => setProductSubmitTarget('published')}
-                      onTouchStart={() => setProductSubmitTarget('published')}
+                      onClick={() => void handleSaveProduct(false)}
                     >
                       {loading
                         ? 'Saving…'
@@ -4039,13 +4079,10 @@ export default function App() {
                         : 'Publish product'}
                     </button>
                     <button
-                      type="submit"
-                      name="visibility"
-                      value="draft"
+                      type="button"
                       className="secondary-btn full-btn"
                       disabled={loading}
-                      onClick={() => setProductSubmitTarget('draft')}
-                      onTouchStart={() => setProductSubmitTarget('draft')}
+                      onClick={() => void handleSaveProduct(true)}
                     >
                       {loading
                         ? 'Saving…'
