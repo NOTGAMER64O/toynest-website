@@ -430,7 +430,7 @@ app.post('/api/owner/products/list', (req, res) => {
 });
 
 app.post('/api/owner/products', (req, res) => {
-  const { pin, name, price, description, category, images, available } = req.body;
+  const { pin, id, name, price, description, category, images, imageUrl, imageUrls: reqImageUrls, available, createdAt } = req.body;
   if (!verifyPin(pin)) {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
@@ -440,8 +440,12 @@ app.post('/api/owner/products', (req, res) => {
   }
 
   db = loadDB();
-  const productId = 'toy_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const imageUrls: string[] = [];
+  const productId = id || ('toy_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+  const imageUrls: string[] = Array.isArray(reqImageUrls) && reqImageUrls.length > 0
+    ? [...reqImageUrls]
+    : imageUrl
+    ? [imageUrl]
+    : [];
 
   if (Array.isArray(images) && images.length > 0) {
     images.forEach((img, idx) => {
@@ -468,9 +472,10 @@ app.post('/api/owner/products', (req, res) => {
     imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
     imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
     available: available !== false,
-    createdAt: new Date().toISOString(),
+    createdAt: createdAt || new Date().toISOString(),
   };
 
+  db.products = db.products.filter((p) => p.id !== productId);
   db.products.unshift(newProduct);
   saveDB(db);
 

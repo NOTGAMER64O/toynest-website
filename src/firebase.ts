@@ -8,6 +8,7 @@ import {
   getDoc,
   getDocs,
   getDocFromServer,
+  getDocsFromServer,
   query,
   where,
   orderBy,
@@ -317,7 +318,13 @@ function normalizeProductData(data: any, docId: string): Product {
 export async function fetchProductsFromCloud(): Promise<Product[]> {
   const path = 'products';
   try {
-    const snapshot = await getDocs(collection(db, 'products'));
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'products'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'products'));
+    }
+
     const list: Product[] = [];
     const deletedIds = new Set<string>();
     snapshot.forEach((d) => {
@@ -349,7 +356,6 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
 }
 
 export function subscribeToProducts(callback: (products: Product[]) => void): () => void {
-  const path = 'products';
   try {
     return onSnapshot(
       collection(db, 'products'),
@@ -379,8 +385,7 @@ export function subscribeToProducts(callback: (products: Product[]) => void): ()
         callback(sorted);
       },
       (error) => {
-        console.warn('Firestore products subscription warning:', error);
-        handleFirestoreError(error, OperationType.LIST, path);
+        console.warn('Firestore products subscription warning (auto-reconnecting):', error);
       }
     );
   } catch (err) {
@@ -397,6 +402,10 @@ export async function updateProductAvailabilityInCloud(productId: string, availa
       available: isAvailable,
       updatedAt: new Date().toISOString(),
     });
+    // Server confirmation
+    try {
+      await getDocFromServer(doc(db, 'products', productId));
+    } catch {}
   } catch (error) {
     // If the doc did not exist in cloud yet (e.g., toggling a seed default product), create it
     const def = DEFAULT_PRODUCTS.find((p) => p.id === productId);
@@ -407,6 +416,9 @@ export async function updateProductAvailabilityInCloud(productId: string, availa
         deleted: false,
         updatedAt: new Date().toISOString(),
       });
+      try {
+        await getDocFromServer(doc(db, 'products', productId));
+      } catch {}
       return;
     }
     handleFirestoreError(error, OperationType.UPDATE, path);
@@ -437,6 +449,12 @@ export async function saveProductToCloud(product: Product): Promise<void> {
     };
 
     await setDoc(doc(db, 'products', product.id), cleanData);
+
+    // CRITICAL: Explicitly verify the write reached and exists on the Firestore server
+    const verifySnap = await getDocFromServer(doc(db, 'products', product.id));
+    if (!verifySnap.exists()) {
+      throw new Error(`Server verification failed: product ${product.id} could not be confirmed in Firestore.`);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -455,6 +473,9 @@ export async function deleteProductFromCloud(productId: string): Promise<void> {
       },
       { merge: true }
     );
+    try {
+      await deleteDoc(doc(db, 'products', productId));
+    } catch {}
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }

@@ -652,7 +652,7 @@ async function guaranteeSafeImagePayload(imageUrls: string[]): Promise<string[]>
 
 export default function App() {
   const [page, setPage] = useState<'home' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
-  const [products, setProducts] = useState<Product[]>([]);
+  const [products, setProducts] = useState<Product[]>(() => getStoredProducts());
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
@@ -787,10 +787,10 @@ export default function App() {
       const res = await api.get('/api/products');
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
         const currentStored = getStoredProducts();
-        const drafts = currentStored.filter((p) => p.available === false);
+        const serverIds = new Set(res.data.products.map((p: Product) => p.id));
         const merged = [
           ...res.data.products,
-          ...drafts.filter((d) => !res.data.products.some((p: Product) => p.id === d.id)),
+          ...currentStored.filter((p) => !serverIds.has(p.id)),
         ];
         setProducts(merged);
         saveStoredProducts(merged);
@@ -814,8 +814,14 @@ export default function App() {
     try {
       const res = await ownerPost('/api/owner/products/list', {});
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
-        setProducts(res.data.products);
-        saveStoredProducts(res.data.products);
+        const currentStored = getStoredProducts();
+        const serverIds = new Set(res.data.products.map((p: Product) => p.id));
+        const merged = [
+          ...res.data.products,
+          ...currentStored.filter((p) => !serverIds.has(p.id)),
+        ];
+        setProducts(merged);
+        saveStoredProducts(merged);
         return;
       }
     } catch {}
