@@ -15,9 +15,17 @@ import {
   onSnapshot,
   updateDoc,
   deleteDoc,
+  runTransaction,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { type Order, type Product, type Suggestion, DEFAULT_PRODUCTS } from './defaultData';
+import {
+  type Order,
+  type Product,
+  type Suggestion,
+  type RescueDeal,
+  DEFAULT_PRODUCTS,
+  DEFAULT_RESCUE_DEALS,
+} from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -597,4 +605,221 @@ export async function signOutAdmin(): Promise<void> {
   try {
     await signOut(auth);
   } catch {}
+}
+
+// ----------------- RESCUE DEALS OFFER SYSTEM -----------------
+export function normalizeRescueDealData(data: any, docId: string): RescueDeal {
+  const imageUrls = Array.isArray(data.imageUrls) && data.imageUrls.length > 0
+    ? data.imageUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
+    : data.imageUrl
+    ? [String(data.imageUrl)]
+    : ['/toys/toy-78291ec9-1.jpg'];
+
+  const claimed = data.claimed === true || data.status === 'claimed' || data.status === 'sold';
+
+  return {
+    id: data.id || docId,
+    productId: data.productId || '',
+    title: String(data.title || data.name || '').trim(),
+    originalPrice: typeof data.originalPrice === 'number' ? data.originalPrice : parseFloat(data.originalPrice) || 0,
+    dealPrice: typeof data.dealPrice === 'number' ? data.dealPrice : (typeof data.price === 'number' ? data.price : parseFloat(data.dealPrice || data.price) || 0),
+    condition: String(data.condition || 'Special Rescue Deal').trim(),
+    description: String(data.description || '').trim(),
+    imageUrl: imageUrls[0] || '/toys/toy-78291ec9-1.jpg',
+    imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-78291ec9-1.jpg'],
+    claimed,
+    status: claimed ? 'claimed' : 'available',
+    claimedAt: data.claimedAt || undefined,
+    claimedByOrder: data.claimedByOrder || undefined,
+    claimedByCustomer: data.claimedByCustomer || undefined,
+    createdAt: data.createdAt || new Date().toISOString(),
+  };
+}
+
+export async function fetchRescueDealsFromCloud(): Promise<RescueDeal[]> {
+  const path = 'rescueDeals';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'rescueDeals'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'rescueDeals'));
+    }
+
+    const list: RescueDeal[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data() as any;
+      if (data && (data.title || data.name || data.id)) {
+        list.push(normalizeRescueDealData(data, d.id));
+      }
+    });
+
+    const cloudIds = new Set(list.map((d) => d.id));
+    const merged = [...list];
+    for (const def of DEFAULT_RESCUE_DEALS) {
+      if (!cloudIds.has(def.id)) {
+        merged.push(def);
+      }
+    }
+
+    return merged.sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+  } catch (error) {
+    console.error('Firestore rescue deals fetch error:', error);
+    return DEFAULT_RESCUE_DEALS;
+  }
+}
+
+export function subscribeToRescueDeals(callback: (deals: RescueDeal[]) => void): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'rescueDeals'),
+      (snapshot) => {
+        const list: RescueDeal[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data() as any;
+          if (data && (data.title || data.name || data.id)) {
+            list.push(normalizeRescueDealData(data, d.id));
+          }
+        });
+
+        const cloudIds = new Set(list.map((d) => d.id));
+        const merged = [...list];
+        for (const def of DEFAULT_RESCUE_DEALS) {
+          if (!cloudIds.has(def.id)) {
+            merged.push(def);
+          }
+        }
+
+        const sorted = merged.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        callback(sorted);
+      },
+      (error) => {
+        console.warn('Firestore rescue deals subscription warning:', error);
+      }
+    );
+  } catch (err) {
+    console.warn('Could not subscribe to rescue deals:', err);
+    return () => {};
+  }
+}
+
+export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
+  const path = `rescueDeals/${deal.id}`;
+  try {
+    const imageUrls = Array.isArray(deal.imageUrls) && deal.imageUrls.length > 0
+      ? deal.imageUrls.filter((u) => typeof u === 'string' && u.trim().length > 0)
+      : deal.imageUrl
+      ? [deal.imageUrl]
+      : ['/toys/toy-78291ec9-1.jpg'];
+
+    const cleanData = {
+      id: deal.id,
+      productId: deal.productId || '',
+      title: String(deal.title || '').trim(),
+      originalPrice: typeof deal.originalPrice === 'number' ? deal.originalPrice : parseFloat(String(deal.originalPrice)) || 0,
+      dealPrice: typeof deal.dealPrice === 'number' ? deal.dealPrice : parseFloat(String(deal.dealPrice)) || 0,
+      condition: String(deal.condition || 'Special Rescue Deal').trim(),
+      description: String(deal.description || '').trim(),
+      imageUrl: imageUrls[0] || '/toys/toy-78291ec9-1.jpg',
+      imageUrls: imageUrls,
+      claimed: deal.claimed === true,
+      status: deal.claimed ? 'claimed' : 'available',
+      claimedAt: deal.claimedAt || null,
+      claimedByOrder: deal.claimedByOrder || null,
+      claimedByCustomer: deal.claimedByCustomer || null,
+      createdAt: deal.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await setDoc(doc(db, 'rescueDeals', deal.id), cleanData);
+
+    try {
+      await getDocFromServer(doc(db, 'rescueDeals', deal.id));
+    } catch {}
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteRescueDealFromCloud(dealId: string): Promise<void> {
+  const path = `rescueDeals/${dealId}`;
+  try {
+    await deleteDoc(doc(db, 'rescueDeals', dealId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * ATOMIC TRANSACTION:
+ * Ensures the deal has not been claimed yet, creates the order,
+ * and marks the deal claimed in a single atomic Firestore transaction.
+ * If another customer attempts to claim the deal simultaneously,
+ * one will succeed and the other will fail with an explicit concurrency error.
+ * If saving the order fails, the deal is NOT marked as sold.
+ */
+export async function claimRescueDealInCloud(dealId: string, order: Order): Promise<void> {
+  const path = `rescueDeals/${dealId} & orders/${order.id}`;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const dealRef = doc(db, 'rescueDeals', dealId);
+      const dealSnap = await transaction.get(dealRef);
+
+      let dealData: any = null;
+      if (dealSnap.exists()) {
+        dealData = dealSnap.data();
+      } else {
+        const defaultMatch = DEFAULT_RESCUE_DEALS.find((d) => d.id === dealId);
+        if (defaultMatch) {
+          dealData = { ...defaultMatch };
+        } else {
+          throw new Error('This Rescue Deal offer does not exist or has been removed.');
+        }
+      }
+
+      // Check if already claimed
+      if (dealData.claimed === true || dealData.status === 'claimed' || dealData.status === 'sold') {
+        throw new Error('This Rescue Deal has already been claimed by another customer.');
+      }
+
+      // 1. Write the order atomically to Firestore
+      const orderRef = doc(db, 'orders', order.id);
+      transaction.set(orderRef, {
+        ...order,
+        isRescueDeal: true,
+        rescueDealId: dealId,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // 2. Mark the deal as claimed atomically
+      transaction.set(
+        dealRef,
+        {
+          ...dealData,
+          id: dealId,
+          claimed: true,
+          status: 'claimed',
+          claimedAt: new Date().toISOString(),
+          claimedByOrder: order.id,
+          claimedByCustomer: order.name,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    });
+
+    // Server verification after transaction commit
+    try {
+      await getDocFromServer(doc(db, 'orders', order.id));
+    } catch {}
+  } catch (error: any) {
+    if (error?.message && error.message.includes('already been claimed')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
 }

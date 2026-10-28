@@ -70,6 +70,28 @@
         "paymentQrUrl": { "type": "string", "maxLength": 1000 },
         "list": { "type": "array" }
       }
+    },
+    "RescueDeal": {
+      "title": "Rescue Deal",
+      "description": "A single-quantity clearance or special rescue deal offer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "originalPrice": { "type": "number" },
+        "dealPrice": { "type": "number" },
+        "condition": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "imageUrl": { "type": "string", "maxLength": 1000 },
+        "claimed": { "type": "boolean" },
+        "status": { "type": "string", "maxLength": 50 },
+        "claimedAt": { "type": "string", "maxLength": 64 },
+        "claimedByOrder": { "type": "string", "maxLength": 128 },
+        "claimedByCustomer": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "title", "dealPrice", "claimed", "createdAt"]
     }
   },
   "firestore": {
@@ -84,6 +106,10 @@
     "/suggestions/{suggestionId}": {
       "schema": { "$ref": "#/entities/Suggestion" },
       "description": "Customer suggestions"
+    },
+    "/rescueDeals/{dealId}": {
+      "schema": { "$ref": "#/entities/RescueDeal" },
+      "description": "Single-quantity Rescue Deals offers"
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/Setting" },

@@ -37,6 +37,9 @@ export interface Order {
   peopleAhead?: number;
   colour?: string;
   customerDeleted?: boolean;
+  isRescueDeal?: boolean;
+  rescueDealId?: string;
+  rescueCondition?: string;
 }
 
 export interface Suggestion {
@@ -45,7 +48,56 @@ export interface Suggestion {
   createdAt: string;
 }
 
+export interface RescueDeal {
+  id: string;
+  productId?: string;
+  title: string;
+  originalPrice: number;
+  dealPrice: number;
+  condition: string;
+  description: string;
+  imageUrl: string;
+  imageUrls?: string[];
+  claimed: boolean;
+  status: 'available' | 'claimed';
+  claimedAt?: string;
+  claimedByOrder?: string;
+  claimedByCustomer?: string;
+  createdAt: string;
+}
+
 export const DEFAULT_OWNER_PIN = 'ANAND1904';
+
+export const DEFAULT_RESCUE_DEALS: RescueDeal[] = [
+  {
+    id: "deal_spider_noir_special",
+    productId: "78291ec9-cf52-4df8-ab72-7d4c0ab2d082",
+    title: "Spider-Noir Sitting on Ledge Figure (Open Box Special)",
+    originalPrice: 79,
+    dealPrice: 49,
+    condition: "Open Box - Single piece only",
+    description: "Display showcase unit in pristine mint condition. Box opened for inspection. Only 1 available at this special rescue price!",
+    imageUrl: "/toys/toy-78291ec9-1.jpg",
+    imageUrls: ["/toys/toy-78291ec9-1.jpg", "/toys/toy-78291ec9-2.jpg"],
+    claimed: false,
+    status: "available",
+    createdAt: "2026-10-20T10:00:00.000Z"
+  },
+  {
+    id: "deal_roman_battleship_clearance",
+    productId: "8b48e410-debe-4755-a99b-8915fcb5b939",
+    title: "Roman Battleship Kit Card (Clearance Deal)",
+    originalPrice: 69,
+    dealPrice: 39,
+    condition: "Last unit - special clearance",
+    description: "Complete unbuilt kit card. Packaging has slight transit crease, contents 100% brand new and pristine.",
+    imageUrl: "/toys/toy-8b48e410-1.jpg",
+    imageUrls: ["/toys/toy-8b48e410-1.jpg", "/toys/toy-8b48e410-2.jpg"],
+    claimed: false,
+    status: "available",
+    createdAt: "2026-10-20T10:05:00.000Z"
+  }
+];
 
 export const DEFAULT_PRODUCTS: Product[] = [
   {

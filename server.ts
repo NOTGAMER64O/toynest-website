@@ -71,10 +71,29 @@ interface Suggestion {
   createdAt: string;
 }
 
+interface RescueDeal {
+  id: string;
+  productId?: string;
+  title: string;
+  originalPrice: number;
+  dealPrice: number;
+  condition: string;
+  description: string;
+  imageUrl: string;
+  imageUrls?: string[];
+  claimed: boolean;
+  status: 'available' | 'claimed';
+  claimedAt?: string;
+  claimedByOrder?: string;
+  claimedByCustomer?: string;
+  createdAt: string;
+}
+
 interface DB {
   products: Product[];
   orders: Order[];
   suggestions: Suggestion[];
+  rescueDeals: RescueDeal[];
   shopModes: {
     adultPublished: boolean;
     childPublished: boolean;
@@ -83,6 +102,37 @@ interface DB {
   ownerPin: string;
   colours: string[];
 }
+
+const defaultRescueDeals: RescueDeal[] = [
+  {
+    id: "deal_spider_noir_special",
+    productId: "78291ec9-cf52-4df8-ab72-7d4c0ab2d082",
+    title: "Spider-Noir Sitting on Ledge Figure (Open Box Special)",
+    originalPrice: 79,
+    dealPrice: 49,
+    condition: "Open Box - Single piece only",
+    description: "Display showcase unit in pristine mint condition. Box opened for inspection. Only 1 available at this special rescue price!",
+    imageUrl: "/toys/toy-78291ec9-1.jpg",
+    imageUrls: ["/toys/toy-78291ec9-1.jpg", "/toys/toy-78291ec9-2.jpg"],
+    claimed: false,
+    status: "available",
+    createdAt: "2026-10-20T10:00:00.000Z"
+  },
+  {
+    id: "deal_roman_battleship_clearance",
+    productId: "8b48e410-debe-4755-a99b-8915fcb5b939",
+    title: "Roman Battleship Kit Card (Clearance Deal)",
+    originalPrice: 69,
+    dealPrice: 39,
+    condition: "Last unit - special clearance",
+    description: "Complete unbuilt kit card. Packaging has slight transit crease, contents 100% brand new and pristine.",
+    imageUrl: "/toys/toy-8b48e410-1.jpg",
+    imageUrls: ["/toys/toy-8b48e410-1.jpg", "/toys/toy-8b48e410-2.jpg"],
+    claimed: false,
+    status: "available",
+    createdAt: "2026-10-20T10:05:00.000Z"
+  }
+];
 
 // Initial seed products
 const defaultProducts: Product[] = [
@@ -188,6 +238,9 @@ function loadDB(): DB {
       if (!Array.isArray(data.colours)) {
         data.colours = [];
       }
+      if (!Array.isArray(data.rescueDeals)) {
+        data.rescueDeals = defaultRescueDeals;
+      }
       return data;
     }
   } catch (err) {
@@ -197,6 +250,7 @@ function loadDB(): DB {
     products: defaultProducts,
     orders: [],
     suggestions: [],
+    rescueDeals: defaultRescueDeals,
     shopModes: {
       adultPublished: true,
       childPublished: true,
@@ -260,6 +314,58 @@ app.get('/api/products', (req, res) => {
   db = loadDB();
   const publishedProducts = db.products.filter((p) => p.available !== false);
   res.json({ products: publishedProducts });
+});
+
+app.get('/api/rescue-deals', (req, res) => {
+  db = loadDB();
+  const availableDeals = (db.rescueDeals || []).filter((d) => !d.claimed && d.status !== 'claimed');
+  res.json({ deals: availableDeals });
+});
+
+app.get('/api/rescue-deals/all', (req, res) => {
+  db = loadDB();
+  res.json({ deals: db.rescueDeals || [] });
+});
+
+app.post('/api/rescue-deals', (req, res) => {
+  db = loadDB();
+  const deal = req.body;
+  if (!deal || !deal.title) {
+    return res.status(400).json({ error: 'Valid title required' });
+  }
+  const cleanDeal: RescueDeal = {
+    id: deal.id || 'deal_' + Date.now().toString(36),
+    productId: deal.productId || '',
+    title: String(deal.title).trim(),
+    originalPrice: Number(deal.originalPrice) || 0,
+    dealPrice: Number(deal.dealPrice) || 0,
+    condition: String(deal.condition || 'Special Rescue Deal').trim(),
+    description: String(deal.description || '').trim(),
+    imageUrl: deal.imageUrl || '/toys/toy-78291ec9-1.jpg',
+    imageUrls: Array.isArray(deal.imageUrls) ? deal.imageUrls : [deal.imageUrl || '/toys/toy-78291ec9-1.jpg'],
+    claimed: false,
+    status: 'available',
+    createdAt: deal.createdAt || new Date().toISOString(),
+  };
+  if (!Array.isArray(db.rescueDeals)) db.rescueDeals = [];
+  const idx = db.rescueDeals.findIndex((d) => d.id === cleanDeal.id);
+  if (idx >= 0) {
+    db.rescueDeals[idx] = cleanDeal;
+  } else {
+    db.rescueDeals.unshift(cleanDeal);
+  }
+  saveDB(db);
+  res.json({ success: true, deal: cleanDeal });
+});
+
+app.delete('/api/rescue-deals/:id', (req, res) => {
+  db = loadDB();
+  const { id } = req.params;
+  if (Array.isArray(db.rescueDeals)) {
+    db.rescueDeals = db.rescueDeals.filter((d) => d.id !== id);
+    saveDB(db);
+  }
+  res.json({ success: true });
 });
 
 app.get('/api/payment-qr', (req, res) => {

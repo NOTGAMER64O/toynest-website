@@ -49,6 +49,16 @@ service cloud.firestore {
       allow delete: if isValidId(suggestionId);
     }
 
+    // Rescue Deals Collection:
+    match /rescueDeals/{dealId} {
+      allow read: if true;
+      allow create: if isValidId(dealId)
+        && request.resource.data.title is string
+        && request.resource.data.dealPrice is number;
+      allow update: if isValidId(dealId);
+      allow delete: if isValidId(dealId);
+    }
+
     // Settings Collection:
     match /settings/{settingId} {
       allow read: if true;

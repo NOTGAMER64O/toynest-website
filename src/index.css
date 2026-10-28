@@ -1172,3 +1172,400 @@ footer > button:hover {
   background-color: #fcf4f4;
   border-color: #ecc7c5;
 }
+
+/* =========================================
+   Rescue Deals System Styles
+   ========================================= */
+.rescue-deals-section {
+  padding: 48px clamp(20px, 8vw, 115px) 24px;
+  background: linear-gradient(180deg, #fef8ee 0%, #fbfaf7 100%);
+  border-bottom: 1px solid #eeece5;
+}
+
+.rescue-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 26px;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.rescue-eyebrow {
+  color: #c25e19 !important;
+  font-weight: 800;
+  letter-spacing: 2px;
+  font-size: 11px;
+}
+
+.rescue-head h2 {
+  font-family: Manrope, sans-serif;
+  font-size: 30px;
+  letter-spacing: -1px;
+  margin: 6px 0 4px;
+  color: #2b251d;
+}
+
+.rescue-counter {
+  font-size: 15px;
+  color: #c25e19;
+  font-weight: 700;
+}
+
+.rescue-pill-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #fbebd8;
+  color: #9c450d;
+  border: 1px solid #f6d4b4;
+  padding: 9px 15px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rescue-deals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 22px;
+  margin-top: 14px;
+}
+
+.rescue-card {
+  border: 1px solid #f2e2cf;
+  background: #fffdfa;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 18px rgba(194, 94, 25, 0.06);
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.2s, box-shadow 0.2s;
+  position: relative;
+}
+
+.rescue-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(194, 94, 25, 0.12);
+  border-color: #e8caa6;
+}
+
+.rescue-card-img-wrap {
+  height: 200px;
+  position: relative;
+  background: #f7f1e6;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.rescue-card-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.rescue-urgency-tag {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 5px 9px;
+  border-radius: 6px;
+  letter-spacing: 0.8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.35);
+}
+
+.rescue-discount-bubble {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: #fff8eb;
+  color: #b45309;
+  border: 1px solid #fcd34d;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.rescue-card-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.rescue-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.rescue-condition-pill {
+  font-size: 10px;
+  font-weight: 700;
+  background: #fef3c7;
+  color: #92400e;
+  padding: 3px 8px;
+  border-radius: 5px;
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rescue-claim-mode {
+  font-size: 10px;
+  font-weight: 700;
+  color: #9ca3af;
+  text-transform: uppercase;
+}
+
+.rescue-card-body h3 {
+  font-family: Manrope, sans-serif;
+  font-size: 16px;
+  font-weight: 800;
+  color: #1f2937;
+  margin: 0 0 6px;
+  line-height: 1.35;
+}
+
+.rescue-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #6b7280;
+  margin: 0 0 16px;
+  flex: 1;
+}
+
+.rescue-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid #f3ece2;
+}
+
+.rescue-price-cluster {
+  display: flex;
+  flex-direction: column;
+}
+
+.rescue-orig-price {
+  font-size: 11px;
+  color: #9ca3af;
+  text-decoration: line-through;
+}
+
+.rescue-deal-price {
+  font-family: Manrope, sans-serif;
+  font-size: 21px;
+  color: #b45309;
+  line-height: 1.1;
+}
+
+.rescue-savings-text {
+  font-size: 10px;
+  color: #16a34a;
+  font-weight: 700;
+}
+
+.rescue-claim-btn {
+  background: #b45309;
+  color: #ffffff;
+  border: 0;
+  border-radius: 9px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.rescue-claim-btn:hover {
+  background: #92400e;
+  transform: translateY(-1px);
+}
+
+.rescue-claim-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Single-Quantity Fixed Callout in Checkout */
+.rescue-quantity-fixed {
+  margin-top: 14px;
+}
+
+.rescue-single-badge {
+  font-size: 11px;
+  font-weight: 800;
+  background: #fef3c7;
+  color: #b45309;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.rescue-quantity-callout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #fff8eb;
+  border: 1px dashed #fcd34d;
+  border-radius: 10px;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 8px;
+}
+
+.rescue-claimed-warning-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  color: #991b1b;
+  margin: 14px 0;
+}
+
+.rescue-claimed-warning-box strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.rescue-claimed-warning-box p {
+  font-size: 12px;
+  margin: 0;
+  color: #b91c1c;
+}
+
+.rescue-badge-order {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* Owner Rescue Deals Management Styles */
+.rescue-manager-panel {
+  display: grid;
+  gap: 24px;
+}
+
+.rescue-manager-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 18px 22px;
+  background: #fffdfa;
+  border: 1px solid #f2e2cf;
+  border-radius: 14px;
+}
+
+.rescue-manager-header h3 {
+  font-family: Manrope, sans-serif;
+  font-size: 18px;
+  margin: 0 0 4px;
+  color: #1f2937;
+}
+
+.rescue-manager-header p {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0;
+}
+
+.rescue-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid #eeece5;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fffefa;
+}
+
+.rescue-table th {
+  background: #f8f7f2;
+  padding: 12px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 800;
+  color: #555d50;
+  border-bottom: 1px solid #eeece5;
+}
+
+.rescue-table td {
+  padding: 12px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid #f2f1ea;
+  vertical-align: middle;
+}
+
+.rescue-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.status-badge-claimed {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.status-badge-available {
+  background: #dcfce7;
+  color: #166534;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+@media (max-width: 760px) {
+  .rescue-deals-section {
+    padding: 32px 18px 18px;
+  }
+  .rescue-head h2 {
+    font-size: 24px;
+  }
+  .rescue-deals-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .rescue-card-img-wrap {
+    height: 180px;
+  }
+}
+

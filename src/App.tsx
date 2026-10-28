@@ -26,6 +26,10 @@ import {
   Search,
   Minus,
   Plus,
+  Flame,
+  Tag,
+  Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -176,6 +180,15 @@ const api = {
     const data = await res.json();
     return { data };
   },
+  async delete(url: string) {
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP error ${res.status}`);
+    }
+    const data = await res.json();
+    return { data };
+  },
 };
 
 import {
@@ -184,6 +197,8 @@ import {
   type Product,
   type Order,
   type Suggestion,
+  type RescueDeal,
+  DEFAULT_RESCUE_DEALS,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -208,6 +223,11 @@ import {
   fetchColoursFromCloud,
   saveColoursToCloud,
   subscribeToColours,
+  fetchRescueDealsFromCloud,
+  subscribeToRescueDeals,
+  saveRescueDealToCloud,
+  deleteRescueDealFromCloud,
+  claimRescueDealInCloud,
 } from './firebase';
 
 function getStoredColours(): string[] {
@@ -682,13 +702,30 @@ export default function App() {
   const [isSideMenuOpen, setIsSideMenuOpen] = useState<boolean>(false);
   const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState<boolean>(false);
   const [selectedProductForBuy, setSelectedProductForBuy] = useState<Product | null>(null);
+  const [selectedDealForBuy, setSelectedDealForBuy] = useState<RescueDeal | null>(null);
+  const [rescueDeals, setRescueDeals] = useState<RescueDeal[]>(() => DEFAULT_RESCUE_DEALS);
   const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals'
   >('products');
+  const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
+  const [dealSaving, setDealSaving] = useState<boolean>(false);
+  const [newDealForm, setNewDealForm] = useState({
+    productId: '',
+    title: '',
+    originalPrice: '',
+    dealPrice: '',
+    condition: 'Open Box - Single piece',
+    description: '',
+    imageUrl: '',
+  });
+
+  const availableRescueDeals = useMemo(() => {
+    return rescueDeals.filter((d) => !d.claimed && d.status !== 'claimed');
+  }, [rescueDeals]);
   const [productFilter, setProductFilter] = useState<'all' | 'published' | 'drafts'>('all');
   const [checkoutMode, setCheckoutMode] = useState<'Child' | 'Adult' | null>(null);
   const [adultPublished, setAdultPublished] = useState<boolean>(true);
@@ -1169,6 +1206,13 @@ export default function App() {
     loadPaymentQr();
     loadShopModes();
     loadColours();
+    
+    // Load initial rescue deals
+    fetchRescueDealsFromCloud().then((deals) => {
+      if (Array.isArray(deals) && deals.length > 0) {
+        setRescueDeals(deals);
+      }
+    }).catch(() => {});
 
     let unsubProducts = () => {};
     try {
@@ -1192,9 +1236,21 @@ export default function App() {
       });
     } catch {}
 
+    let unsubDeals = () => {};
+    try {
+      unsubDeals = subscribeToRescueDeals((cloudDeals) => {
+        if (Array.isArray(cloudDeals)) {
+          setRescueDeals(cloudDeals);
+        }
+      });
+    } catch (err) {
+      console.warn('Real-time rescue deals subscription error:', err);
+    }
+
     return () => {
       unsubProducts();
       unsubColours();
+      unsubDeals();
     };
   }, []);
 
@@ -1501,7 +1557,12 @@ export default function App() {
     setIsRefreshing(true);
     setErrorMessage('');
     try {
-      await Promise.all([loadProducts(), loadShopModes(), loadColours()]);
+      await Promise.all([
+        loadProducts(),
+        loadShopModes(),
+        loadColours(),
+        fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
+      ]);
       setSuccessMessage('Shop refreshed. You are seeing the latest published toys.');
     } finally {
       setIsRefreshing(false);
@@ -1513,7 +1574,12 @@ export default function App() {
     setErrorMessage('');
     setSuccessMessage('');
     try {
-      await Promise.all([loadOwnerProducts(), loadOwnerOrders(), loadColours()]);
+      await Promise.all([
+        loadOwnerProducts(),
+        loadOwnerOrders(),
+        loadColours(),
+        fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
+      ]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
@@ -1843,20 +1909,39 @@ export default function App() {
   const handlePlaceOrder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setErrorMessage('');
-    if (!selectedProductForBuy || !checkoutForm.name.trim()) {
+
+    const targetItem = selectedDealForBuy || selectedProductForBuy;
+    if (!targetItem || !checkoutForm.name.trim()) {
       setErrorMessage('Please enter your name.');
       return;
     }
 
-    // Strictly validate quantity between 1 and 5
-    const parsedQty = parseInt(String(orderQuantity), 10);
-    if (isNaN(parsedQty) || parsedQty < 1 || parsedQty > 5) {
-      setErrorMessage('Please select a quantity between 1 and 5.');
-      return;
+    // If checkout is for a Rescue Deal, verify it's not already claimed
+    if (selectedDealForBuy) {
+      if (selectedDealForBuy.claimed || selectedDealForBuy.status === 'claimed') {
+        setErrorMessage('This Rescue Deal is no longer available as it has already been claimed.');
+        return;
+      }
     }
-    const validatedQuantity = Math.min(5, Math.max(1, parsedQty));
-    const unitPrice = selectedProductForBuy.price;
-    const totalPrice = unitPrice * validatedQuantity;
+
+    let validatedQuantity = 1;
+    let unitPrice = 0;
+    let totalPrice = 0;
+
+    if (selectedDealForBuy) {
+      validatedQuantity = 1; // Strict single-quantity offer
+      unitPrice = selectedDealForBuy.dealPrice;
+      totalPrice = selectedDealForBuy.dealPrice;
+    } else if (selectedProductForBuy) {
+      const parsedQty = parseInt(String(orderQuantity), 10);
+      if (isNaN(parsedQty) || parsedQty < 1 || parsedQty > 5) {
+        setErrorMessage('Please select a quantity between 1 and 5.');
+        return;
+      }
+      validatedQuantity = Math.min(5, Math.max(1, parsedQty));
+      unitPrice = selectedProductForBuy.price;
+      totalPrice = unitPrice * validatedQuantity;
+    }
 
     if (checkoutMode === 'Adult') {
       const phoneDigits = checkoutForm.phone.replace(/\D/g, '').length;
@@ -1881,15 +1966,24 @@ export default function App() {
     }
 
     setLoading(true);
-    let createdOrder: Order | null = null;
+
+    const orderId = `ord_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const orderNumber = `TN-${Math.floor(1000 + Math.random() * 9000)}`;
+    const orderItemName = selectedDealForBuy
+      ? `[Rescue Deal] ${selectedDealForBuy.title}`
+      : selectedProductForBuy!.name;
+    const orderItemImage = selectedDealForBuy
+      ? selectedDealForBuy.imageUrl
+      : (selectedProductForBuy!.imageUrl || (selectedProductForBuy!.imageUrls && selectedProductForBuy!.imageUrls[0]) || '');
+
     const orderData: Order = {
-      id: `ord_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-      orderNumber: `TN-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: orderId,
+      orderNumber,
       customerId,
       mode: checkoutMode || 'Child',
-      productId: selectedProductForBuy.id,
-      productName: selectedProductForBuy.name,
-      productImageUrl: selectedProductForBuy.imageUrl || (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls[0]) || '',
+      productId: selectedDealForBuy ? (selectedDealForBuy.productId || selectedDealForBuy.id) : selectedProductForBuy!.id,
+      productName: orderItemName,
+      productImageUrl: orderItemImage,
       price: totalPrice,
       quantity: validatedQuantity,
       unitPrice: unitPrice,
@@ -1902,44 +1996,61 @@ export default function App() {
       status: 'New',
       createdAt: new Date().toISOString(),
       colour: checkoutForm.colour || '',
+      isRescueDeal: Boolean(selectedDealForBuy),
+      rescueDealId: selectedDealForBuy ? selectedDealForBuy.id : undefined,
+      rescueCondition: selectedDealForBuy ? selectedDealForBuy.condition : undefined,
     };
 
     try {
-      try {
-        const res = await api.post('/api/orders', {
-          customerId,
-          mode: checkoutMode || 'Child',
-          productId: selectedProductForBuy.id,
-          name: checkoutForm.name.trim(),
-          studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
-          section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
-          phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
-          address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
-          note: checkoutForm.note.trim(),
-          colour: checkoutForm.colour || '',
-          quantity: validatedQuantity,
-          unitPrice: unitPrice,
-          price: totalPrice,
-        });
-        if (res.data?.order) {
-          createdOrder = res.data.order;
-        }
-      } catch {}
+      if (selectedDealForBuy) {
+        // ATOMIC TRANSACTION:
+        // Reads the deal in Firestore, checks that claimed === false,
+        // writes the order, and updates the deal to claimed: true in a single atomic commit.
+        // If claimed by someone else or if order write fails, the transaction is rejected and rolls back.
+        await claimRescueDealInCloud(selectedDealForBuy.id, orderData);
 
-      const finalOrder = createdOrder || orderData;
+        try {
+          await api.post('/api/orders', {
+            ...orderData,
+            productName: orderItemName,
+          });
+        } catch {}
 
-      // Crucial: Persist order to shared Firestore cloud database so it appears on any device
-      await saveOrderToCloud(finalOrder);
+        // Update local state immediately so user sees it right away
+        setRescueDeals((prev) =>
+          prev.map((d) => (d.id === selectedDealForBuy.id ? { ...d, claimed: true, status: 'claimed' } : d))
+        );
+      } else {
+        let createdOrder: Order | null = null;
+        try {
+          const res = await api.post('/api/orders', {
+            customerId,
+            mode: checkoutMode || 'Child',
+            productId: selectedProductForBuy!.id,
+            name: checkoutForm.name.trim(),
+            studentClass: checkoutMode === 'Adult' ? '' : checkoutForm.studentClass,
+            section: checkoutMode === 'Adult' ? '' : checkoutForm.section.trim(),
+            phone: checkoutMode === 'Adult' ? checkoutForm.phone.trim() : '',
+            address: checkoutMode === 'Adult' ? checkoutForm.address.trim() : '',
+            note: checkoutForm.note.trim(),
+            colour: checkoutForm.colour || '',
+            quantity: validatedQuantity,
+            unitPrice: unitPrice,
+            price: totalPrice,
+          });
+          if (res.data?.order) {
+            createdOrder = res.data.order;
+          }
+        } catch {}
 
-      const allExisting = getStoredOrders().filter((o) => o.id !== finalOrder.id);
-      const updatedList = computeLocalQueuePositions([finalOrder, ...allExisting]);
-      saveStoredOrders(updatedList);
-    } catch (saveErr) {
-      console.error('Error saving order to Firestore:', saveErr);
+        const finalOrder = createdOrder || orderData;
+        await saveOrderToCloud(finalOrder);
+      }
+
       const allExisting = getStoredOrders().filter((o) => o.id !== orderData.id);
       const updatedList = computeLocalQueuePositions([orderData, ...allExisting]);
       saveStoredOrders(updatedList);
-    } finally {
+
       setHasStatusUpdateNotification(true);
       setHasOwnerOrderNotification(true);
       setSuccessMessage('');
@@ -1947,7 +2058,21 @@ export default function App() {
       await loadMyOrders();
       setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '', colour: '' });
       setSelectedProductForBuy(null);
+      setSelectedDealForBuy(null);
       setOrderQuantity(1);
+    } catch (saveErr: any) {
+      console.error('Error completing order:', saveErr);
+      const msg = saveErr?.message || String(saveErr);
+      if (msg.includes('already been claimed') || msg.includes('claimed by another customer')) {
+        setErrorMessage('Sorry! This Rescue Deal has already been claimed by another customer and is no longer available.');
+        try {
+          const fresh = await fetchRescueDealsFromCloud();
+          setRescueDeals(fresh);
+        } catch {}
+      } else {
+        setErrorMessage('Failed to place order. Please try again.');
+      }
+    } finally {
       setLoading(false);
     }
   };
@@ -2560,6 +2685,16 @@ export default function App() {
                 >
                   <MessageSquare size={15} /> Suggestions ({ownerSuggestions.length})
                 </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'rescueDeals' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('rescueDeals');
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <Flame size={15} /> Rescue Deals ({rescueDeals.length})
+                </button>
               </div>
             </div>
 
@@ -2630,6 +2765,109 @@ export default function App() {
                 <div className="hero-caption">PLAY MORE. SMILE MORE.</div>
               </div>
             </section>
+
+            {/* RESCUE DEALS SECTION: Available Single-Quantity Clearance & Special Offers */}
+            {availableRescueDeals.length > 0 && (
+              <section className="rescue-deals-section" id="rescue-deals">
+                <div className="section-head rescue-head">
+                  <div>
+                    <span className="eyebrow rescue-eyebrow">⚡ LIMITED RESCUE DEALS</span>
+                    <h2>
+                      Rescue Deals <span className="rescue-counter">({availableRescueDeals.length} available)</span>
+                    </h2>
+                    <p>
+                      Special single-quantity clearance pieces & open-box offers. Once claimed, they are instantly sold and removed!
+                    </p>
+                  </div>
+                  <div className="rescue-pill-banner">
+                    <Flame size={16} /> Only 1 of each · Instant claim
+                  </div>
+                </div>
+
+                <div className="rescue-deals-grid">
+                  {availableRescueDeals.map((deal) => {
+                    const discountPct =
+                      deal.originalPrice > deal.dealPrice
+                        ? Math.round(((deal.originalPrice - deal.dealPrice) / deal.originalPrice) * 100)
+                        : 0;
+
+                    return (
+                      <article className="rescue-card" key={deal.id}>
+                        <div className="rescue-card-img-wrap">
+                          <img
+                            src={deal.imageUrl || (deal.imageUrls && deal.imageUrls[0]) || '/toys/toy-78291ec9-1.jpg'}
+                            alt={deal.title}
+                          />
+                          <span className="rescue-urgency-tag">
+                            <Flame size={13} /> ONLY 1 LEFT
+                          </span>
+                          {discountPct > 0 && (
+                            <span className="rescue-discount-bubble">
+                              {discountPct}% OFF
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="rescue-card-body">
+                          <div className="rescue-card-meta">
+                            <span className="rescue-condition-pill">{deal.condition || 'Special Rescue Deal'}</span>
+                            <span className="rescue-claim-mode">Single Item</span>
+                          </div>
+
+                          <h3>{deal.title}</h3>
+                          <p className="rescue-desc">
+                            {deal.description || 'Special single-quantity rescue clearance offer.'}
+                          </p>
+
+                          <div className="rescue-bottom">
+                            <div className="rescue-price-cluster">
+                              {deal.originalPrice > deal.dealPrice && (
+                                <del className="rescue-orig-price">{da(deal.originalPrice)}</del>
+                              )}
+                              <strong className="rescue-deal-price">{da(deal.dealPrice)}</strong>
+                              {deal.originalPrice > deal.dealPrice && (
+                                <span className="rescue-savings-text">
+                                  Save {da(deal.originalPrice - deal.dealPrice)}
+                                </span>
+                              )}
+                            </div>
+
+                            <button
+                              type="button"
+                              className="rescue-claim-btn"
+                              onClick={() => {
+                                if (deal.claimed || deal.status === 'claimed') {
+                                  setErrorMessage('This Rescue Deal has already been claimed by another customer.');
+                                  return;
+                                }
+                                setSelectedDealForBuy(deal);
+                                setSelectedProductForBuy(null);
+                                setOrderQuantity(1);
+                                setCheckoutMode(null);
+                                setCheckoutForm({
+                                  name: '',
+                                  studentClass: '',
+                                  section: '',
+                                  phone: '',
+                                  address: '',
+                                  note: '',
+                                  colour: '',
+                                });
+                                setErrorMessage('');
+                                setPage('buy');
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                            >
+                              <Flame size={15} /> Claim Deal
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             <section className="catalog" id="catalog">
               <div className="section-head">
@@ -2801,68 +3039,128 @@ export default function App() {
         )}
 
         {/* BUY / CHECKOUT VIEW */}
-        {page === 'buy' && selectedProductForBuy && (
+        {page === 'buy' && (selectedProductForBuy || selectedDealForBuy) && (
           <section className="form-page">
             <button
               className="back-link"
               onClick={() => {
                 setPage('home');
                 setErrorMessage('');
+                setSelectedDealForBuy(null);
+                setSelectedProductForBuy(null);
               }}
             >
-              <ArrowLeft size={16} /> Back to toys
+              <ArrowLeft size={16} /> Back to shop
             </button>
 
             {checkoutMode ? (
               <div className="form-layout">
                 {/* Order Summary */}
                 <div className="order-summary">
-                  <span className="eyebrow">YOUR PICK</span>
-                  <div className="summary-image summary-gallery">
-                    {(selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls.length
-                      ? selectedProductForBuy.imageUrls
-                      : selectedProductForBuy.imageUrl
-                      ? [selectedProductForBuy.imageUrl]
-                      : []
-                    ).length ? (
-                      (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls.length
-                        ? selectedProductForBuy.imageUrls
-                        : [selectedProductForBuy.imageUrl!]
-                      ).map((url, idx) => (
-                        <img key={url} src={url} alt={`${selectedProductForBuy.name} photo ${idx + 1}`} />
-                      ))
-                    ) : (
-                      <span>🧸</span>
-                    )}
-                  </div>
+                  {selectedDealForBuy ? (
+                    <>
+                      <span className="eyebrow rescue-eyebrow">⚡ RESCUE DEAL · LIMITED OFFER</span>
+                      <div className="summary-image">
+                        <img
+                          src={selectedDealForBuy.imageUrl || '/toys/toy-78291ec9-1.jpg'}
+                          alt={selectedDealForBuy.title}
+                        />
+                      </div>
 
-                  {(selectedProductForBuy.imageUrls?.length || 0) > 1 && (
-                    <p className="gallery-caption">
-                      {selectedProductForBuy.imageUrls?.length} photos of this toy
-                    </p>
-                  )}
+                      <div style={{ marginBottom: '10px' }}>
+                        <span className="rescue-condition-pill">{selectedDealForBuy.condition}</span>
+                      </div>
 
-                  <h2>{selectedProductForBuy.name}</h2>
-                  <p>{selectedProductForBuy.description || 'A little bundle of fun.'}</p>
+                      <h2>{selectedDealForBuy.title}</h2>
+                      <p>{selectedDealForBuy.description || 'Special single-quantity rescue clearance offer.'}</p>
 
-                  <div className="summary-price-box">
-                    {orderQuantity > 1 && (
-                      <div className="summary-price-breakdown">
-                        <div className="summary-breakdown-row">
-                          <span>Unit price</span>
-                          <span>{da(selectedProductForBuy.price)}</span>
+                      {Boolean(selectedDealForBuy.claimed || selectedDealForBuy.status === 'claimed') && (
+                        <div className="rescue-claimed-warning-box" role="alert">
+                          <AlertCircle size={22} style={{ flexShrink: 0 }} />
+                          <div>
+                            <strong>No Longer Available</strong>
+                            <p>This single-quantity Rescue Deal has already been claimed by another customer.</p>
+                          </div>
                         </div>
-                        <div className="summary-breakdown-row">
-                          <span>Quantity</span>
-                          <span>{orderQuantity} toys</span>
+                      )}
+
+                      <div className="summary-price-box">
+                        <div className="summary-price-breakdown">
+                          {selectedDealForBuy.originalPrice > selectedDealForBuy.dealPrice && (
+                            <div className="summary-breakdown-row">
+                              <span>Regular price</span>
+                              <span style={{ textDecoration: 'line-through', color: '#9ca3af' }}>
+                                {da(selectedDealForBuy.originalPrice)}
+                              </span>
+                            </div>
+                          )}
+                          <div className="summary-breakdown-row">
+                            <span>Special Rescue Price</span>
+                            <span style={{ color: '#b45309', fontWeight: 800 }}>
+                              {da(selectedDealForBuy.dealPrice)}
+                            </span>
+                          </div>
+                          <div className="summary-breakdown-row">
+                            <span>Quantity</span>
+                            <span>1 toy (Single item offer)</span>
+                          </div>
+                        </div>
+                        <div className="summary-price">
+                          <span>Total Price</span>
+                          <strong style={{ color: '#b45309' }}>{da(selectedDealForBuy.dealPrice)}</strong>
                         </div>
                       </div>
-                    )}
-                    <div className="summary-price">
-                      <span>{orderQuantity > 1 ? 'Total Price' : 'Price'}</span>
-                      <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
-                    </div>
-                  </div>
+                    </>
+                  ) : selectedProductForBuy ? (
+                    <>
+                      <span className="eyebrow">YOUR PICK</span>
+                      <div className="summary-image summary-gallery">
+                        {(selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls.length
+                          ? selectedProductForBuy.imageUrls
+                          : selectedProductForBuy.imageUrl
+                          ? [selectedProductForBuy.imageUrl]
+                          : []
+                        ).length ? (
+                          (selectedProductForBuy.imageUrls && selectedProductForBuy.imageUrls.length
+                            ? selectedProductForBuy.imageUrls
+                            : [selectedProductForBuy.imageUrl!]
+                          ).map((url, idx) => (
+                            <img key={url} src={url} alt={`${selectedProductForBuy.name} photo ${idx + 1}`} />
+                          ))
+                        ) : (
+                          <span>🧸</span>
+                        )}
+                      </div>
+
+                      {(selectedProductForBuy.imageUrls?.length || 0) > 1 && (
+                        <p className="gallery-caption">
+                          {selectedProductForBuy.imageUrls?.length} photos of this toy
+                        </p>
+                      )}
+
+                      <h2>{selectedProductForBuy.name}</h2>
+                      <p>{selectedProductForBuy.description || 'A little bundle of fun.'}</p>
+
+                      <div className="summary-price-box">
+                        {orderQuantity > 1 && (
+                          <div className="summary-price-breakdown">
+                            <div className="summary-breakdown-row">
+                              <span>Unit price</span>
+                              <span>{da(selectedProductForBuy.price)}</span>
+                            </div>
+                            <div className="summary-breakdown-row">
+                              <span>Quantity</span>
+                              <span>{orderQuantity} toys</span>
+                            </div>
+                          </div>
+                        )}
+                        <div className="summary-price">
+                          <span>{orderQuantity > 1 ? 'Total Price' : 'Price'}</span>
+                          <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
 
                   <div className="secure-note">
                     <ShieldCheck size={17} /> Your order details are only used to process your request.
@@ -2872,7 +3170,7 @@ export default function App() {
                 {/* Form Details */}
                 <form className="panel-form" onSubmit={handlePlaceOrder}>
                   <span className="eyebrow">ORDER DETAILS</span>
-                  <h2>Make it yours.</h2>
+                  <h2>{selectedDealForBuy ? 'Claim Rescue Deal' : 'Make it yours.'}</h2>
                   <p className="form-subtitle">
                     {checkoutMode === 'Adult'
                       ? 'Enter your contact and delivery details to place the order.'
@@ -2893,61 +3191,73 @@ export default function App() {
                     </p>
                   )}
 
-                  {/* Quantity Selector (1 to 5) */}
-                  <div className="quantity-field-wrapper">
-                    <div className="quantity-field-header">
-                      <span className="quantity-label" id="quantity-control-label">
-                        Quantity
-                      </span>
-                      <span className="quantity-badge">Limit: 1 – 5</span>
+                  {/* Quantity Handler: Fixed 1 for Rescue Deals, or 1-5 stepper for Regular Products */}
+                  {selectedDealForBuy ? (
+                    <div className="quantity-field-wrapper rescue-quantity-fixed">
+                      <div className="quantity-field-header">
+                        <span className="quantity-label">Quantity</span>
+                        <span className="rescue-single-badge">⚡ Single-Quantity Deal</span>
+                      </div>
+                      <div className="rescue-quantity-callout">
+                        <Sparkles size={16} /> This is a unique single unit. Once ordered, it is immediately sold out.
+                      </div>
                     </div>
-
-                    <div
-                      className="quantity-selector-box"
-                      role="group"
-                      aria-labelledby="quantity-control-label"
-                    >
-                      <button
-                        type="button"
-                        className="quantity-stepper-btn minus"
-                        onClick={() => setOrderQuantity((q) => Math.max(1, q - 1))}
-                        disabled={orderQuantity <= 1}
-                        aria-label="Decrease quantity"
-                        title="Decrease quantity (minimum 1)"
-                      >
-                        <Minus size={18} strokeWidth={2.5} />
-                      </button>
-
-                      <div className="quantity-display" aria-live="polite">
-                        <span className="quantity-num">{orderQuantity}</span>
-                        <span className="quantity-unit">
-                          {orderQuantity === 1 ? 'toy' : 'toys'}
+                  ) : selectedProductForBuy ? (
+                    <div className="quantity-field-wrapper">
+                      <div className="quantity-field-header">
+                        <span className="quantity-label" id="quantity-control-label">
+                          Quantity
                         </span>
+                        <span className="quantity-badge">Limit: 1 – 5</span>
                       </div>
 
-                      <button
-                        type="button"
-                        className="quantity-stepper-btn plus"
-                        onClick={() => setOrderQuantity((q) => Math.min(5, q + 1))}
-                        disabled={orderQuantity >= 5}
-                        aria-label="Increase quantity"
-                        title="Increase quantity (maximum 5)"
+                      <div
+                        className="quantity-selector-box"
+                        role="group"
+                        aria-labelledby="quantity-control-label"
                       >
-                        <Plus size={18} strokeWidth={2.5} />
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          className="quantity-stepper-btn minus"
+                          onClick={() => setOrderQuantity((q) => Math.max(1, q - 1))}
+                          disabled={orderQuantity <= 1}
+                          aria-label="Decrease quantity"
+                          title="Decrease quantity (minimum 1)"
+                        >
+                          <Minus size={18} strokeWidth={2.5} />
+                        </button>
 
-                    {orderQuantity > 1 ? (
-                      <div className="quantity-calc-hint">
-                        {da(selectedProductForBuy.price)} × {orderQuantity} ={' '}
-                        <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
+                        <div className="quantity-display" aria-live="polite">
+                          <span className="quantity-num">{orderQuantity}</span>
+                          <span className="quantity-unit">
+                            {orderQuantity === 1 ? 'toy' : 'toys'}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="quantity-stepper-btn plus"
+                          onClick={() => setOrderQuantity((q) => Math.min(5, q + 1))}
+                          disabled={orderQuantity >= 5}
+                          aria-label="Increase quantity"
+                          title="Increase quantity (maximum 5)"
+                        >
+                          <Plus size={18} strokeWidth={2.5} />
+                        </button>
                       </div>
-                    ) : (
-                      <div className="quantity-calc-hint">
-                        Unit price: <strong>{da(selectedProductForBuy.price)}</strong>
-                      </div>
-                    )}
-                  </div>
+
+                      {orderQuantity > 1 ? (
+                        <div className="quantity-calc-hint">
+                          {da(selectedProductForBuy.price)} × {orderQuantity} ={' '}
+                          <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
+                        </div>
+                      ) : (
+                        <div className="quantity-calc-hint">
+                          Unit price: <strong>{da(selectedProductForBuy.price)}</strong>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
 
                   <label>
                     Your name
@@ -3053,13 +3363,29 @@ export default function App() {
 
                   {errorMessage && <p className="error-msg">{errorMessage}</p>}
 
-                  <button className="primary-btn full-btn" disabled={loading}>
+                  <button
+                    className="primary-btn full-btn"
+                    disabled={
+                      loading ||
+                      Boolean(selectedDealForBuy && (selectedDealForBuy.claimed || selectedDealForBuy.status === 'claimed'))
+                    }
+                  >
                     {loading ? (
-                      'Placing order…'
-                    ) : (
+                      'Securing order…'
+                    ) : selectedDealForBuy ? (
+                      selectedDealForBuy.claimed || selectedDealForBuy.status === 'claimed' ? (
+                        'Offer Claimed by Another Shopper'
+                      ) : (
+                        <>
+                          Claim & Place Order · {da(selectedDealForBuy.dealPrice)} <ArrowLeft size={16} />
+                        </>
+                      )
+                    ) : selectedProductForBuy ? (
                       <>
                         Place order · {orderQuantity > 1 ? `${orderQuantity} toys · ` : ''}{da(selectedProductForBuy.price * orderQuantity)} <ArrowLeft size={16} />
                       </>
+                    ) : (
+                      'Place order'
                     )}
                   </button>
 
@@ -3073,6 +3399,15 @@ export default function App() {
                 <span className="eyebrow">CHECKOUT</span>
                 <h2>ARE YOU -</h2>
                 <p>Choose the order type to see the right details form.</p>
+                {selectedDealForBuy && (selectedDealForBuy.claimed || selectedDealForBuy.status === 'claimed') && (
+                  <div className="rescue-claimed-warning-box" style={{ maxWidth: '540px', margin: '0 auto 20px', textAlign: 'left' }}>
+                    <AlertCircle size={22} style={{ flexShrink: 0 }} />
+                    <div>
+                      <strong>This Rescue Deal has already been claimed!</strong>
+                      <p>Another customer has already claimed this offer. Please choose another toy from the shop.</p>
+                    </div>
+                  </div>
+                )}
                 <div className="mode-choice-grid">
                   {adultPublished && (
                     <button
@@ -3162,6 +3497,11 @@ export default function App() {
                         <span className="order-id">ORDER NUMBER · {o.orderNumber || o.id}</span>
                         <h3>
                           {o.productName}
+                          {o.isRescueDeal && (
+                            <span className="rescue-badge-order">
+                              <Flame size={11} /> Rescue Deal
+                            </span>
+                          )}
                           {(o.quantity || 1) > 1 && (
                             <span className="order-qty-tag">× {o.quantity}</span>
                           )}
@@ -3537,6 +3877,14 @@ export default function App() {
                 }}
               >
                 Suggestions ({ownerSuggestions.length})
+              </button>
+              <button
+                className={ownerTab === 'rescueDeals' ? 'active' : ''}
+                onClick={() => {
+                  setOwnerTab('rescueDeals');
+                }}
+              >
+                ⚡ Rescue Deals ({rescueDeals.length})
               </button>
               {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours') && (
                 <button
@@ -4469,6 +4817,11 @@ export default function App() {
                               <span className="order-id">ORDER · {o.orderNumber || o.id.slice(0, 8)}</span>
                               <h3>
                                 {o.productName}
+                                {o.isRescueDeal && (
+                                  <span className="rescue-badge-order">
+                                    <Flame size={11} /> Rescue Deal
+                                  </span>
+                                )}
                                 {(o.quantity || 1) > 1 && (
                                   <span className="order-qty-tag">Qty: {o.quantity}</span>
                                 )}
@@ -4818,6 +5171,351 @@ export default function App() {
               </div>
             )}
 
+            {/* RESCUE DEALS TAB */}
+            {ownerTab === 'rescueDeals' && (
+              <div className="rescue-manager-panel">
+                <div className="rescue-manager-header">
+                  <div>
+                    <span className="eyebrow rescue-eyebrow">CLEARANCE & SPECIAL OFFERS</span>
+                    <h3>⚡ Rescue Deals Manager</h3>
+                    <p>
+                      Create and monitor single-quantity clearance offers. When ordered by a customer, the deal is automatically marked sold and removed from public view across all devices.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      setIsAddingDeal(!isAddingDeal);
+                      setErrorMessage('');
+                      setSuccessMessage('');
+                    }}
+                  >
+                    {isAddingDeal ? '✕ Close Form' : '➕ Add Rescue Deal'}
+                  </button>
+                </div>
+
+                {/* ADD NEW RESCUE DEAL FORM */}
+                {isAddingDeal && (
+                  <form
+                    className="panel-form add-form"
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      setErrorMessage('');
+                      setSuccessMessage('');
+
+                      const title = newDealForm.title.trim();
+                      const dealPrice = parseFloat(newDealForm.dealPrice);
+                      const origPrice = parseFloat(newDealForm.originalPrice) || dealPrice;
+
+                      if (!title) {
+                        setErrorMessage('Please enter a deal title.');
+                        return;
+                      }
+                      if (isNaN(dealPrice) || dealPrice <= 0) {
+                        setErrorMessage('Please enter a valid deal price in ₹.');
+                        return;
+                      }
+
+                      setDealSaving(true);
+                      const newDeal: RescueDeal = {
+                        id: `deal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+                        productId: newDealForm.productId || '',
+                        title,
+                        originalPrice: origPrice,
+                        dealPrice,
+                        condition: newDealForm.condition.trim() || 'Special Rescue Deal',
+                        description: newDealForm.description.trim(),
+                        imageUrl: newDealForm.imageUrl || '/toys/toy-78291ec9-1.jpg',
+                        claimed: false,
+                        status: 'available',
+                        createdAt: new Date().toISOString(),
+                      };
+
+                      try {
+                        await saveRescueDealToCloud(newDeal);
+                        try {
+                          await api.post('/api/rescue-deals', newDeal);
+                        } catch {}
+
+                        setRescueDeals((prev) => [newDeal, ...prev.filter((d) => d.id !== newDeal.id)]);
+                        setSuccessMessage(`Rescue deal "${title}" published and is now live!`);
+                        setIsAddingDeal(false);
+                        setNewDealForm({
+                          productId: '',
+                          title: '',
+                          originalPrice: '',
+                          dealPrice: '',
+                          condition: 'Open Box - Single piece',
+                          description: '',
+                          imageUrl: '',
+                        });
+                      } catch (err: any) {
+                        setErrorMessage(err?.message || 'Could not publish rescue deal.');
+                      } finally {
+                        setDealSaving(false);
+                      }
+                    }}
+                  >
+                    <span className="eyebrow rescue-eyebrow">NEW RESCUE DEAL</span>
+                    <h2>Create Single-Quantity Deal</h2>
+                    <p className="form-subtitle">
+                      Set special pricing for an open-box, clearance, or display piece.
+                    </p>
+
+                    <label>
+                      Autofill from existing catalog product (optional)
+                      <select
+                        value={newDealForm.productId}
+                        onChange={(e) => {
+                          const prodId = e.target.value;
+                          const found = products.find((p) => p.id === prodId);
+                          if (found) {
+                            setNewDealForm({
+                              ...newDealForm,
+                              productId: prodId,
+                              title: `${found.name} (Special Deal)`,
+                              originalPrice: String(found.price),
+                              dealPrice: String(Math.max(1, Math.round(found.price * 0.7))),
+                              imageUrl: found.imageUrl || (found.imageUrls && found.imageUrls[0]) || '',
+                              description: found.description || 'Special single-quantity rescue clearance offer.',
+                            });
+                          } else {
+                            setNewDealForm({
+                              ...newDealForm,
+                              productId: '',
+                            });
+                          }
+                        }}
+                      >
+                        <option value="">-- Choose a product or enter details manually --</option>
+                        {products.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} (Regular ₹{p.price})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Deal Title
+                      <input
+                        type="text"
+                        value={newDealForm.title}
+                        onChange={(e) => setNewDealForm({ ...newDealForm, title: e.target.value })}
+                        placeholder="e.g. Spider-Noir Figure (Display Model)"
+                        required
+                        maxLength={150}
+                      />
+                    </label>
+
+                    <div className="two-fields">
+                      <label>
+                        Original Regular Price (₹)
+                        <input
+                          type="number"
+                          value={newDealForm.originalPrice}
+                          onChange={(e) => setNewDealForm({ ...newDealForm, originalPrice: e.target.value })}
+                          placeholder="e.g. 79"
+                          min={1}
+                        />
+                      </label>
+                      <label>
+                        Special Deal Price (₹)
+                        <input
+                          type="number"
+                          value={newDealForm.dealPrice}
+                          onChange={(e) => setNewDealForm({ ...newDealForm, dealPrice: e.target.value })}
+                          placeholder="e.g. 49"
+                          required
+                          min={1}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="two-fields">
+                      <label>
+                        Condition / Note
+                        <input
+                          type="text"
+                          value={newDealForm.condition}
+                          onChange={(e) => setNewDealForm({ ...newDealForm, condition: e.target.value })}
+                          placeholder="e.g. Open Box, Last 1 in Stock, Transit Crease"
+                          required
+                          maxLength={60}
+                        />
+                      </label>
+                      <label>
+                        Image URL
+                        <input
+                          type="text"
+                          value={newDealForm.imageUrl}
+                          onChange={(e) => setNewDealForm({ ...newDealForm, imageUrl: e.target.value })}
+                          placeholder="/toys/toy-78291ec9-1.jpg"
+                        />
+                      </label>
+                    </div>
+
+                    <label>
+                      Description
+                      <textarea
+                        value={newDealForm.description}
+                        onChange={(e) => setNewDealForm({ ...newDealForm, description: e.target.value })}
+                        placeholder="Explain condition, why it's discounted, etc."
+                        rows={3}
+                        maxLength={500}
+                      />
+                    </label>
+
+                    <button type="submit" className="primary-btn" disabled={dealSaving}>
+                      {dealSaving ? 'Publishing…' : 'Publish Rescue Deal'}
+                    </button>
+                  </form>
+                )}
+
+                {/* ACTIVE RESCUE DEALS LIST */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#2b251d' }}>
+                      Active Rescue Deals ({availableRescueDeals.length})
+                    </h4>
+                    <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: 700 }}>
+                      ● Live on customer storefront
+                    </span>
+                  </div>
+
+                  {availableRescueDeals.length === 0 ? (
+                    <div className="empty-state compact" style={{ padding: '24px', textAlign: 'center' }}>
+                      <p style={{ margin: 0 }}>No active deals currently available. Add a deal above to feature it on the shop!</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                      {availableRescueDeals.map((deal) => (
+                        <div
+                          key={deal.id}
+                          style={{
+                            background: '#fffefa',
+                            border: '1px solid #eeece5',
+                            borderRadius: '12px',
+                            padding: '16px',
+                            display: 'flex',
+                            gap: '12px',
+                            alignItems: 'center',
+                          }}
+                        >
+                          <img
+                            src={deal.imageUrl || '/toys/toy-78291ec9-1.jpg'}
+                            alt=""
+                            style={{ width: '60px', height: '60px', borderRadius: '8px', objectFit: 'cover' }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <strong style={{ display: 'block', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {deal.title}
+                            </strong>
+                            <div style={{ fontSize: '12px', color: '#b45309', fontWeight: 700, margin: '2px 0' }}>
+                              {da(deal.dealPrice)} {deal.originalPrice > deal.dealPrice && <del style={{ color: '#9ca3af', fontSize: '10px' }}>{da(deal.originalPrice)}</del>}
+                            </div>
+                            <span className="status-badge-available">Available (1 in stock)</span>
+                          </div>
+                          <button
+                            type="button"
+                            className="icon-btn danger"
+                            title="Delete this rescue deal"
+                            onClick={async () => {
+                              if (!window.confirm(`Delete rescue deal "${deal.title}"?`)) return;
+                              try {
+                                await deleteRescueDealFromCloud(deal.id);
+                                try { await api.delete(`/api/rescue-deals/${deal.id}`); } catch {}
+                                setRescueDeals((prev) => prev.filter((d) => d.id !== deal.id));
+                                setSuccessMessage(`Rescue deal "${deal.title}" was removed.`);
+                              } catch (err: any) {
+                                setErrorMessage(err?.message || 'Could not delete deal.');
+                              }
+                            }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* CLAIMED / SOLD RESCUE DEALS LIST */}
+                <div style={{ marginTop: '20px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#2b251d' }}>
+                      Claimed / Sold Deals ({rescueDeals.filter((d) => d.claimed || d.status === 'claimed').length})
+                    </h4>
+                    <span style={{ fontSize: '11px', color: '#6b7280' }}>
+                      Automatically removed from customer shop upon purchase
+                    </span>
+                  </div>
+
+                  {rescueDeals.filter((d) => d.claimed || d.status === 'claimed').length === 0 ? (
+                    <div className="empty-state compact" style={{ padding: '24px', textAlign: 'center' }}>
+                      <p style={{ margin: 0 }}>No deals have been claimed yet.</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                      {rescueDeals
+                        .filter((d) => d.claimed || d.status === 'claimed')
+                        .map((deal) => (
+                          <div
+                            key={deal.id}
+                            style={{
+                              background: '#f9f9f6',
+                              border: '1px solid #e7e5dc',
+                              borderRadius: '12px',
+                              padding: '16px',
+                              display: 'flex',
+                              gap: '12px',
+                              alignItems: 'center',
+                              opacity: 0.9,
+                            }}
+                          >
+                            <img
+                              src={deal.imageUrl || '/toys/toy-78291ec9-1.jpg'}
+                              alt=""
+                              style={{ width: '60px', height: '60px', borderRadius: '8px', objectFit: 'cover' }}
+                            />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <strong style={{ display: 'block', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {deal.title}
+                              </strong>
+                              <div style={{ fontSize: '12px', color: '#555d50', fontWeight: 700, margin: '2px 0' }}>
+                                Sold for {da(deal.dealPrice)}
+                              </div>
+                              <span className="status-badge-claimed">Claimed & Sold</span>
+                              {deal.claimedByCustomer && (
+                                <small style={{ display: 'block', color: '#6b7280', fontSize: '10px', marginTop: '2px' }}>
+                                  By: {deal.claimedByCustomer}
+                                </small>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              title="Remove record from archive"
+                              onClick={async () => {
+                                if (!window.confirm(`Remove archive record for "${deal.title}"?`)) return;
+                                try {
+                                  await deleteRescueDealFromCloud(deal.id);
+                                  try { await api.delete(`/api/rescue-deals/${deal.id}`); } catch {}
+                                  setRescueDeals((prev) => prev.filter((d) => d.id !== deal.id));
+                                  setSuccessMessage(`Record "${deal.title}" removed.`);
+                                } catch {}
+                              }}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </section>
         )}
       </main>
