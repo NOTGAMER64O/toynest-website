@@ -1116,7 +1116,59 @@ footer > button:hover {
   border: 1px solid #ced9b5;
 }
 
+/* =========================================
+   Order Card Status Styles & Smooth Transition
+   ========================================= */
+.order-card {
+  border: 1px solid #eceae1;
+  background: #fffefa;
+  border-radius: 12px;
+  padding: 18px;
+  transition: background-color 300ms ease-in-out, border-color 300ms ease-in-out;
+}
 
+@media (prefers-reduced-motion: reduce) {
+  .order-card {
+    transition: none !important;
+  }
+}
 
+/* Status-specific background and border colors */
+.order-card.order-status-new,
+.order-card[data-status="New"] {
+  background-color: #fffefa;
+  border-color: #eceae1;
+}
 
+.order-card.order-status-confirmed,
+.order-card[data-status="Confirmed"] {
+  background-color: #f3f8f1;
+  border-color: #c9dec4;
+}
 
+.order-card.order-status-preparing,
+.order-card[data-status="Preparing"] {
+  background-color: #fdf8ee;
+  border-color: #edd9ad;
+}
+
+.order-card.order-status-dispatched,
+.order-card[data-status="Dispatched"],
+.order-card[data-status="Ready for pickup"] {
+  background-color: #f1f6fc;
+  border-color: #c6dcf3;
+}
+
+.order-card.order-status-completed,
+.order-card[data-status="Completed"],
+.order-card[data-status="Delivered"],
+.order-card[data-status="Collected"] {
+  background-color: #eef5ec;
+  border-color: #c2dcbd;
+}
+
+.order-card.order-status-cancelled,
+.order-card[data-status="Cancelled"] {
+  background-color: #fcf4f4;
+  border-color: #ecc7c5;
+}

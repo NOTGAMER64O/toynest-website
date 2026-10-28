@@ -70,6 +70,18 @@ export function calculateTotalMoneyEarned(orders: Order[] = []): number {
   return total;
 }
 
+export function getOrderStatusClass(status?: string): string {
+  if (!status) return 'order-status-new';
+  const clean = status.trim().toLowerCase();
+  if (clean === 'confirmed') return 'order-status-confirmed';
+  if (clean === 'preparing') return 'order-status-preparing';
+  if (clean === 'dispatched' || clean === 'ready for pickup') return 'order-status-dispatched';
+  if (clean === 'completed' || clean === 'delivered' || clean === 'collected') return 'order-status-completed';
+  if (clean === 'cancelled') return 'order-status-cancelled';
+  if (clean === 'new') return 'order-status-new';
+  return `order-status-${clean.replace(/\s+/g, '-')}`;
+}
+
 function getCustomerKey(): string {
   const KEY = 'toynest_customer_key';
   let val = localStorage.getItem(KEY);
@@ -3135,7 +3147,11 @@ export default function App() {
             ) : (
               <div className="orders-list">
                 {myOrders.map((o) => (
-                  <article className="order-card" key={o.id}>
+                  <article
+                    className={`order-card ${getOrderStatusClass(o.status)}`}
+                    data-status={o.status}
+                    key={o.id}
+                  >
                     {o.productImageUrl && (
                       <div className="order-product-preview">
                         <img src={o.productImageUrl} alt={o.productName} />
@@ -4437,7 +4453,11 @@ export default function App() {
                     </div>
                   ) : (
                     filteredOwnerOrders.map((o) => (
-                        <article className="order-card" key={o.id}>
+                        <article
+                          className={`order-card ${getOrderStatusClass(o.status)}`}
+                          data-status={o.status}
+                          key={o.id}
+                        >
                           {o.productImageUrl && (
                             <div className="order-product-preview">
                               <img src={o.productImageUrl} alt={o.productName} />
