@@ -53,8 +53,10 @@ service cloud.firestore {
     match /rescueDeals/{dealId} {
       allow read: if true;
       allow create: if isValidId(dealId)
-        && request.resource.data.title is string
-        && request.resource.data.dealPrice is number;
+        && (
+          request.resource.data.deleted == true ||
+          (request.resource.data.title is string && request.resource.data.dealPrice is number)
+        );
       allow update: if isValidId(dealId);
       allow delete: if isValidId(dealId);
     }

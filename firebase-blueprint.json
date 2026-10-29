@@ -89,6 +89,8 @@
         "claimedAt": { "type": "string", "maxLength": 64 },
         "claimedByOrder": { "type": "string", "maxLength": 128 },
         "claimedByCustomer": { "type": "string", "maxLength": 100 },
+        "colour": { "type": "string", "maxLength": 100 },
+        "deleted": { "type": "boolean" },
         "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "title", "dealPrice", "claimed", "createdAt"]

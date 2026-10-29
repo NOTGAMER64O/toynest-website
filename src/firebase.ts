@@ -25,6 +25,8 @@ import {
   type RescueDeal,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
+  getStoredDeletedRescueDealIds,
+  markRescueDealDeletedLocally,
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -627,8 +629,10 @@ export function normalizeRescueDealData(data: any, docId: string): RescueDeal {
     description: String(data.description || '').trim(),
     imageUrl: imageUrls[0] || '/toys/toy-78291ec9-1.jpg',
     imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-78291ec9-1.jpg'],
+    colour: String(data.colour || '').trim(),
     claimed,
-    status: claimed ? 'claimed' : 'available',
+    deleted: data.deleted === true || data.status === 'deleted',
+    status: (data.deleted === true || data.status === 'deleted') ? 'claimed' : (claimed ? 'claimed' : 'available'),
     claimedAt: data.claimedAt || undefined,
     claimedByOrder: data.claimedByOrder || undefined,
     claimedByCustomer: data.claimedByCustomer || undefined,
@@ -647,17 +651,22 @@ export async function fetchRescueDealsFromCloud(): Promise<RescueDeal[]> {
     }
 
     const list: RescueDeal[] = [];
+    const deletedIds = new Set<string>(getStoredDeletedRescueDealIds());
+
     snapshot.forEach((d) => {
       const data = d.data() as any;
-      if (data && (data.title || data.name || data.id)) {
+      if (data && (data.deleted === true || data.status === 'deleted')) {
+        deletedIds.add(data.id || d.id);
+        markRescueDealDeletedLocally(data.id || d.id);
+      } else if (data && (data.title || data.name || data.id)) {
         list.push(normalizeRescueDealData(data, d.id));
       }
     });
 
     const cloudIds = new Set(list.map((d) => d.id));
-    const merged = [...list];
+    const merged = list.filter((d) => !deletedIds.has(d.id));
     for (const def of DEFAULT_RESCUE_DEALS) {
-      if (!cloudIds.has(def.id)) {
+      if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
         merged.push(def);
       }
     }
@@ -667,7 +676,8 @@ export async function fetchRescueDealsFromCloud(): Promise<RescueDeal[]> {
     );
   } catch (error) {
     console.error('Firestore rescue deals fetch error:', error);
-    return DEFAULT_RESCUE_DEALS;
+    const deletedIds = new Set(getStoredDeletedRescueDealIds());
+    return DEFAULT_RESCUE_DEALS.filter((d) => !deletedIds.has(d.id));
   }
 }
 
@@ -677,17 +687,22 @@ export function subscribeToRescueDeals(callback: (deals: RescueDeal[]) => void):
       collection(db, 'rescueDeals'),
       (snapshot) => {
         const list: RescueDeal[] = [];
+        const deletedIds = new Set<string>(getStoredDeletedRescueDealIds());
+
         snapshot.forEach((d) => {
           const data = d.data() as any;
-          if (data && (data.title || data.name || data.id)) {
+          if (data && (data.deleted === true || data.status === 'deleted')) {
+            deletedIds.add(data.id || d.id);
+            markRescueDealDeletedLocally(data.id || d.id);
+          } else if (data && (data.title || data.name || data.id)) {
             list.push(normalizeRescueDealData(data, d.id));
           }
         });
 
         const cloudIds = new Set(list.map((d) => d.id));
-        const merged = [...list];
+        const merged = list.filter((d) => !deletedIds.has(d.id));
         for (const def of DEFAULT_RESCUE_DEALS) {
-          if (!cloudIds.has(def.id)) {
+          if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
             merged.push(def);
           }
         }
@@ -726,7 +741,9 @@ export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
       description: String(deal.description || '').trim(),
       imageUrl: imageUrls[0] || '/toys/toy-78291ec9-1.jpg',
       imageUrls: imageUrls,
+      colour: String(deal.colour || '').trim(),
       claimed: deal.claimed === true,
+      deleted: false,
       status: deal.claimed ? 'claimed' : 'available',
       claimedAt: deal.claimedAt || null,
       claimedByOrder: deal.claimedByOrder || null,
@@ -747,10 +764,30 @@ export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
 
 export async function deleteRescueDealFromCloud(dealId: string): Promise<void> {
   const path = `rescueDeals/${dealId}`;
+  markRescueDealDeletedLocally(dealId);
   try {
-    await deleteDoc(doc(db, 'rescueDeals', dealId));
+    // 1. Mark deal as deleted in Firestore so all connected devices immediately hide it in real time
+    await setDoc(
+      doc(db, 'rescueDeals', dealId),
+      {
+        id: dealId,
+        deleted: true,
+        status: 'deleted',
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    // Explicit server verification
+    try {
+      await getDocFromServer(doc(db, 'rescueDeals', dealId));
+    } catch {}
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    // 2. If setDoc fails, fallback to deleteDoc
+    try {
+      await deleteDoc(doc(db, 'rescueDeals', dealId));
+    } catch {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
   }
 }
 

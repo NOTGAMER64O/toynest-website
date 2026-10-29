@@ -81,6 +81,7 @@ interface RescueDeal {
   description: string;
   imageUrl: string;
   imageUrls?: string[];
+  colour?: string;
   claimed: boolean;
   status: 'available' | 'claimed';
   claimedAt?: string;
@@ -101,6 +102,7 @@ interface DB {
   paymentQrUrl: string;
   ownerPin: string;
   colours: string[];
+  deletedRescueDealIds?: string[];
 }
 
 const defaultRescueDeals: RescueDeal[] = [
@@ -114,6 +116,7 @@ const defaultRescueDeals: RescueDeal[] = [
     description: "Display showcase unit in pristine mint condition. Box opened for inspection. Only 1 available at this special rescue price!",
     imageUrl: "/toys/toy-78291ec9-1.jpg",
     imageUrls: ["/toys/toy-78291ec9-1.jpg", "/toys/toy-78291ec9-2.jpg"],
+    colour: "Black",
     claimed: false,
     status: "available",
     createdAt: "2026-10-20T10:00:00.000Z"
@@ -128,6 +131,7 @@ const defaultRescueDeals: RescueDeal[] = [
     description: "Complete unbuilt kit card. Packaging has slight transit crease, contents 100% brand new and pristine.",
     imageUrl: "/toys/toy-8b48e410-1.jpg",
     imageUrls: ["/toys/toy-8b48e410-1.jpg", "/toys/toy-8b48e410-2.jpg"],
+    colour: "Grey",
     claimed: false,
     status: "available",
     createdAt: "2026-10-20T10:05:00.000Z"
@@ -238,6 +242,9 @@ function loadDB(): DB {
       if (!Array.isArray(data.colours)) {
         data.colours = [];
       }
+      if (!Array.isArray(data.deletedRescueDealIds)) {
+        data.deletedRescueDealIds = [];
+      }
       if (!Array.isArray(data.rescueDeals)) {
         data.rescueDeals = defaultRescueDeals;
       }
@@ -318,13 +325,18 @@ app.get('/api/products', (req, res) => {
 
 app.get('/api/rescue-deals', (req, res) => {
   db = loadDB();
-  const availableDeals = (db.rescueDeals || []).filter((d) => !d.claimed && d.status !== 'claimed');
+  const deletedSet = new Set(db.deletedRescueDealIds || []);
+  const availableDeals = (db.rescueDeals || []).filter(
+    (d) => !deletedSet.has(d.id) && !d.claimed && d.status !== 'claimed'
+  );
   res.json({ deals: availableDeals });
 });
 
 app.get('/api/rescue-deals/all', (req, res) => {
   db = loadDB();
-  res.json({ deals: db.rescueDeals || [] });
+  const deletedSet = new Set(db.deletedRescueDealIds || []);
+  const allDeals = (db.rescueDeals || []).filter((d) => !deletedSet.has(d.id));
+  res.json({ deals: allDeals });
 });
 
 app.post('/api/rescue-deals', (req, res) => {
@@ -343,11 +355,14 @@ app.post('/api/rescue-deals', (req, res) => {
     description: String(deal.description || '').trim(),
     imageUrl: deal.imageUrl || '/toys/toy-78291ec9-1.jpg',
     imageUrls: Array.isArray(deal.imageUrls) ? deal.imageUrls : [deal.imageUrl || '/toys/toy-78291ec9-1.jpg'],
+    colour: String(deal.colour || '').trim(),
     claimed: false,
     status: 'available',
     createdAt: deal.createdAt || new Date().toISOString(),
   };
   if (!Array.isArray(db.rescueDeals)) db.rescueDeals = [];
+  if (!Array.isArray(db.deletedRescueDealIds)) db.deletedRescueDealIds = [];
+  db.deletedRescueDealIds = db.deletedRescueDealIds.filter((id) => id !== cleanDeal.id);
   const idx = db.rescueDeals.findIndex((d) => d.id === cleanDeal.id);
   if (idx >= 0) {
     db.rescueDeals[idx] = cleanDeal;
@@ -361,10 +376,16 @@ app.post('/api/rescue-deals', (req, res) => {
 app.delete('/api/rescue-deals/:id', (req, res) => {
   db = loadDB();
   const { id } = req.params;
+  if (!Array.isArray(db.deletedRescueDealIds)) {
+    db.deletedRescueDealIds = [];
+  }
+  if (!db.deletedRescueDealIds.includes(id)) {
+    db.deletedRescueDealIds.push(id);
+  }
   if (Array.isArray(db.rescueDeals)) {
     db.rescueDeals = db.rescueDeals.filter((d) => d.id !== id);
-    saveDB(db);
   }
+  saveDB(db);
   res.json({ success: true });
 });
 

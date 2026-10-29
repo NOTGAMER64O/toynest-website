@@ -1317,9 +1317,23 @@ footer > button:hover {
   color: #92400e;
   padding: 3px 8px;
   border-radius: 5px;
-  max-width: 75%;
+  max-width: 60%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rescue-colour-pill {
+  font-size: 10px;
+  font-weight: 700;
+  background: #f1f3ea;
+  color: #3d4a2a;
+  border: 1px solid #d9e0ce;
+  padding: 3px 7px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   white-space: nowrap;
 }
 

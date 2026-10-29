@@ -199,6 +199,7 @@ import {
   type Suggestion,
   type RescueDeal,
   DEFAULT_RESCUE_DEALS,
+  getStoredDeletedRescueDealIds,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -703,7 +704,10 @@ export default function App() {
   const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState<boolean>(false);
   const [selectedProductForBuy, setSelectedProductForBuy] = useState<Product | null>(null);
   const [selectedDealForBuy, setSelectedDealForBuy] = useState<RescueDeal | null>(null);
-  const [rescueDeals, setRescueDeals] = useState<RescueDeal[]>(() => DEFAULT_RESCUE_DEALS);
+  const [rescueDeals, setRescueDeals] = useState<RescueDeal[]>(() => {
+    const deleted = new Set(getStoredDeletedRescueDealIds());
+    return DEFAULT_RESCUE_DEALS.filter((d) => !deleted.has(d.id));
+  });
   const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
@@ -713,12 +717,14 @@ export default function App() {
   >('products');
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
   const [dealSaving, setDealSaving] = useState<boolean>(false);
+  const [deletingDealId, setDeletingDealId] = useState<string | null>(null);
   const [newDealForm, setNewDealForm] = useState({
     productId: '',
     title: '',
     originalPrice: '',
     dealPrice: '',
     condition: 'Open Box - Single piece',
+    colour: '',
     description: '',
     imageUrl: '',
   });
@@ -1876,6 +1882,39 @@ export default function App() {
     }
   };
 
+  const handleDeleteRescueDeal = async (deal: RescueDeal) => {
+    if (!window.confirm(`Delete rescue deal "${deal.title}"?`)) {
+      return;
+    }
+    setDeletingDealId(deal.id);
+    setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      // 1. Optimistic UI update
+      setRescueDeals((prev) => prev.filter((d) => d.id !== deal.id));
+      
+      // 2. Cloud delete & local storage marker
+      await deleteRescueDealFromCloud(deal.id);
+      
+      // 3. Backend secondary sync
+      try {
+        await api.delete(`/api/rescue-deals/${deal.id}`);
+      } catch {}
+
+      setSuccessMessage(`Rescue deal "${deal.title}" was removed.`);
+    } catch (err: any) {
+      console.error('Error deleting rescue deal:', err);
+      // Revert if error
+      try {
+        const fresh = await fetchRescueDealsFromCloud();
+        setRescueDeals(fresh);
+      } catch {}
+      setErrorMessage(err?.message || 'Could not delete rescue deal.');
+    } finally {
+      setDeletingDealId(null);
+    }
+  };
+
   const handleSuggestionSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSuggestionSuccess('');
@@ -1960,7 +1999,11 @@ export default function App() {
       }
     }
 
-    if (availableColours.length > 0 && !checkoutForm.colour) {
+    const finalColour = selectedDealForBuy
+      ? (selectedDealForBuy.colour || checkoutForm.colour || '')
+      : (checkoutForm.colour || '');
+
+    if (!selectedDealForBuy && availableColours.length > 0 && !finalColour) {
       setErrorMessage('Please select a colour.');
       return;
     }
@@ -1995,7 +2038,7 @@ export default function App() {
       note: checkoutForm.note.trim(),
       status: 'New',
       createdAt: new Date().toISOString(),
-      colour: checkoutForm.colour || '',
+      colour: finalColour,
       isRescueDeal: Boolean(selectedDealForBuy),
       rescueDealId: selectedDealForBuy ? selectedDealForBuy.id : undefined,
       rescueCondition: selectedDealForBuy ? selectedDealForBuy.condition : undefined,
@@ -2811,6 +2854,11 @@ export default function App() {
                         <div className="rescue-card-body">
                           <div className="rescue-card-meta">
                             <span className="rescue-condition-pill">{deal.condition || 'Special Rescue Deal'}</span>
+                            {deal.colour && (
+                              <span className="rescue-colour-pill">
+                                <ColourDot colour={deal.colour} size={11} /> {deal.colour}
+                              </span>
+                            )}
                             <span className="rescue-claim-mode">Single Item</span>
                           </div>
 
@@ -2851,7 +2899,7 @@ export default function App() {
                                   phone: '',
                                   address: '',
                                   note: '',
-                                  colour: '',
+                                  colour: deal.colour || '',
                                 });
                                 setErrorMessage('');
                                 setPage('buy');
@@ -3335,20 +3383,66 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Colour Selection */}
-                  {availableColours.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', margin: '15px 0' }}>
+                  {/* Colour Selection: Locked for Rescue Deals, Interactive for regular items */}
+                  {selectedDealForBuy ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', margin: '15px 0' }}>
                       <span style={{ fontSize: '11px', fontWeight: 700, color: '#454d41' }}>
-                        Which colour?
+                        Product Colour
                       </span>
-                      <ColourSelectDropdown
-                        value={checkoutForm.colour}
-                        options={availableColours}
-                        onChange={(c) =>
-                          setCheckoutForm({ ...checkoutForm, colour: c })
-                        }
-                      />
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '10px 14px',
+                          background: '#fffdf5',
+                          border: '1.5px solid #fde68a',
+                          borderRadius: '10px',
+                          color: '#1f2937',
+                          fontSize: '13px',
+                          fontWeight: 600,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <ColourDot colour={selectedDealForBuy.colour || checkoutForm.colour || 'Standard'} size={15} />
+                          <span>{selectedDealForBuy.colour || checkoutForm.colour || 'Standard / As Pictured'}</span>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            color: '#b45309',
+                            background: '#fef3c7',
+                            padding: '3px 9px',
+                            borderRadius: '999px',
+                            border: '1px solid #fcd34d',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                          }}
+                        >
+                          🔒 Fixed for this deal
+                        </span>
+                      </div>
+                      <span style={{ fontSize: '11px', color: '#78716c' }}>
+                        Pre-selected by store · This single-piece rescue deal is only available in this colour and cannot be changed.
+                      </span>
                     </div>
+                  ) : (
+                    availableColours.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', margin: '15px 0' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 700, color: '#454d41' }}>
+                          Which colour?
+                        </span>
+                        <ColourSelectDropdown
+                          value={checkoutForm.colour}
+                          options={availableColours}
+                          onChange={(c) =>
+                            setCheckoutForm({ ...checkoutForm, colour: c })
+                          }
+                        />
+                      </div>
+                    )
                   )}
 
                   <label>
@@ -5225,6 +5319,7 @@ export default function App() {
                         originalPrice: origPrice,
                         dealPrice,
                         condition: newDealForm.condition.trim() || 'Special Rescue Deal',
+                        colour: newDealForm.colour.trim(),
                         description: newDealForm.description.trim(),
                         imageUrl: newDealForm.imageUrl || '/toys/toy-78291ec9-1.jpg',
                         claimed: false,
@@ -5247,6 +5342,7 @@ export default function App() {
                           originalPrice: '',
                           dealPrice: '',
                           condition: 'Open Box - Single piece',
+                          colour: '',
                           description: '',
                           imageUrl: '',
                         });
@@ -5346,15 +5442,68 @@ export default function App() {
                         />
                       </label>
                       <label>
-                        Image URL
-                        <input
-                          type="text"
-                          value={newDealForm.imageUrl}
-                          onChange={(e) => setNewDealForm({ ...newDealForm, imageUrl: e.target.value })}
-                          placeholder="/toys/toy-78291ec9-1.jpg"
-                        />
+                        Product Colour (Preselected & locked for customer)
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <input
+                            type="text"
+                            value={newDealForm.colour}
+                            onChange={(e) => setNewDealForm({ ...newDealForm, colour: e.target.value })}
+                            placeholder="e.g. Black, Red, Grey"
+                            maxLength={50}
+                            style={{ flex: 1 }}
+                          />
+                          {newDealForm.colour && (
+                            <ColourDot colour={newDealForm.colour} size={20} />
+                          )}
+                        </div>
                       </label>
                     </div>
+
+                    {availableColours.length > 0 && (
+                      <div style={{ marginBottom: '14px', background: '#fafaf9', padding: '10px 12px', borderRadius: '8px', border: '1px solid #eeece5' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#555d50', display: 'block', marginBottom: '6px' }}>
+                          Quick pick from store colours:
+                        </span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {availableColours.map((col) => {
+                            const isSelected = (newDealForm.colour || '').toLowerCase() === col.toLowerCase();
+                            return (
+                              <button
+                                key={col}
+                                type="button"
+                                onClick={() => setNewDealForm({ ...newDealForm, colour: col })}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  padding: '3px 10px',
+                                  fontSize: '12px',
+                                  borderRadius: '999px',
+                                  border: isSelected ? '1.5px solid #b45309' : '1px solid #d1d5db',
+                                  background: isSelected ? '#fef3c7' : '#ffffff',
+                                  color: isSelected ? '#92400e' : '#374151',
+                                  cursor: 'pointer',
+                                  fontWeight: isSelected ? 700 : 500,
+                                }}
+                              >
+                                <ColourDot colour={col} size={11} />
+                                {col}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <label>
+                      Image URL
+                      <input
+                        type="text"
+                        value={newDealForm.imageUrl}
+                        onChange={(e) => setNewDealForm({ ...newDealForm, imageUrl: e.target.value })}
+                        placeholder="/toys/toy-78291ec9-1.jpg"
+                      />
+                    </label>
 
                     <label>
                       Description
@@ -5415,23 +5564,21 @@ export default function App() {
                             <div style={{ fontSize: '12px', color: '#b45309', fontWeight: 700, margin: '2px 0' }}>
                               {da(deal.dealPrice)} {deal.originalPrice > deal.dealPrice && <del style={{ color: '#9ca3af', fontSize: '10px' }}>{da(deal.originalPrice)}</del>}
                             </div>
-                            <span className="status-badge-available">Available (1 in stock)</span>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center', marginTop: '4px' }}>
+                              <span className="status-badge-available">Available (1 in stock)</span>
+                              {deal.colour && (
+                                <span className="rescue-colour-pill" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '2px 8px', borderRadius: '999px', background: '#f3f4f6', border: '1px solid #e5e7eb', color: '#374151', fontWeight: 600 }}>
+                                  <ColourDot colour={deal.colour} size={10} /> {deal.colour}
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <button
                             type="button"
                             className="icon-btn danger"
                             title="Delete this rescue deal"
-                            onClick={async () => {
-                              if (!window.confirm(`Delete rescue deal "${deal.title}"?`)) return;
-                              try {
-                                await deleteRescueDealFromCloud(deal.id);
-                                try { await api.delete(`/api/rescue-deals/${deal.id}`); } catch {}
-                                setRescueDeals((prev) => prev.filter((d) => d.id !== deal.id));
-                                setSuccessMessage(`Rescue deal "${deal.title}" was removed.`);
-                              } catch (err: any) {
-                                setErrorMessage(err?.message || 'Could not delete deal.');
-                              }
-                            }}
+                            disabled={deletingDealId === deal.id}
+                            onClick={() => handleDeleteRescueDeal(deal)}
                           >
                             <Trash2 size={16} />
                           </button>
@@ -5486,9 +5633,16 @@ export default function App() {
                               <div style={{ fontSize: '12px', color: '#555d50', fontWeight: 700, margin: '2px 0' }}>
                                 Sold for {da(deal.dealPrice)}
                               </div>
-                              <span className="status-badge-claimed">Claimed & Sold</span>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center', marginTop: '4px' }}>
+                                <span className="status-badge-claimed">Claimed & Sold</span>
+                                {deal.colour && (
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '2px 8px', borderRadius: '999px', background: '#e5e7eb', color: '#374151', fontWeight: 600 }}>
+                                    <ColourDot colour={deal.colour} size={10} /> {deal.colour}
+                                  </span>
+                                )}
+                              </div>
                               {deal.claimedByCustomer && (
-                                <small style={{ display: 'block', color: '#6b7280', fontSize: '10px', marginTop: '2px' }}>
+                                <small style={{ display: 'block', color: '#6b7280', fontSize: '10px', marginTop: '4px' }}>
                                   By: {deal.claimedByCustomer}
                                 </small>
                               )}
@@ -5497,15 +5651,8 @@ export default function App() {
                               type="button"
                               className="icon-btn"
                               title="Remove record from archive"
-                              onClick={async () => {
-                                if (!window.confirm(`Remove archive record for "${deal.title}"?`)) return;
-                                try {
-                                  await deleteRescueDealFromCloud(deal.id);
-                                  try { await api.delete(`/api/rescue-deals/${deal.id}`); } catch {}
-                                  setRescueDeals((prev) => prev.filter((d) => d.id !== deal.id));
-                                  setSuccessMessage(`Record "${deal.title}" removed.`);
-                                } catch {}
-                              }}
+                              disabled={deletingDealId === deal.id}
+                              onClick={() => handleDeleteRescueDeal(deal)}
                             >
                               <Trash2 size={16} />
                             </button>

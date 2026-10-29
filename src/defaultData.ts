@@ -58,11 +58,13 @@ export interface RescueDeal {
   description: string;
   imageUrl: string;
   imageUrls?: string[];
+  colour?: string;
   claimed: boolean;
   status: 'available' | 'claimed';
   claimedAt?: string;
   claimedByOrder?: string;
   claimedByCustomer?: string;
+  deleted?: boolean;
   createdAt: string;
 }
 
@@ -79,6 +81,7 @@ export const DEFAULT_RESCUE_DEALS: RescueDeal[] = [
     description: "Display showcase unit in pristine mint condition. Box opened for inspection. Only 1 available at this special rescue price!",
     imageUrl: "/toys/toy-78291ec9-1.jpg",
     imageUrls: ["/toys/toy-78291ec9-1.jpg", "/toys/toy-78291ec9-2.jpg"],
+    colour: "Black",
     claimed: false,
     status: "available",
     createdAt: "2026-10-20T10:00:00.000Z"
@@ -93,6 +96,7 @@ export const DEFAULT_RESCUE_DEALS: RescueDeal[] = [
     description: "Complete unbuilt kit card. Packaging has slight transit crease, contents 100% brand new and pristine.",
     imageUrl: "/toys/toy-8b48e410-1.jpg",
     imageUrls: ["/toys/toy-8b48e410-1.jpg", "/toys/toy-8b48e410-2.jpg"],
+    colour: "Grey",
     claimed: false,
     status: "available",
     createdAt: "2026-10-20T10:05:00.000Z"
@@ -194,3 +198,27 @@ export const DEFAULT_PRODUCTS: Product[] = [
     ]
   }
 ];
+
+export function getStoredDeletedRescueDealIds(): string[] {
+  try {
+    const raw = localStorage.getItem('toynest_deleted_rescue_deal_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredDeletedRescueDealIds(ids: string[]): void {
+  try {
+    localStorage.setItem('toynest_deleted_rescue_deal_ids', JSON.stringify(ids));
+  } catch {}
+}
+
+export function markRescueDealDeletedLocally(dealId: string): void {
+  const current = getStoredDeletedRescueDealIds();
+  if (!current.includes(dealId)) {
+    saveStoredDeletedRescueDealIds([...current, dealId]);
+  }
+}
