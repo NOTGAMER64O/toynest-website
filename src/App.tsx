@@ -3501,7 +3501,7 @@ export default function App() {
                   </button>
 
                   <p className="fine-print">
-                    No online payment is taken on this website. The owner can follow up about your order.
+                    Ordering can take a while
                   </p>
                 </form>
               </div>
