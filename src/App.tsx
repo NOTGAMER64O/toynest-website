@@ -1208,17 +1208,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadProducts();
     loadPaymentQr();
     loadShopModes();
     loadColours();
-    
-    // Load initial rescue deals
-    fetchRescueDealsFromCloud().then((deals) => {
-      if (Array.isArray(deals) && deals.length > 0) {
-        setRescueDeals(deals);
-      }
-    }).catch(() => {});
 
     let unsubProducts = () => {};
     try {
@@ -1230,6 +1222,7 @@ export default function App() {
       });
     } catch (err) {
       console.warn('Real-time products subscription error:', err);
+      loadProducts();
     }
 
     let unsubColours = () => {};
@@ -1251,6 +1244,11 @@ export default function App() {
       });
     } catch (err) {
       console.warn('Real-time rescue deals subscription error:', err);
+      fetchRescueDealsFromCloud().then((deals) => {
+        if (Array.isArray(deals) && deals.length > 0) {
+          setRescueDeals(deals);
+        }
+      }).catch(() => {});
     }
 
     return () => {
@@ -1361,21 +1359,27 @@ export default function App() {
 
   useEffect(() => {
     checkOrderUpdates();
-    checkOwnerOrderUpdates();
+    if (page === 'owner') {
+      checkOwnerOrderUpdates();
+    }
     const interval = setInterval(() => {
       checkOrderUpdates();
-      checkOwnerOrderUpdates();
+      if (page === 'owner') {
+        checkOwnerOrderUpdates();
+      }
     }, 15000);
     const handleFocus = () => {
       checkOrderUpdates();
-      checkOwnerOrderUpdates();
+      if (page === 'owner') {
+        checkOwnerOrderUpdates();
+      }
     };
     window.addEventListener('focus', handleFocus);
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [customerId]);
+  }, [customerId, page]);
 
   // Real-time Firestore sync for customer orders across devices
   useEffect(() => {
@@ -2840,6 +2844,10 @@ export default function App() {
                           <img
                             src={deal.imageUrl || (deal.imageUrls && deal.imageUrls[0]) || '/toys/toy-78291ec9-1.jpg'}
                             alt={deal.title}
+                            loading="lazy"
+                            decoding="async"
+                            width={320}
+                            height={200}
                           />
                           <span className="rescue-urgency-tag">
                             <Flame size={13} /> ONLY 1 LEFT
@@ -2982,9 +2990,10 @@ export default function App() {
                         (selectedCategory === 'All categories' ||
                           (p.category || 'Other') === selectedCategory)
                     )
-                    .map((p) => {
+                    .map((p, idx) => {
                       const count = (p.imageUrls && p.imageUrls.length) || (p.imageUrl ? 1 : 0);
                       const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
+                      const isAboveFold = idx < 2;
                       return (
                         <article className="product-card" key={p.id}>
                           <button
@@ -2997,7 +3006,15 @@ export default function App() {
                             }}
                           >
                             {firstImg ? (
-                              <img src={firstImg} alt={p.name} />
+                              <img
+                                src={firstImg}
+                                alt={p.name}
+                                loading={isAboveFold ? 'eager' : 'lazy'}
+                                decoding={isAboveFold ? 'sync' : 'async'}
+                                fetchPriority={isAboveFold ? 'high' : 'low'}
+                                width={320}
+                                height={220}
+                              />
                             ) : (
                               <div className="placeholder-toy">🧸</div>
                             )}
@@ -3583,7 +3600,7 @@ export default function App() {
                   >
                     {o.productImageUrl && (
                       <div className="order-product-preview">
-                        <img src={o.productImageUrl} alt={o.productName} />
+                        <img src={o.productImageUrl} alt={o.productName} loading="lazy" decoding="async" width={80} height={80} />
                       </div>
                     )}
                     <div className="order-top">
