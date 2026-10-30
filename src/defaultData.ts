@@ -68,6 +68,14 @@ export interface RescueDeal {
   createdAt: string;
 }
 
+export interface MoneyAdjustmentItem {
+  id: string;
+  type: 'add' | 'subtract';
+  amount: number;
+  note?: string;
+  createdAt: string;
+}
+
 export const DEFAULT_OWNER_PIN = 'ANAND1904';
 
 export const DEFAULT_RESCUE_DEALS: RescueDeal[] = [
@@ -221,4 +229,38 @@ export function markRescueDealDeletedLocally(dealId: string): void {
   if (!current.includes(dealId)) {
     saveStoredDeletedRescueDealIds([...current, dealId]);
   }
+}
+
+export function getStoredMoneyAdjustment(): number {
+  try {
+    const raw = localStorage.getItem('toynest_manual_money_adjustment');
+    if (raw !== null && raw !== '') {
+      const parsed = parseFloat(raw);
+      if (!isNaN(parsed) && isFinite(parsed)) return parsed;
+    }
+  } catch {}
+  return 0;
+}
+
+export function saveStoredMoneyAdjustment(val: number): void {
+  try {
+    localStorage.setItem('toynest_manual_money_adjustment', String(val));
+  } catch {}
+}
+
+export function getStoredMoneyAdjustmentHistory(): MoneyAdjustmentItem[] {
+  try {
+    const raw = localStorage.getItem('toynest_money_adjustment_history');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredMoneyAdjustmentHistory(list: MoneyAdjustmentItem[]): void {
+  try {
+    localStorage.setItem('toynest_money_adjustment_history', JSON.stringify(list));
+  } catch {}
 }

@@ -198,8 +198,13 @@ import {
   type Order,
   type Suggestion,
   type RescueDeal,
+  type MoneyAdjustmentItem,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
+  getStoredMoneyAdjustment,
+  saveStoredMoneyAdjustment,
+  getStoredMoneyAdjustmentHistory,
+  saveStoredMoneyAdjustmentHistory,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -221,6 +226,7 @@ import {
   deleteProductFromCloud,
   fetchSettingsFromCloud,
   saveSettingsToCloud,
+  subscribeToSettings,
   fetchColoursFromCloud,
   saveColoursToCloud,
   subscribeToColours,
@@ -689,7 +695,18 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
-  const totalMoneyEarned = useMemo(() => calculateTotalMoneyEarned(ownerOrders), [ownerOrders]);
+  const [manualMoneyAdjustment, setManualMoneyAdjustment] = useState<number>(() => getStoredMoneyAdjustment());
+  const [moneyAdjustmentHistory, setMoneyAdjustmentHistory] = useState<MoneyAdjustmentItem[]>(() => getStoredMoneyAdjustmentHistory());
+  const [isMoneyModalOpen, setIsMoneyModalOpen] = useState<boolean>(false);
+  const [moneyModalTab, setMoneyModalTab] = useState<'add' | 'subtract'>('add');
+  const [moneyInputAmount, setMoneyInputAmount] = useState<string>('');
+  const [moneyInputNote, setMoneyInputNote] = useState<string>('');
+  const [moneySaving, setMoneySaving] = useState<boolean>(false);
+
+  const baseOrdersEarned = useMemo(() => calculateTotalMoneyEarned(ownerOrders), [ownerOrders]);
+  const totalMoneyEarned = useMemo(() => {
+    return baseOrdersEarned + manualMoneyAdjustment;
+  }, [baseOrdersEarned, manualMoneyAdjustment]);
   const [ownerPin, setOwnerPin] = useState<string>(() => {
     try {
       return sessionStorage.getItem('playnix_owner_pin') || '';
@@ -1027,9 +1044,19 @@ export default function App() {
   const loadShopModes = async () => {
     try {
       const settings = await fetchSettingsFromCloud();
-      if (settings && (settings.adultPublished !== undefined || settings.childPublished !== undefined)) {
-        setAdultPublished(settings.adultPublished !== false);
-        setChildPublished(settings.childPublished !== false);
+      if (settings) {
+        if (settings.adultPublished !== undefined || settings.childPublished !== undefined) {
+          setAdultPublished(settings.adultPublished !== false);
+          setChildPublished(settings.childPublished !== false);
+        }
+        if (typeof settings.manualMoneyAdjustment === 'number') {
+          setManualMoneyAdjustment(settings.manualMoneyAdjustment);
+          saveStoredMoneyAdjustment(settings.manualMoneyAdjustment);
+        }
+        if (Array.isArray(settings.moneyAdjustmentHistory)) {
+          setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+          saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+        }
         return;
       }
     } catch {}
@@ -1409,13 +1436,26 @@ export default function App() {
   // Real-time Firestore sync when owner dashboard is active
   useEffect(() => {
     if (page === 'owner') {
-      const unsubscribe = subscribeToAllOrders((liveOrders) => {
+      const unsubOrders = subscribeToAllOrders((liveOrders) => {
         if (Array.isArray(liveOrders)) {
           setOwnerOrders(liveOrders);
           saveStoredOrders(liveOrders);
         }
       });
-      return () => unsubscribe();
+      const unsubSettings = subscribeToSettings((settings) => {
+        if (typeof settings.manualMoneyAdjustment === 'number') {
+          setManualMoneyAdjustment(settings.manualMoneyAdjustment);
+          saveStoredMoneyAdjustment(settings.manualMoneyAdjustment);
+        }
+        if (Array.isArray(settings.moneyAdjustmentHistory)) {
+          setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+          saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+        }
+      });
+      return () => {
+        unsubOrders();
+        unsubSettings();
+      };
     }
   }, [page]);
 
@@ -1588,6 +1628,7 @@ export default function App() {
         loadOwnerProducts(),
         loadOwnerOrders(),
         loadColours(),
+        loadShopModes(),
         fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
       ]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
@@ -1948,6 +1989,141 @@ export default function App() {
     }
   };
 
+  const handleAddMoney = async (customAmt?: number, customNote?: string) => {
+    const amt = customAmt !== undefined ? customAmt : parseFloat(moneyInputAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setErrorMessage('Please enter a valid amount greater than ₹0.');
+      return;
+    }
+    const note = (customNote !== undefined ? customNote : moneyInputNote).trim();
+    setMoneySaving(true);
+    setErrorMessage('');
+
+    const newItem: MoneyAdjustmentItem = {
+      id: `adj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      type: 'add',
+      amount: amt,
+      note: note || undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    const newAdjustment = manualMoneyAdjustment + amt;
+    const newHistory = [newItem, ...moneyAdjustmentHistory];
+
+    setManualMoneyAdjustment(newAdjustment);
+    setMoneyAdjustmentHistory(newHistory);
+    saveStoredMoneyAdjustment(newAdjustment);
+    saveStoredMoneyAdjustmentHistory(newHistory);
+    setMoneyInputAmount('');
+    setMoneyInputNote('');
+
+    try {
+      await saveSettingsToCloud({
+        manualMoneyAdjustment: newAdjustment,
+        moneyAdjustmentHistory: newHistory,
+      });
+      setSuccessMessage(`Added ${da(amt)} to Total Money counter.`);
+    } catch (err) {
+      console.warn('Could not sync money adjustment to cloud:', err);
+      setSuccessMessage(`Added ${da(amt)} locally.`);
+    } finally {
+      setMoneySaving(false);
+    }
+  };
+
+  const handleSubtractMoney = async (customAmt?: number, customNote?: string) => {
+    const amt = customAmt !== undefined ? customAmt : parseFloat(moneyInputAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setErrorMessage('Please enter a valid amount greater than ₹0.');
+      return;
+    }
+    const note = (customNote !== undefined ? customNote : moneyInputNote).trim();
+    setMoneySaving(true);
+    setErrorMessage('');
+
+    const newItem: MoneyAdjustmentItem = {
+      id: `adj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      type: 'subtract',
+      amount: amt,
+      note: note || undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    const newAdjustment = manualMoneyAdjustment - amt;
+    const newHistory = [newItem, ...moneyAdjustmentHistory];
+
+    setManualMoneyAdjustment(newAdjustment);
+    setMoneyAdjustmentHistory(newHistory);
+    saveStoredMoneyAdjustment(newAdjustment);
+    saveStoredMoneyAdjustmentHistory(newHistory);
+    setMoneyInputAmount('');
+    setMoneyInputNote('');
+
+    try {
+      await saveSettingsToCloud({
+        manualMoneyAdjustment: newAdjustment,
+        moneyAdjustmentHistory: newHistory,
+      });
+      setSuccessMessage(`Subtracted ${da(amt)} from Total Money counter.`);
+    } catch (err) {
+      console.warn('Could not sync money adjustment to cloud:', err);
+      setSuccessMessage(`Subtracted ${da(amt)} locally.`);
+    } finally {
+      setMoneySaving(false);
+    }
+  };
+
+  const handleDeleteAdjustmentItem = async (itemId: string) => {
+    const item = moneyAdjustmentHistory.find((i) => i.id === itemId);
+    if (!item) return;
+
+    setMoneySaving(true);
+    const newAdjustment = item.type === 'add'
+      ? manualMoneyAdjustment - item.amount
+      : manualMoneyAdjustment + item.amount;
+    const newHistory = moneyAdjustmentHistory.filter((i) => i.id !== itemId);
+
+    setManualMoneyAdjustment(newAdjustment);
+    setMoneyAdjustmentHistory(newHistory);
+    saveStoredMoneyAdjustment(newAdjustment);
+    saveStoredMoneyAdjustmentHistory(newHistory);
+
+    try {
+      await saveSettingsToCloud({
+        manualMoneyAdjustment: newAdjustment,
+        moneyAdjustmentHistory: newHistory,
+      });
+      setSuccessMessage(`Reverted adjustment of ${da(item.amount)}.`);
+    } catch (err) {
+      console.warn('Could not sync adjustment deletion to cloud:', err);
+    } finally {
+      setMoneySaving(false);
+    }
+  };
+
+  const handleResetAdjustments = async () => {
+    if (!window.confirm('Reset all manual money additions and subtractions to ₹0? Earnings from fulfilled orders will stay untouched.')) {
+      return;
+    }
+
+    setMoneySaving(true);
+    setManualMoneyAdjustment(0);
+    setMoneyAdjustmentHistory([]);
+    saveStoredMoneyAdjustment(0);
+    saveStoredMoneyAdjustmentHistory([]);
+
+    try {
+      await saveSettingsToCloud({
+        manualMoneyAdjustment: 0,
+        moneyAdjustmentHistory: [],
+      });
+      setSuccessMessage('Reset manual adjustments to ₹0.');
+    } catch (err) {
+      console.warn('Could not sync reset to cloud:', err);
+    } finally {
+      setMoneySaving(false);
+    }
+  };
 
   const handlePlaceOrder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -3898,13 +4074,18 @@ export default function App() {
               <div
                 className="stat-card stat-card-earned"
                 onClick={() => {
-                  setOwnerTab('orders');
-                  setOrderStatusFilter('Completed');
+                  setMoneyInputAmount('');
+                  setMoneyInputNote('');
+                  setMoneyModalTab('add');
+                  setIsMoneyModalOpen(true);
                 }}
-                style={{ cursor: 'pointer' }}
-                title="View completed & fulfilled orders"
+                style={{ cursor: 'pointer', position: 'relative' }}
+                title="Click to add or subtract money from counter"
               >
-                <span>Total Money Earned</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                  <span>Total Money Earned</span>
+                  <span className="money-adjust-badge">Adjust ±</span>
+                </div>
                 <strong style={{ color: '#273824' }}>{da(totalMoneyEarned)}</strong>
                 <IndianRupee size={20} />
               </div>
@@ -4874,12 +5055,28 @@ export default function App() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <IndianRupee size={18} style={{ color: '#4f6937' }} />
                       <span style={{ fontSize: '13px', fontWeight: 600, color: '#2f3d24' }}>
-                        Total Money Earned from Fulfilled Orders:
+                        Total Money Earned:
                       </span>
                     </div>
-                    <strong style={{ fontSize: '17px', color: '#273824', fontFamily: 'Manrope, sans-serif' }}>
-                      {da(totalMoneyEarned)}
-                    </strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <strong style={{ fontSize: '17px', color: '#273824', fontFamily: 'Manrope, sans-serif' }}>
+                        {da(totalMoneyEarned)}
+                      </strong>
+                      <button
+                        type="button"
+                        className="money-adjust-badge"
+                        style={{ border: '0', cursor: 'pointer', padding: '4px 9px' }}
+                        onClick={() => {
+                          setMoneyInputAmount('');
+                          setMoneyInputNote('');
+                          setMoneyModalTab('add');
+                          setIsMoneyModalOpen(true);
+                        }}
+                        title="Add or subtract money from counter"
+                      >
+                        Adjust ±
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -5802,6 +5999,292 @@ export default function App() {
                 </>
               );
             })()}
+          </section>
+        </div>
+      )}
+
+      {/* OWNER MONEY COUNTER ADJUSTMENT MODAL */}
+      {isMoneyModalOpen && (
+        <div
+          className="money-modal-overlay"
+          role="presentation"
+          onClick={() => setIsMoneyModalOpen(false)}
+        >
+          <section
+            className="money-modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Money Counter and Cashbox Options"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="money-modal-header">
+              <div className="money-modal-title-wrap">
+                <div className="money-modal-icon">
+                  <IndianRupee size={22} />
+                </div>
+                <div>
+                  <h2>Money Counter</h2>
+                  <p>Add cash sales or subtract store expenses</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="money-modal-close"
+                onClick={() => setIsMoneyModalOpen(false)}
+                aria-label="Close money options"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="money-modal-body">
+              {/* Hero Banner */}
+              <div className="money-hero-banner">
+                <div className="money-hero-top">
+                  <span className="money-hero-label">Current Total Balance</span>
+                  <span className="money-hero-amount">{da(totalMoneyEarned)}</span>
+                </div>
+                <div className="money-breakdown-row">
+                  <span className="money-chip-info">
+                    📦 Orders: <strong>{da(baseOrdersEarned)}</strong> ({ownerOrders.filter((o) => isOrderEarned(o)).length} fulfilled)
+                  </span>
+                  <span
+                    className={`money-chip-info ${
+                      manualMoneyAdjustment > 0
+                        ? 'money-chip-positive'
+                        : manualMoneyAdjustment < 0
+                        ? 'money-chip-negative'
+                        : ''
+                    }`}
+                  >
+                    ⚖️ Adjustments:{' '}
+                    <strong>
+                      {manualMoneyAdjustment > 0
+                        ? `+${da(manualMoneyAdjustment)}`
+                        : manualMoneyAdjustment < 0
+                        ? `-${da(Math.abs(manualMoneyAdjustment))}`
+                        : '₹0'}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+
+              {/* Mode Toggle: Add vs Subtract */}
+              <div className="money-tab-toggle">
+                <button
+                  type="button"
+                  className={`money-tab-btn ${moneyModalTab === 'add' ? 'active-add' : ''}`}
+                  onClick={() => {
+                    setMoneyModalTab('add');
+                    setErrorMessage('');
+                  }}
+                >
+                  <Plus size={16} /> Add Money (+)
+                </button>
+                <button
+                  type="button"
+                  className={`money-tab-btn ${moneyModalTab === 'subtract' ? 'active-subtract' : ''}`}
+                  onClick={() => {
+                    setMoneyModalTab('subtract');
+                    setErrorMessage('');
+                  }}
+                >
+                  <Minus size={16} /> Subtract Money (−)
+                </button>
+              </div>
+
+              {/* Quick Amount Chips */}
+              <div className="money-input-group">
+                <label>QUICK SELECT AMOUNT</label>
+                <div className="money-quick-chips">
+                  {moneyModalTab === 'add'
+                    ? [10, 20, 50, 100, 200, 500].map((amt) => (
+                        <button
+                          key={amt}
+                          type="button"
+                          className="money-quick-btn"
+                          onClick={() => setMoneyInputAmount(String(amt))}
+                        >
+                          +₹{amt}
+                        </button>
+                      ))
+                    : [10, 20, 50, 100, 200, 500].map((amt) => (
+                        <button
+                          key={amt}
+                          type="button"
+                          className="money-quick-btn"
+                          onClick={() => setMoneyInputAmount(String(amt))}
+                        >
+                          -₹{amt}
+                        </button>
+                      ))}
+                </div>
+              </div>
+
+              {/* Amount Input */}
+              <div className="money-input-group">
+                <label htmlFor="money-amount-input">
+                  {moneyModalTab === 'add' ? 'AMOUNT TO ADD (₹)' : 'AMOUNT TO SUBTRACT (₹)'}
+                </label>
+                <div className="money-amount-wrap">
+                  <span className="money-amount-symbol">₹</span>
+                  <input
+                    id="money-amount-input"
+                    type="number"
+                    min="1"
+                    step="any"
+                    className="money-amount-input"
+                    placeholder="Enter amount, e.g. 50"
+                    value={moneyInputAmount}
+                    onChange={(e) => setMoneyInputAmount(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              {/* Note / Reason Input */}
+              <div className="money-input-group">
+                <label htmlFor="money-note-input">REASON / NOTE (OPTIONAL)</label>
+                <input
+                  id="money-note-input"
+                  type="text"
+                  maxLength={100}
+                  className="money-note-input"
+                  placeholder={
+                    moneyModalTab === 'add'
+                      ? 'e.g. Offline cash sale, tip, direct payment'
+                      : 'e.g. Toy supplies, stock expense, refund, correction'
+                  }
+                  value={moneyInputNote}
+                  onChange={(e) => setMoneyInputNote(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (moneyModalTab === 'add') {
+                        void handleAddMoney();
+                      } else {
+                        void handleSubtractMoney();
+                      }
+                    }
+                  }}
+                />
+              </div>
+
+              {/* Action Button */}
+              <button
+                type="button"
+                className="primary-btn full-btn"
+                style={
+                  moneyModalTab === 'subtract'
+                    ? { background: '#8e2b20', color: '#ffffff' }
+                    : { background: '#2e4419', color: '#ffffff' }
+                }
+                disabled={moneySaving || !moneyInputAmount || parseFloat(moneyInputAmount) <= 0}
+                onClick={() => {
+                  if (moneyModalTab === 'add') {
+                    void handleAddMoney();
+                  } else {
+                    void handleSubtractMoney();
+                  }
+                }}
+              >
+                {moneySaving
+                  ? 'Saving…'
+                  : moneyModalTab === 'add'
+                  ? `Add ${
+                      moneyInputAmount && parseFloat(moneyInputAmount) > 0
+                        ? da(moneyInputAmount)
+                        : 'Money'
+                    } to Counter`
+                  : `Subtract ${
+                      moneyInputAmount && parseFloat(moneyInputAmount) > 0
+                        ? da(moneyInputAmount)
+                        : 'Money'
+                    } from Counter`}
+              </button>
+
+              {/* History / Audit Log of Manual Adjustments */}
+              {moneyAdjustmentHistory.length > 0 && (
+                <div className="money-history-wrap">
+                  <div className="money-history-header">
+                    <strong>Recent Adjustments ({moneyAdjustmentHistory.length})</strong>
+                    <button
+                      type="button"
+                      className="money-history-reset-btn"
+                      onClick={() => void handleResetAdjustments()}
+                      disabled={moneySaving}
+                    >
+                      Reset adjustments
+                    </button>
+                  </div>
+                  <div className="money-history-list">
+                    {moneyAdjustmentHistory.map((item) => (
+                      <div className="money-history-item" key={item.id}>
+                        <div className="money-history-info">
+                          <span className="money-history-note">
+                            {item.note || (item.type === 'add' ? 'Cash added' : 'Money deducted')}
+                          </span>
+                          <span className="money-history-date">
+                            {new Date(item.createdAt).toLocaleDateString('en-IN', {
+                              day: 'numeric',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        </div>
+                        <div className="money-history-right">
+                          <span
+                            className={
+                              item.type === 'add'
+                                ? 'money-history-val-add'
+                                : 'money-history-val-subtract'
+                            }
+                          >
+                            {item.type === 'add' ? `+${da(item.amount)}` : `-${da(item.amount)}`}
+                          </span>
+                          <button
+                            type="button"
+                            className="money-history-del-btn"
+                            title="Undo/delete this adjustment"
+                            disabled={moneySaving}
+                            onClick={() => void handleDeleteAdjustmentItem(item.id)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="money-modal-footer">
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ fontSize: '11px', padding: '8px 12px' }}
+                onClick={() => {
+                  setIsMoneyModalOpen(false);
+                  setOwnerTab('orders');
+                  setOrderStatusFilter('Completed');
+                }}
+              >
+                View Fulfilled Orders →
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ padding: '8px 16px' }}
+                onClick={() => setIsMoneyModalOpen(false)}
+              >
+                Done
+              </button>
+            </div>
           </section>
         </div>
       )}

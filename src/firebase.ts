@@ -23,6 +23,7 @@ import {
   type Product,
   type Suggestion,
   type RescueDeal,
+  type MoneyAdjustmentItem,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
@@ -492,7 +493,15 @@ export async function deleteProductFromCloud(productId: string): Promise<void> {
 }
 
 // ----------------- SETTINGS & SHOP MODES -----------------
-export async function fetchSettingsFromCloud(): Promise<{ adultPublished: boolean; childPublished: boolean; paymentQrUrl: string }> {
+export interface StoreSettings {
+  adultPublished: boolean;
+  childPublished: boolean;
+  paymentQrUrl: string;
+  manualMoneyAdjustment?: number;
+  moneyAdjustmentHistory?: MoneyAdjustmentItem[];
+}
+
+export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
   const path = 'settings/store_config';
   try {
     const snap = await getDoc(doc(db, 'settings', 'store_config'));
@@ -502,20 +511,53 @@ export async function fetchSettingsFromCloud(): Promise<{ adultPublished: boolea
         adultPublished: data.adultPublished !== false,
         childPublished: data.childPublished !== false,
         paymentQrUrl: data.paymentQrUrl || '',
+        manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
+        moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
       };
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
-  return { adultPublished: true, childPublished: true, paymentQrUrl: '' };
+  return {
+    adultPublished: true,
+    childPublished: true,
+    paymentQrUrl: '',
+    manualMoneyAdjustment: 0,
+    moneyAdjustmentHistory: [],
+  };
 }
 
-export async function saveSettingsToCloud(updates: { adultPublished?: boolean; childPublished?: boolean; paymentQrUrl?: string }): Promise<void> {
+export async function saveSettingsToCloud(updates: Partial<StoreSettings>): Promise<void> {
   const path = 'settings/store_config';
   try {
     await setDoc(doc(db, 'settings', 'store_config'), updates, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export function subscribeToSettings(callback: (settings: StoreSettings) => void): () => void {
+  try {
+    return onSnapshot(
+      doc(db, 'settings', 'store_config'),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          callback({
+            adultPublished: data.adultPublished !== false,
+            childPublished: data.childPublished !== false,
+            paymentQrUrl: data.paymentQrUrl || '',
+            manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
+            moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
+          });
+        }
+      },
+      (error) => {
+        console.warn('Settings subscription warning:', error);
+      }
+    );
+  } catch {
+    return () => {};
   }
 }
 
