@@ -519,6 +519,21 @@ app.post('/api/orders/customer-delete', (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/orders/customer-note', (req, res) => {
+  db = loadDB();
+  const { orderId, note } = req.body;
+  if (!orderId) {
+    return res.status(400).json({ error: 'Order ID is required' });
+  }
+  const order = db.orders.find((o) => o.id === orderId);
+  if (order) {
+    order.note = String(note || '').trim();
+    saveDB(db);
+    return res.json({ success: true, order });
+  }
+  res.json({ success: true });
+});
+
 app.post('/api/suggestions', (req, res) => {
   db = loadDB();
   const { suggestion } = req.body;

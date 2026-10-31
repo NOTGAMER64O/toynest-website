@@ -1984,3 +1984,200 @@ footer > button:hover {
   gap: 10px;
 }
 
+/* Customer Note to Owner in My Orders & Owner Dashboard */
+.customer-order-note-box {
+  margin-top: 13px;
+  padding: 11px 13px;
+  background: #f9f9f5;
+  border: 1px solid #e7e6dc;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.customer-order-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.customer-order-note-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  color: #48563d;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.customer-order-note-edit-btn {
+  border: 0;
+  background: #eef1e4;
+  color: #3b4932;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.customer-order-note-edit-btn:hover {
+  background: #dfe5d1;
+  color: #27341d;
+}
+
+.customer-order-note-text {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #293226;
+  margin: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+  background: #ffffff;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid #e8eae0;
+}
+
+.customer-order-note-empty-hint {
+  font-size: 11px;
+  color: #7b8374;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.customer-order-note-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.customer-order-note-textarea {
+  width: 100%;
+  min-height: 65px;
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid #d4d9c7;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #202522;
+  resize: vertical;
+  outline: none;
+  font-family: inherit;
+}
+
+.customer-order-note-textarea:focus {
+  border-color: #718d43;
+  box-shadow: 0 0 0 2px rgba(113, 141, 67, 0.2);
+}
+
+.customer-order-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.customer-order-note-save-btn {
+  border: 0;
+  border-radius: 8px;
+  background: #29392b;
+  color: #ffffff;
+  padding: 7px 13px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.15s ease;
+}
+
+.customer-order-note-save-btn:hover {
+  background: #3c513e;
+}
+
+.customer-order-note-save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.customer-order-note-cancel-btn {
+  border: 1px solid #d9ddd0;
+  border-radius: 8px;
+  background: #fffefa;
+  color: #555e50;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.customer-order-note-cancel-btn:hover {
+  background: #f1f2e8;
+}
+
+.customer-order-note-clear-btn {
+  border: 0;
+  background: transparent;
+  color: #a84232;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-left: auto;
+  padding: 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.customer-order-note-clear-btn:hover {
+  text-decoration: underline;
+}
+
+.customer-order-note-success {
+  font-size: 11px;
+  font-weight: 700;
+  color: #226b34;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.owner-customer-note-display {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f3f6eb;
+  border-left: 3px solid #718d43;
+  border-radius: 6px;
+}
+
+.owner-customer-note-display .owner-note-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #45572b;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.owner-customer-note-display p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #212a1b;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+

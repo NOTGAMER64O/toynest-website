@@ -214,6 +214,7 @@ import {
   subscribeToAllOrders,
   subscribeToCustomerOrders,
   updateOrderStatusInCloud,
+  updateCustomerOrderNoteInCloud,
   deleteOrderFromCloud,
   markOrderDeletedByCustomerInCloud,
   saveSuggestionToCloud,
@@ -824,6 +825,10 @@ export default function App() {
   const [hasOwnerOrderNotification, setHasOwnerOrderNotification] = useState<boolean>(false);
   const [ownerNewOrdersCount, setOwnerNewOrdersCount] = useState<number>(0);
   const [deletingCustomerOrderId, setDeletingCustomerOrderId] = useState<string | null>(null);
+  const [editingCustomerNoteOrderId, setEditingCustomerNoteOrderId] = useState<string | null>(null);
+  const [customerNoteDraft, setCustomerNoteDraft] = useState<string>('');
+  const [savingCustomerNoteOrderId, setSavingCustomerNoteOrderId] = useState<string | null>(null);
+  const [customerNoteSuccessId, setCustomerNoteSuccessId] = useState<string | null>(null);
 
   const shareShop = async () => {
     const url = 'https://playnixshop-website.vercel.app/';
@@ -987,6 +992,50 @@ export default function App() {
     // Update myOrders state immediately
     setMyOrders((prev) => prev.filter((o) => o.id !== orderId));
     setDeletingCustomerOrderId(null);
+  };
+
+  const handleSaveCustomerNote = async (orderId: string) => {
+    const trimmed = customerNoteDraft.trim();
+    setSavingCustomerNoteOrderId(orderId);
+    setErrorMessage('');
+
+    // 1. Update Cloud Firestore
+    try {
+      await updateCustomerOrderNoteInCloud(orderId, trimmed);
+    } catch (err) {
+      console.warn('Could not update customer note in Cloud Firestore:', err);
+    }
+
+    // 2. Update backend server
+    try {
+      await api.post('/api/orders/customer-note', { orderId, note: trimmed });
+    } catch (err) {
+      console.warn('Could not update customer note on server:', err);
+    }
+
+    // 3. Update local stored orders (both for customer and owner views)
+    const currentStored = getStoredOrders();
+    const updatedStored = currentStored.map((o) =>
+      o.id === orderId ? { ...o, note: trimmed } : o
+    );
+    saveStoredOrders(updatedStored);
+
+    // 4. Update customer active order state
+    setMyOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, note: trimmed } : o))
+    );
+
+    // 5. Update owner order state if active
+    setOwnerOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, note: trimmed } : o))
+    );
+
+    setSavingCustomerNoteOrderId(null);
+    setEditingCustomerNoteOrderId(null);
+    setCustomerNoteSuccessId(orderId);
+    setTimeout(() => {
+      setCustomerNoteSuccessId((curr) => (curr === orderId ? null : curr));
+    }, 4000);
   };
 
   const loadOwnerOrders = async () => {
@@ -2003,7 +2052,7 @@ export default function App() {
       id: `adj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       type: 'add',
       amount: amt,
-      note: note || undefined,
+      ...(note ? { note } : {}),
       createdAt: new Date().toISOString(),
     };
 
@@ -2045,7 +2094,7 @@ export default function App() {
       id: `adj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       type: 'subtract',
       amount: amt,
-      note: note || undefined,
+      ...(note ? { note } : {}),
       createdAt: new Date().toISOString(),
     };
 
@@ -2220,8 +2269,12 @@ export default function App() {
       createdAt: new Date().toISOString(),
       colour: finalColour,
       isRescueDeal: Boolean(selectedDealForBuy),
-      rescueDealId: selectedDealForBuy ? selectedDealForBuy.id : undefined,
-      rescueCondition: selectedDealForBuy ? selectedDealForBuy.condition : undefined,
+      ...(selectedDealForBuy
+        ? {
+            rescueDealId: selectedDealForBuy.id,
+            rescueCondition: selectedDealForBuy.condition || '',
+          }
+        : {}),
     };
 
     try {
@@ -3845,6 +3898,85 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Customer note to owner */}
+                    <div className="customer-order-note-box">
+                      <div className="customer-order-note-head">
+                        <span className="customer-order-note-title">
+                          <MessageSquare size={13} /> Note to owner
+                        </span>
+                        {editingCustomerNoteOrderId !== o.id && (
+                          <button
+                            type="button"
+                            className="customer-order-note-edit-btn"
+                            onClick={() => {
+                              setEditingCustomerNoteOrderId(o.id);
+                              setCustomerNoteDraft(o.note || '');
+                            }}
+                          >
+                            <Pencil size={11} /> {o.note?.trim() ? 'Edit note' : 'Add note'}
+                          </button>
+                        )}
+                      </div>
+
+                      {customerNoteSuccessId === o.id && (
+                        <span className="customer-order-note-success">
+                          <Check size={13} /> Note sent to owner!
+                        </span>
+                      )}
+
+                      {editingCustomerNoteOrderId === o.id ? (
+                        <div className="customer-order-note-form">
+                          <textarea
+                            className="customer-order-note-textarea"
+                            placeholder="Add delivery instructions, preferred colour details, or a message for the owner…"
+                            value={customerNoteDraft}
+                            onChange={(e) => setCustomerNoteDraft(e.target.value)}
+                            maxLength={250}
+                            rows={3}
+                            autoFocus
+                          />
+                          <div className="customer-order-note-actions">
+                            <button
+                              type="button"
+                              className="customer-order-note-save-btn"
+                              disabled={savingCustomerNoteOrderId === o.id}
+                              onClick={() => void handleSaveCustomerNote(o.id)}
+                            >
+                              {savingCustomerNoteOrderId === o.id ? 'Saving…' : 'Save note'}
+                            </button>
+                            <button
+                              type="button"
+                              className="customer-order-note-cancel-btn"
+                              onClick={() => {
+                                setEditingCustomerNoteOrderId(null);
+                                setCustomerNoteDraft('');
+                              }}
+                            >
+                              Cancel
+                            </button>
+                            {o.note?.trim() && (
+                              <button
+                                type="button"
+                                className="customer-order-note-clear-btn"
+                                onClick={() => {
+                                  setCustomerNoteDraft('');
+                                  void handleSaveCustomerNote(o.id);
+                                }}
+                              >
+                                Remove note
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : o.note?.trim() ? (
+                        <p className="customer-order-note-text">"{o.note}"</p>
+                      ) : (
+                        <p className="customer-order-note-empty-hint">
+                          No note added yet. Tap "Add note" to leave special instructions for the owner.
+                        </p>
+                      )}
+                    </div>
+
                     {o.ownerNote?.trim() && (
                       <div className="queue-status owner-customer-note">
                         <strong>Note from the owner</strong>
@@ -5196,7 +5328,14 @@ export default function App() {
                             )}
                           </div>
 
-                          {o.note && <p className="order-note">Note: {o.note}</p>}
+                          {o.note?.trim() && (
+                            <div className="owner-customer-note-display">
+                              <span className="owner-note-tag">
+                                <MessageSquare size={12} /> Note from customer
+                              </span>
+                              <p>{o.note}</p>
+                            </div>
+                          )}
 
                           <label className="status-select">
                             Order status

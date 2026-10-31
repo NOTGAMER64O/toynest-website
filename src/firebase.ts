@@ -83,6 +83,28 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
+// Utility to recursively strip undefined fields so Firestore writes never fail
+export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) {
+    return obj
+      .filter((item) => item !== undefined)
+      .map((item) => (typeof item === 'object' && item !== null ? sanitizeForFirestore(item) : item));
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+        clean[key] = sanitizeForFirestore(value);
+      } else {
+        clean[key] = value;
+      }
+    }
+  }
+  return clean;
+}
+
 // Initial connection test
 export async function testConnection() {
   try {
@@ -124,10 +146,11 @@ export function computeQueue(orders: Order[]): Order[] {
 export async function saveOrderToCloud(order: Order): Promise<void> {
   const path = `orders/${order.id}`;
   try {
-    await setDoc(doc(db, 'orders', order.id), {
+    const payload = sanitizeForFirestore({
       ...order,
       updatedAt: new Date().toISOString(),
     });
+    await setDoc(doc(db, 'orders', order.id), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -244,6 +267,18 @@ export async function updateOrderStatusInCloud(orderId: string, updates: Partial
   try {
     await updateDoc(doc(db, 'orders', orderId), {
       ...updates,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateCustomerOrderNoteInCloud(orderId: string, note: string): Promise<void> {
+  const path = `orders/${orderId}`;
+  try {
+    await updateDoc(doc(db, 'orders', orderId), {
+      note: String(note || '').trim(),
       updatedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -530,7 +565,8 @@ export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
 export async function saveSettingsToCloud(updates: Partial<StoreSettings>): Promise<void> {
   const path = 'settings/store_config';
   try {
-    await setDoc(doc(db, 'settings', 'store_config'), updates, { merge: true });
+    const payload = sanitizeForFirestore(updates);
+    await setDoc(doc(db, 'settings', 'store_config'), payload, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -794,7 +830,7 @@ export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
       updatedAt: new Date().toISOString(),
     };
 
-    await setDoc(doc(db, 'rescueDeals', deal.id), cleanData);
+    await setDoc(doc(db, 'rescueDeals', deal.id), sanitizeForFirestore(cleanData));
 
     try {
       await getDocFromServer(doc(db, 'rescueDeals', deal.id));
@@ -867,17 +903,20 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
 
       // 1. Write the order atomically to Firestore
       const orderRef = doc(db, 'orders', order.id);
-      transaction.set(orderRef, {
-        ...order,
-        isRescueDeal: true,
-        rescueDealId: dealId,
-        updatedAt: new Date().toISOString(),
-      });
+      transaction.set(
+        orderRef,
+        sanitizeForFirestore({
+          ...order,
+          isRescueDeal: true,
+          rescueDealId: dealId,
+          updatedAt: new Date().toISOString(),
+        })
+      );
 
       // 2. Mark the deal as claimed atomically
       transaction.set(
         dealRef,
-        {
+        sanitizeForFirestore({
           ...dealData,
           id: dealId,
           claimed: true,
@@ -886,7 +925,7 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
           claimedByOrder: order.id,
           claimedByCustomer: order.name,
           updatedAt: new Date().toISOString(),
-        },
+        }),
         { merge: true }
       );
     });
