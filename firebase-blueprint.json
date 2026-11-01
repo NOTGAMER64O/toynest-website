@@ -123,6 +123,31 @@
         "createdBy": { "type": "string", "maxLength": 100 }
       },
       "required": ["id", "productId", "title", "originalPrice", "discountedPrice", "startAt", "endAt", "status", "createdAt"]
+    },
+    "DiscountCampaign": {
+      "title": "Discount Campaign",
+      "description": "Festival-wide discount campaigns and scheduled sales",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "bannerImageUrl": { "type": "string", "maxLength": 1000 },
+        "discountType": { "type": "string", "enum": ["percentage", "fixed"] },
+        "discountValue": { "type": "number" },
+        "targetScope": { "type": "string", "enum": ["all", "categories", "products"] },
+        "targetCategories": { "type": "array" },
+        "targetProductIds": { "type": "array" },
+        "startAt": { "type": "string", "maxLength": 64 },
+        "endAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "maxLength": 50 },
+        "isDraft": { "type": "boolean" },
+        "cancelled": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "discountType", "discountValue", "targetScope", "startAt", "endAt", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -145,6 +170,10 @@
     "/scheduledOffers/{offerId}": {
       "schema": { "$ref": "#/entities/ScheduledOffer" },
       "description": "Time-scheduled promotional offers"
+    },
+    "/discountCampaigns/{campaignId}": {
+      "schema": { "$ref": "#/entities/DiscountCampaign" },
+      "description": "Festival-wide discount campaigns and scheduled sales"
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/Setting" },

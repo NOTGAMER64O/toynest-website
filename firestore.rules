@@ -78,6 +78,21 @@ service cloud.firestore {
       allow delete: if isValidId(offerId);
     }
 
+    // Discount Campaigns Collection:
+    match /discountCampaigns/{campaignId} {
+      allow read: if true;
+      allow create: if isValidId(campaignId)
+        && (
+          request.resource.data.deleted == true ||
+          (
+            request.resource.data.name is string &&
+            request.resource.data.discountValue is number
+          )
+        );
+      allow update: if isValidId(campaignId);
+      allow delete: if isValidId(campaignId);
+    }
+
     // Settings Collection:
     match /settings/{settingId} {
       allow read: if true;

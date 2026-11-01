@@ -24,12 +24,14 @@ import {
   type Suggestion,
   type RescueDeal,
   type ScheduledOffer,
+  type DiscountCampaign,
   type MoneyAdjustmentItem,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
   markRescueDealDeletedLocally,
   computeOfferStatus,
+  computeCampaignStatus,
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -1181,5 +1183,176 @@ export async function claimScheduledOfferInCloud(offerId: string, order: Order):
       throw error;
     }
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/* =========================================================================
+   FESTIVAL DISCOUNT CAMPAIGN FIRESTORE METHODS
+   ========================================================================= */
+
+export function normalizeDiscountCampaignData(docId: string, raw: any): DiscountCampaign {
+  const dynamicStatus = computeCampaignStatus({
+    id: docId,
+    name: String(raw.name || ''),
+    description: String(raw.description || ''),
+    bannerImageUrl: String(raw.bannerImageUrl || ''),
+    discountType: (raw.discountType === 'fixed' ? 'fixed' : 'percentage'),
+    discountValue: Number(raw.discountValue || 0),
+    targetScope: (raw.targetScope === 'categories' ? 'categories' : raw.targetScope === 'products' ? 'products' : 'all'),
+    targetCategories: Array.isArray(raw.targetCategories) ? raw.targetCategories : [],
+    targetProductIds: Array.isArray(raw.targetProductIds) ? raw.targetProductIds : [],
+    startAt: raw.startAt || new Date().toISOString(),
+    endAt: raw.endAt || new Date().toISOString(),
+    status: raw.status || 'Scheduled',
+    isDraft: Boolean(raw.isDraft),
+    cancelled: Boolean(raw.cancelled),
+    deleted: Boolean(raw.deleted),
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || new Date().toISOString(),
+  });
+
+  return {
+    id: docId,
+    name: String(raw.name || 'Festival Special Sale'),
+    description: String(raw.description || ''),
+    bannerImageUrl: String(raw.bannerImageUrl || ''),
+    discountType: raw.discountType === 'fixed' ? 'fixed' : 'percentage',
+    discountValue: Number(raw.discountValue || 0),
+    targetScope: raw.targetScope === 'categories' ? 'categories' : raw.targetScope === 'products' ? 'products' : 'all',
+    targetCategories: Array.isArray(raw.targetCategories) ? raw.targetCategories : [],
+    targetProductIds: Array.isArray(raw.targetProductIds) ? raw.targetProductIds : [],
+    startAt: raw.startAt || new Date().toISOString(),
+    endAt: raw.endAt || new Date().toISOString(),
+    status: raw.deleted ? 'Cancelled' : raw.cancelled ? 'Cancelled' : raw.isDraft ? 'Draft' : dynamicStatus,
+    isDraft: Boolean(raw.isDraft),
+    cancelled: Boolean(raw.cancelled),
+    deleted: Boolean(raw.deleted),
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || new Date().toISOString(),
+    createdBy: raw.createdBy || 'Owner',
+    totalOrdersCount: Number(raw.totalOrdersCount || 0),
+    totalRevenue: Number(raw.totalRevenue || 0),
+  };
+}
+
+export async function fetchDiscountCampaignsFromCloud(): Promise<DiscountCampaign[]> {
+  const path = 'discountCampaigns';
+  try {
+    const q = query(collection(db, 'discountCampaigns'));
+    const snap = await getDocs(q);
+    const campaigns: DiscountCampaign[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      if (!data.deleted) {
+        campaigns.push(normalizeDiscountCampaignData(d.id, data));
+      }
+    });
+    return campaigns;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToDiscountCampaigns(
+  callback: (campaigns: DiscountCampaign[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  const path = 'discountCampaigns';
+  const q = query(collection(db, 'discountCampaigns'));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const campaigns: DiscountCampaign[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (!data.deleted) {
+          campaigns.push(normalizeDiscountCampaignData(d.id, data));
+        }
+      });
+      callback(campaigns);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error);
+    }
+  );
+}
+
+export async function saveDiscountCampaignToCloud(campaign: DiscountCampaign): Promise<void> {
+  const path = `discountCampaigns/${campaign.id}`;
+  try {
+    const docRef = doc(db, 'discountCampaigns', campaign.id);
+    const dataToSave = sanitizeForFirestore({
+      ...campaign,
+      updatedAt: new Date().toISOString(),
+    });
+    await setDoc(docRef, dataToSave, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function cancelDiscountCampaignInCloud(campaignId: string): Promise<void> {
+  const path = `discountCampaigns/${campaignId}`;
+  try {
+    const docRef = doc(db, 'discountCampaigns', campaignId);
+    await setDoc(
+      docRef,
+      sanitizeForFirestore({
+        cancelled: true,
+        status: 'Cancelled',
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteDiscountCampaignFromCloud(campaignId: string): Promise<void> {
+  const path = `discountCampaigns/${campaignId}`;
+  try {
+    const docRef = doc(db, 'discountCampaigns', campaignId);
+    await setDoc(
+      docRef,
+      sanitizeForFirestore({
+        deleted: true,
+        status: 'Cancelled',
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function recordCampaignOrderInCloud(
+  campaignId: string,
+  orderRevenue: number
+): Promise<void> {
+  const path = `discountCampaigns/${campaignId}`;
+  try {
+    const docRef = doc(db, 'discountCampaigns', campaignId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const currentOrders = Number(data.totalOrdersCount || 0);
+      const currentRev = Number(data.totalRevenue || 0);
+      await setDoc(
+        docRef,
+        sanitizeForFirestore({
+          totalOrdersCount: currentOrders + 1,
+          totalRevenue: currentRev + orderRevenue,
+          updatedAt: new Date().toISOString(),
+        }),
+        { merge: true }
+      );
+    }
+  } catch (error) {
+    // Non-critical metric, log without crashing checkout
+    console.warn('Failed to record campaign order metric:', error);
   }
 }

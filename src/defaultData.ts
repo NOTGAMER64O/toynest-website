@@ -42,6 +42,11 @@ export interface Order {
   rescueCondition?: string;
   isScheduledOffer?: boolean;
   scheduledOfferId?: string;
+  isCampaignDiscount?: boolean;
+  campaignId?: string;
+  campaignName?: string;
+  originalPrice?: number;
+  discountSaved?: number;
 }
 
 export interface Suggestion {
@@ -168,6 +173,260 @@ export function formatTimeRemaining(endAt: string, nowMs: number = Date.now()): 
     formatted = `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
   }
   return { formatted, isExpired: false, days, hours, minutes, seconds };
+}
+
+/* =========================================================================
+   FESTIVAL-WIDE DISCOUNT CAMPAIGN SYSTEM
+   ========================================================================= */
+
+export type CampaignDiscountType = 'percentage' | 'fixed';
+export type CampaignTargetScope = 'all' | 'categories' | 'products';
+export type CampaignStatus = 'Scheduled' | 'Active' | 'Expired' | 'Cancelled' | 'Draft';
+
+export interface DiscountCampaign {
+  id: string;
+  name: string;                         // e.g. "Diwali Dhamaka Sale", "Christmas Joy Fest"
+  description: string;                  // Short promotional description
+  bannerImageUrl: string;               // Preset ID or custom image URL
+  discountType: CampaignDiscountType;   // 'percentage' (%) or 'fixed' (₹)
+  discountValue: number;                // e.g. 20 (20%) or 50 (₹50)
+  targetScope: CampaignTargetScope;     // 'all' | 'categories' | 'products'
+  targetCategories?: string[];          // List of category names when targetScope === 'categories'
+  targetProductIds?: string[];          // List of product IDs when targetScope === 'products'
+  startAt: string;                      // ISO 8601 string
+  endAt: string;                        // ISO 8601 string
+  status: CampaignStatus;
+  isDraft?: boolean;
+  cancelled?: boolean;
+  deleted?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  totalOrdersCount?: number;            // Orders placed under this campaign
+  totalRevenue?: number;                // Sales revenue generated
+}
+
+export interface FestivalBannerPreset {
+  id: string;
+  name: string;
+  subtitle: string;
+  badge: string;
+  tagline: string;
+  imageUrl: string;
+  gradient: string;
+  accentColor: string;
+}
+
+export const FESTIVAL_BANNER_PRESETS: FestivalBannerPreset[] = [
+  {
+    id: 'diwali',
+    name: 'Diwali Dhamaka Sale',
+    subtitle: 'Festival of lights, happiness & exclusive toy surprises!',
+    badge: '🪔 DIWALI DHAMAKA',
+    tagline: '🪔 DIWALI DHAMAKA SALE',
+    imageUrl: 'https://images.unsplash.com/photo-1576405748404-b4da79bc429e?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #78350f 0%, #b45309 45%, #f59e0b 100%)',
+    accentColor: '#f59e0b',
+  },
+  {
+    id: 'christmas',
+    name: 'Christmas Joy Fest',
+    subtitle: 'Santa\'s secret toy workshop delivered straight to you!',
+    badge: '🎄 CHRISTMAS SALE',
+    tagline: '🎄 CHRISTMAS JOY FEST',
+    imageUrl: 'https://images.unsplash.com/photo-1543258103-a62bd96b300b?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #14532d 0%, #16a34a 50%, #991b1b 100%)',
+    accentColor: '#ef4444',
+  },
+  {
+    id: 'newyear',
+    name: 'New Year Toy Bonanza',
+    subtitle: 'Celebrate the New Year with joyous discounts on every shelf!',
+    badge: '✨ NEW YEAR BASH',
+    tagline: '✨ NEW YEAR BONANZA',
+    imageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #1e1b4b 0%, #4338ca 50%, #7c3aed 100%)',
+    accentColor: '#8b5cf6',
+  },
+  {
+    id: 'carnival',
+    name: 'Mega Playnix Carnival',
+    subtitle: 'Step right up! Special limited-time playtime festival!',
+    badge: '🎪 MEGA CARNIVAL',
+    tagline: '🎪 PLAYNIX CARNIVAL',
+    imageUrl: 'https://images.unsplash.com/photo-1513151233558-d860c5398176?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #831843 0%, #db2777 50%, #f59e0b 100%)',
+    accentColor: '#ec4899',
+  },
+  {
+    id: 'holi',
+    name: 'Holi Colors of Joy',
+    subtitle: 'Splash vibrant fun into every playroom with festive deals!',
+    badge: '🎨 HOLI SPECIAL',
+    tagline: '🎨 HOLI COLORS OF JOY',
+    imageUrl: 'https://images.unsplash.com/photo-1520697830682-bbb6e85e2b0b?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #065f46 0%, #0d9488 50%, #0284c7 100%)',
+    accentColor: '#06b6d4',
+  },
+  {
+    id: 'weekend',
+    name: 'Super Weekend Saver',
+    subtitle: 'Grab top trending toys at unbeatable weekend promotional prices!',
+    badge: '⚡ FLASH SALE',
+    tagline: '⚡ FLASH SALE EVENT',
+    imageUrl: 'https://images.unsplash.com/photo-1563245372-f21724e3856d?auto=format&fit=crop&w=1200&q=80',
+    gradient: 'linear-gradient(135deg, #312e81 0%, #4f46e5 50%, #06b6d4 100%)',
+    accentColor: '#6366f1',
+  },
+];
+
+/**
+ * Computes campaign status dynamically based on current timestamp (default Date.now()).
+ * Ensures campaigns activate and expire automatically without dashboard dependency.
+ */
+export function computeCampaignStatus(
+  campaign: DiscountCampaign,
+  nowMs: number = Date.now()
+): CampaignStatus {
+  if (campaign.deleted) return 'Cancelled';
+  if (campaign.isDraft) return 'Draft';
+  if (campaign.cancelled || campaign.status === 'Cancelled') return 'Cancelled';
+
+  const startMs = new Date(campaign.startAt).getTime();
+  const endMs = new Date(campaign.endAt).getTime();
+
+  if (isNaN(startMs) || isNaN(endMs)) return 'Scheduled';
+  if (nowMs < startMs) return 'Scheduled';
+  if (nowMs >= startMs && nowMs <= endMs) return 'Active';
+  return 'Expired';
+}
+
+export interface ProductDiscountInfo {
+  isDiscounted: boolean;
+  hasDiscount: boolean;
+  originalPrice: number;
+  discountedPrice: number;
+  discountAmount: number;
+  savingsPerUnit: number;
+  discountPercent: number;
+  discountType?: CampaignDiscountType;
+  discountValue?: number;
+  campaignId?: string;
+  campaignName?: string;
+  discountLabel?: string;
+}
+
+/**
+ * Calculates the active promotional discount for a product.
+ * Selects the best/highest discount if multiple campaigns apply (no unfair stacking),
+ * guarantees prices never drop below ₹1, and never alters original product data.
+ */
+export function calculateProductDiscount(
+  product: Product,
+  activeCampaigns: DiscountCampaign[]
+): ProductDiscountInfo {
+  const originalPrice = product.price || 0;
+  if (!activeCampaigns || activeCampaigns.length === 0 || originalPrice <= 0) {
+    return {
+      isDiscounted: false,
+      hasDiscount: false,
+      originalPrice,
+      discountedPrice: originalPrice,
+      discountAmount: 0,
+      savingsPerUnit: 0,
+      discountPercent: 0,
+    };
+  }
+
+  let bestDiscountAmount = 0;
+  let bestCampaign: DiscountCampaign | null = null;
+  let bestDiscountedPrice = originalPrice;
+
+  for (const campaign of activeCampaigns) {
+    if (campaign.isDraft || campaign.cancelled || campaign.deleted) continue;
+
+    let isEligible = false;
+    if (campaign.targetScope === 'all') {
+      isEligible = true;
+    } else if (campaign.targetScope === 'categories') {
+      if (campaign.targetCategories && campaign.targetCategories.includes(product.category)) {
+        isEligible = true;
+      }
+    } else if (campaign.targetScope === 'products') {
+      if (campaign.targetProductIds && campaign.targetProductIds.includes(product.id)) {
+        isEligible = true;
+      }
+    }
+
+    if (!isEligible) continue;
+
+    let discount = 0;
+    if (campaign.discountType === 'percentage') {
+      discount = Math.round((originalPrice * campaign.discountValue) / 100);
+    } else {
+      discount = Math.round(campaign.discountValue);
+    }
+
+    // Never drop below 1 rupee
+    discount = Math.min(originalPrice - 1, Math.max(0, discount));
+    const finalPrice = originalPrice - discount;
+
+    if (discount > bestDiscountAmount) {
+      bestDiscountAmount = discount;
+      bestCampaign = campaign;
+      bestDiscountedPrice = finalPrice;
+    }
+  }
+
+  if (bestDiscountAmount > 0 && bestCampaign) {
+    const discountPercent = Math.round((bestDiscountAmount / originalPrice) * 100);
+    const discountLabel =
+      bestCampaign.discountType === 'percentage'
+        ? `${bestCampaign.discountValue}% OFF`
+        : `₹${bestCampaign.discountValue} OFF`;
+
+    return {
+      isDiscounted: true,
+      hasDiscount: true,
+      originalPrice,
+      discountedPrice: bestDiscountedPrice,
+      discountAmount: bestDiscountAmount,
+      savingsPerUnit: bestDiscountAmount,
+      discountPercent,
+      discountType: bestCampaign.discountType,
+      discountValue: bestCampaign.discountValue,
+      campaignId: bestCampaign.id,
+      campaignName: bestCampaign.name,
+      discountLabel,
+    };
+  }
+
+  return {
+    isDiscounted: false,
+    hasDiscount: false,
+    originalPrice,
+    discountedPrice: originalPrice,
+    discountAmount: 0,
+    savingsPerUnit: 0,
+    discountPercent: 0,
+  };
+}
+
+export function getStoredDiscountCampaigns(): DiscountCampaign[] {
+  try {
+    const raw = localStorage.getItem('toynest_discount_campaigns');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredDiscountCampaigns(campaigns: DiscountCampaign[]) {
+  try {
+    localStorage.setItem('toynest_discount_campaigns', JSON.stringify(campaigns));
+  } catch {}
 }
 
 export interface MoneyAdjustmentItem {

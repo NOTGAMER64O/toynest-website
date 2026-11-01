@@ -202,14 +202,25 @@ import {
   type RescueDeal,
   type ScheduledOffer,
   type OfferComputedStatus,
+  type DiscountCampaign,
+  type CampaignDiscountType,
+  type CampaignTargetScope,
+  type CampaignStatus,
+  type FestivalBannerPreset,
+  type ProductDiscountInfo,
   type MoneyAdjustmentItem,
   DEFAULT_RESCUE_DEALS,
+  FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
   getStoredMoneyAdjustment,
   saveStoredMoneyAdjustment,
   getStoredMoneyAdjustmentHistory,
   saveStoredMoneyAdjustmentHistory,
   computeOfferStatus,
+  computeCampaignStatus,
+  calculateProductDiscount,
+  getStoredDiscountCampaigns,
+  saveStoredDiscountCampaigns,
   formatInIST,
   formatTimeRemaining,
 } from './defaultData';
@@ -249,6 +260,12 @@ import {
   deleteScheduledOfferFromCloud,
   cancelScheduledOfferInCloud,
   claimScheduledOfferInCloud,
+  fetchDiscountCampaignsFromCloud,
+  subscribeToDiscountCampaigns,
+  saveDiscountCampaignToCloud,
+  cancelDiscountCampaignInCloud,
+  deleteDiscountCampaignFromCloud,
+  recordCampaignOrderInCloud,
 } from './firebase';
 
 function getStoredColours(): string[] {
@@ -775,7 +792,7 @@ export default function App() {
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals' | 'scheduledOffers'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
   const [dealSaving, setDealSaving] = useState<boolean>(false);
@@ -809,6 +826,51 @@ export default function App() {
     endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
     isDraft: false,
   });
+
+  // Festival-Wide Discount Campaign System States
+  const [discountCampaigns, setDiscountCampaigns] = useState<DiscountCampaign[]>(() => getStoredDiscountCampaigns());
+  const [campaignFilterTab, setCampaignFilterTab] = useState<'all' | 'active' | 'scheduled' | 'drafts' | 'expired' | 'cancelled'>('all');
+  const [isAddingCampaign, setIsAddingCampaign] = useState<boolean>(false);
+  const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+  const [campaignSaving, setCampaignSaving] = useState<boolean>(false);
+  const [campaignPreviewModalOpen, setCampaignPreviewModalOpen] = useState<boolean>(false);
+  const [campaignForm, setCampaignForm] = useState<{
+    name: string;
+    description: string;
+    bannerImageUrl: string;
+    discountType: CampaignDiscountType;
+    discountValue: string;
+    targetScope: CampaignTargetScope;
+    targetCategories: string[];
+    targetProductIds: string[];
+    startAt: string;
+    endAt: string;
+    isDraft: boolean;
+  }>({
+    name: 'Diwali Dhamaka Sale',
+    description: 'Special festive celebration across our toy shelves! Limited time savings for all kids.',
+    bannerImageUrl: 'diwali',
+    discountType: 'percentage',
+    discountValue: '20',
+    targetScope: 'all',
+    targetCategories: [],
+    targetProductIds: [],
+    startAt: toDatetimeLocalString(new Date()),
+    endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
+    isDraft: false,
+  });
+
+  // Active discount campaigns evaluated against reliable currentTime (ticks every 1s)
+  const activeDiscountCampaigns = useMemo(() => {
+    return discountCampaigns.filter(
+      (c) => !c.deleted && !c.cancelled && computeCampaignStatus(c, currentTime) === 'Active'
+    );
+  }, [discountCampaigns, currentTime]);
+
+  // Primary active campaign for the customer homepage showcase
+  const primaryActiveCampaign = useMemo(() => {
+    return activeDiscountCampaigns.length > 0 ? activeDiscountCampaigns[0] : null;
+  }, [activeDiscountCampaigns]);
 
   // Active scheduled offers for customer storefront (calculated with reliable currentTime)
   const activeScheduledOffers = useMemo(() => {
@@ -1426,7 +1488,25 @@ export default function App() {
       }).catch(() => {});
     }
 
-    // 1-second live clock for offer activation, countdowns, and instant expiration without page reload
+    let unsubCampaigns = () => {};
+    try {
+      unsubCampaigns = subscribeToDiscountCampaigns((cloudCampaigns) => {
+        if (Array.isArray(cloudCampaigns)) {
+          setDiscountCampaigns(cloudCampaigns);
+          saveStoredDiscountCampaigns(cloudCampaigns);
+        }
+      });
+    } catch (err) {
+      console.warn('Real-time discount campaigns subscription error:', err);
+      fetchDiscountCampaignsFromCloud().then((campaigns) => {
+        if (Array.isArray(campaigns)) {
+          setDiscountCampaigns(campaigns);
+          saveStoredDiscountCampaigns(campaigns);
+        }
+      }).catch(() => {});
+    }
+
+    // 1-second live clock for campaign & offer activation, countdowns, and instant expiration without page reload
     const clockTimer = setInterval(() => {
       setCurrentTime(Date.now());
     }, 1000);
@@ -1436,6 +1516,7 @@ export default function App() {
       unsubColours();
       unsubDeals();
       unsubOffers();
+      unsubCampaigns();
       clearInterval(clockTimer);
     };
   }, []);
@@ -2488,6 +2569,195 @@ export default function App() {
     window.scrollTo({ top: 300, behavior: 'smooth' });
   };
 
+  // ----------------- FESTIVAL CAMPAIGN OWNER HANDLERS -----------------
+  const handleSaveDiscountCampaign = async (asDraft: boolean = false) => {
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const name = campaignForm.name.trim();
+    if (!name) {
+      setErrorMessage('Please enter a campaign name (e.g. Diwali Sale, Christmas Joy Fest).');
+      return;
+    }
+
+    const discVal = parseFloat(campaignForm.discountValue);
+    if (isNaN(discVal) || discVal <= 0) {
+      setErrorMessage(
+        campaignForm.discountType === 'percentage'
+          ? 'Please enter a valid discount percentage between 1% and 90%.'
+          : 'Please enter a valid discount amount greater than ₹0.'
+      );
+      return;
+    }
+
+    if (campaignForm.discountType === 'percentage' && discVal > 90) {
+      setErrorMessage('Discount percentage cannot exceed 90%.');
+      return;
+    }
+
+    if (campaignForm.targetScope === 'categories' && (!campaignForm.targetCategories || campaignForm.targetCategories.length === 0)) {
+      setErrorMessage('Please select at least one category to apply the discount.');
+      return;
+    }
+
+    if (campaignForm.targetScope === 'products' && (!campaignForm.targetProductIds || campaignForm.targetProductIds.length === 0)) {
+      setErrorMessage('Please select at least one product for this campaign.');
+      return;
+    }
+
+    const startDate = new Date(campaignForm.startAt);
+    const endDate = new Date(campaignForm.endAt);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      setErrorMessage('Please select valid start and end dates.');
+      return;
+    }
+
+    if (endDate.getTime() <= startDate.getTime()) {
+      setErrorMessage('Campaign end date and time must be after the start date and time.');
+      return;
+    }
+
+    setCampaignSaving(true);
+
+    const campaignId = editingCampaignId || `camp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const startAtIso = startDate.toISOString();
+    const endAtIso = endDate.toISOString();
+
+    const campaignToSave: DiscountCampaign = {
+      id: campaignId,
+      name,
+      description: campaignForm.description.trim(),
+      bannerImageUrl: campaignForm.bannerImageUrl.trim() || 'diwali',
+      discountType: campaignForm.discountType,
+      discountValue: discVal,
+      targetScope: campaignForm.targetScope,
+      targetCategories: campaignForm.targetScope === 'categories' ? campaignForm.targetCategories : [],
+      targetProductIds: campaignForm.targetScope === 'products' ? campaignForm.targetProductIds : [],
+      startAt: startAtIso,
+      endAt: endAtIso,
+      status: asDraft ? 'Draft' : 'Scheduled',
+      isDraft: asDraft,
+      cancelled: false,
+      deleted: false,
+      createdAt: editingCampaignId
+        ? (discountCampaigns.find((c) => c.id === editingCampaignId)?.createdAt || new Date().toISOString())
+        : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: 'Owner',
+      totalOrdersCount: editingCampaignId
+        ? (discountCampaigns.find((c) => c.id === editingCampaignId)?.totalOrdersCount || 0)
+        : 0,
+      totalRevenue: editingCampaignId
+        ? (discountCampaigns.find((c) => c.id === editingCampaignId)?.totalRevenue || 0)
+        : 0,
+    };
+
+    campaignToSave.status = computeCampaignStatus(campaignToSave, Date.now());
+
+    try {
+      await saveDiscountCampaignToCloud(campaignToSave);
+
+      setDiscountCampaigns((prev) => {
+        const idx = prev.findIndex((c) => c.id === campaignId);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = campaignToSave;
+          saveStoredDiscountCampaigns(next);
+          return next;
+        }
+        const next = [campaignToSave, ...prev];
+        saveStoredDiscountCampaigns(next);
+        return next;
+      });
+
+      setSuccessMessage(
+        asDraft
+          ? `Campaign "${name}" saved as draft.`
+          : editingCampaignId
+          ? `Campaign "${name}" updated successfully.`
+          : `Campaign "${name}" scheduled successfully!`
+      );
+
+      setIsAddingCampaign(false);
+      setEditingCampaignId(null);
+      setCampaignPreviewModalOpen(false);
+      setCampaignForm({
+        name: 'Diwali Dhamaka Sale',
+        description: 'Special festive celebration across our toy shelves! Limited time savings for all kids.',
+        bannerImageUrl: 'diwali',
+        discountType: 'percentage',
+        discountValue: '20',
+        targetScope: 'all',
+        targetCategories: [],
+        targetProductIds: [],
+        startAt: toDatetimeLocalString(new Date()),
+        endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
+        isDraft: false,
+      });
+    } catch (err: any) {
+      console.error('Error saving discount campaign:', err);
+      setErrorMessage(err?.message || 'Could not save discount campaign to cloud.');
+    } finally {
+      setCampaignSaving(false);
+    }
+  };
+
+  const handleCancelDiscountCampaign = async (campaignId: string) => {
+    if (!window.confirm('Cancel this festival campaign? Discounts will immediately stop applying to products.')) {
+      return;
+    }
+    setErrorMessage('');
+    try {
+      await cancelDiscountCampaignInCloud(campaignId);
+      setDiscountCampaigns((prev) =>
+        prev.map((c) => (c.id === campaignId ? { ...c, cancelled: true, status: 'Cancelled' } : c))
+      );
+      setSuccessMessage('Campaign was paused and cancelled.');
+    } catch (err) {
+      console.error('Could not cancel campaign:', err);
+      setErrorMessage('Failed to cancel campaign.');
+    }
+  };
+
+  const handleDeleteDiscountCampaign = async (campaignId: string) => {
+    if (!window.confirm('Permanently delete this campaign? This cannot be undone.')) {
+      return;
+    }
+    setErrorMessage('');
+    try {
+      await deleteDiscountCampaignFromCloud(campaignId);
+      setDiscountCampaigns((prev) => prev.filter((c) => c.id !== campaignId));
+      setSuccessMessage('Campaign deleted successfully.');
+    } catch (err) {
+      console.error('Could not delete campaign:', err);
+      setErrorMessage('Failed to delete campaign.');
+    }
+  };
+
+  const startEditCampaign = (campaign: DiscountCampaign) => {
+    setEditingCampaignId(campaign.id);
+    const startDate = new Date(campaign.startAt);
+    const endDate = new Date(campaign.endAt);
+
+    setCampaignForm({
+      name: campaign.name,
+      description: campaign.description || '',
+      bannerImageUrl: campaign.bannerImageUrl || 'diwali',
+      discountType: campaign.discountType,
+      discountValue: String(campaign.discountValue),
+      targetScope: campaign.targetScope,
+      targetCategories: campaign.targetCategories || [],
+      targetProductIds: campaign.targetProductIds || [],
+      startAt: toDatetimeLocalString(isNaN(startDate.getTime()) ? new Date() : startDate),
+      endAt: toDatetimeLocalString(isNaN(endDate.getTime()) ? new Date(Date.now() + 7 * 24 * 3600 * 1000) : endDate),
+      isDraft: campaign.isDraft === true,
+    });
+    setIsAddingCampaign(true);
+    setCampaignPreviewModalOpen(false);
+    window.scrollTo({ top: 300, behavior: 'smooth' });
+  };
+
   const handlePlaceOrder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setErrorMessage('');
@@ -2521,6 +2791,15 @@ export default function App() {
     let validatedQuantity = 1;
     let unitPrice = 0;
     let totalPrice = 0;
+    let productDiscountInfo: ProductDiscountInfo = {
+      isDiscounted: false,
+      hasDiscount: false,
+      originalPrice: 0,
+      discountedPrice: 0,
+      discountAmount: 0,
+      savingsPerUnit: 0,
+      discountPercent: 0,
+    };
 
     if (selectedDealForBuy) {
       validatedQuantity = 1; // Strict single-quantity offer
@@ -2537,7 +2816,10 @@ export default function App() {
         return;
       }
       validatedQuantity = Math.min(5, Math.max(1, parsedQty));
-      unitPrice = selectedProductForBuy.price;
+
+      // Calculate dynamic festival campaign discount
+      productDiscountInfo = calculateProductDiscount(selectedProductForBuy, activeDiscountCampaigns);
+      unitPrice = productDiscountInfo.isDiscounted ? productDiscountInfo.discountedPrice : selectedProductForBuy.price;
       totalPrice = unitPrice * validatedQuantity;
     }
 
@@ -2582,6 +2864,10 @@ export default function App() {
       ? (selectedOfferForBuy.productImageUrl || '')
       : (selectedProductForBuy!.imageUrl || (selectedProductForBuy!.imageUrls && selectedProductForBuy!.imageUrls[0]) || '');
 
+    const isCampaignEligible = Boolean(
+      !selectedDealForBuy && !selectedOfferForBuy && productDiscountInfo.isDiscounted
+    );
+
     const orderData: Order = {
       id: orderId,
       orderNumber,
@@ -2608,6 +2894,15 @@ export default function App() {
       colour: finalColour,
       isRescueDeal: Boolean(selectedDealForBuy),
       isScheduledOffer: Boolean(selectedOfferForBuy),
+      isCampaignDiscount: isCampaignEligible,
+      ...(isCampaignEligible
+        ? {
+            campaignId: productDiscountInfo.campaignId,
+            campaignName: productDiscountInfo.campaignName,
+            originalPrice: selectedProductForBuy!.price,
+            discountSaved: (selectedProductForBuy!.price - productDiscountInfo.discountedPrice) * validatedQuantity,
+          }
+        : {}),
       ...(selectedDealForBuy
         ? {
             rescueDealId: selectedDealForBuy.id,
@@ -2682,6 +2977,11 @@ export default function App() {
 
         const finalOrder = createdOrder || orderData;
         await saveOrderToCloud(finalOrder);
+
+        // Record metrics for the festival campaign
+        if (isCampaignEligible && productDiscountInfo.campaignId) {
+          recordCampaignOrderInCloud(productDiscountInfo.campaignId, totalPrice).catch(() => {});
+        }
       }
 
       const allExisting = getStoredOrders().filter((o) => o.id !== orderData.id);
@@ -3195,30 +3495,30 @@ export default function App() {
               <span className="owner-panel-section-label">PROMOTIONS & OFFERS</span>
 
               <div className="owner-panel-items">
-                {/* 1. Scheduled Offers */}
+                {/* 1. Festival Campaigns */}
                 <button
                   type="button"
-                  className={`owner-panel-item ${ownerTab === 'scheduledOffers' ? 'active' : ''}`}
+                  className={`owner-panel-item ${ownerTab === 'campaigns' ? 'active' : ''}`}
                   onClick={() => {
-                    setOwnerTab('scheduledOffers');
+                    setOwnerTab('campaigns');
                     setIsOwnerMenuOpen(false);
                     window.scrollTo({ top: 320, behavior: 'smooth' });
                   }}
                 >
                   <div className="owner-panel-item-icon" style={{ backgroundColor: '#fef3c7', color: '#b45309' }}>
-                    <Tag size={20} />
+                    <Sparkles size={20} />
                   </div>
                   <div className="owner-panel-item-info">
-                    <strong>Scheduled Offers</strong>
-                    <span>Timed discounts, flash sales & countdowns</span>
+                    <strong>Festival Campaigns</strong>
+                    <span>Storewide & category festival discounts</span>
                   </div>
-                  {ownerTab === 'scheduledOffers' ? (
+                  {ownerTab === 'campaigns' ? (
                     <span className="owner-panel-active-tag">Active</span>
                   ) : (
                     <span className="owner-panel-status-tag">
-                      {activeScheduledOffers.length > 0
-                        ? `${activeScheduledOffers.length} live`
-                        : `${scheduledOffers.filter((o) => !o.deleted).length} total`}
+                      {activeDiscountCampaigns.length > 0
+                        ? `${activeDiscountCampaigns.length} live`
+                        : `${discountCampaigns.filter((c) => !c.deleted).length} total`}
                     </span>
                   )}
                 </button>
@@ -3459,6 +3759,175 @@ export default function App() {
                 <div className="hero-caption">PLAY MORE. SMILE MORE.</div>
               </div>
             </section>
+
+            {/* FESTIVAL-WIDE DISCOUNT CAMPAIGN SHOWCASE: Dedicated promotional section */}
+            {primaryActiveCampaign && (
+              <section className="festival-campaign-showcase" id="festival-campaign">
+                {(() => {
+                  const preset = FESTIVAL_BANNER_PRESETS.find((p) => p.id === primaryActiveCampaign.bannerImageUrl);
+                  const bgImage = preset?.imageUrl || (primaryActiveCampaign.bannerImageUrl?.startsWith('http') ? primaryActiveCampaign.bannerImageUrl : undefined);
+                  const gradient = preset?.gradient || 'linear-gradient(135deg, #78350f 0%, #b45309 45%, #f59e0b 100%)';
+                  const badge = preset?.badge || '🎉 FESTIVAL SALE';
+                  const countdown = formatTimeRemaining(primaryActiveCampaign.endAt, currentTime);
+
+                  const eligibleProducts = products.filter((p) => {
+                    if (p.available === false) return false;
+                    if (primaryActiveCampaign.targetScope === 'all') return true;
+                    if (primaryActiveCampaign.targetScope === 'categories') {
+                      return primaryActiveCampaign.targetCategories?.includes(p.category || 'Other');
+                    }
+                    if (primaryActiveCampaign.targetScope === 'products') {
+                      return primaryActiveCampaign.targetProductIds?.includes(p.id);
+                    }
+                    return false;
+                  });
+
+                  return (
+                    <>
+                      <div
+                        className="festival-hero-banner"
+                        style={{
+                          backgroundImage: bgImage ? `url(${bgImage})` : undefined,
+                          background: !bgImage ? gradient : undefined,
+                        }}
+                      >
+                        <div
+                          className="festival-hero-overlay"
+                          style={{
+                            background: bgImage
+                              ? 'linear-gradient(180deg, rgba(15, 23, 42, 0.72) 0%, rgba(15, 23, 42, 0.88) 100%)'
+                              : 'rgba(0,0,0,0.12)',
+                          }}
+                        />
+                        <div className="festival-hero-content">
+                          <span className="festival-badge-pill">
+                            <Sparkles size={12} /> {badge}
+                          </span>
+                          <h2 className="festival-hero-title">
+                            {primaryActiveCampaign.name.toUpperCase()} – GET{' '}
+                            {primaryActiveCampaign.discountType === 'percentage'
+                              ? `${primaryActiveCampaign.discountValue}% OFF`
+                              : `₹${primaryActiveCampaign.discountValue} FLAT OFF`}
+                            !
+                          </h2>
+                          {primaryActiveCampaign.description && (
+                            <p className="festival-hero-desc">{primaryActiveCampaign.description}</p>
+                          )}
+                          <div className="festival-discount-highlight">
+                            <Tag size={16} />
+                            <span>
+                              {primaryActiveCampaign.targetScope === 'all'
+                                ? `FLAT ${primaryActiveCampaign.discountType === 'percentage' ? `${primaryActiveCampaign.discountValue}% OFF STOREWIDE` : `₹${primaryActiveCampaign.discountValue} OFF ON ALL TOYS`}`
+                                : primaryActiveCampaign.targetScope === 'categories'
+                                ? `FLAT ${primaryActiveCampaign.discountType === 'percentage' ? `${primaryActiveCampaign.discountValue}% OFF` : `₹${primaryActiveCampaign.discountValue} OFF`} ON ${primaryActiveCampaign.targetCategories?.join(', ')}`
+                                : `SPECIAL DISCOUNT ON ${primaryActiveCampaign.targetProductIds?.length} FEATURED TOYS`}
+                            </span>
+                          </div>
+
+                          {/* Live Countdown Timer in Asia/Kolkata timezone */}
+                          <div className="festival-timer-wrap">
+                            <span className="festival-timer-label">
+                              <Clock size={12} style={{ display: 'inline', marginRight: '4px' }} />
+                              Festival Offer Ends In:
+                            </span>
+                            <div className="festival-timer-boxes">
+                              {countdown.days > 0 && (
+                                <>
+                                  <div className="festival-time-box">
+                                    <span className="festival-time-num">{String(countdown.days).padStart(2, '0')}</span>
+                                    <span className="festival-time-sub">Days</span>
+                                  </div>
+                                  <span className="festival-timer-colon">:</span>
+                                </>
+                              )}
+                              <div className="festival-time-box">
+                                <span className="festival-time-num">{String(countdown.hours).padStart(2, '0')}</span>
+                                <span className="festival-time-sub">Hours</span>
+                              </div>
+                              <span className="festival-timer-colon">:</span>
+                              <div className="festival-time-box">
+                                <span className="festival-time-num">{String(countdown.minutes).padStart(2, '0')}</span>
+                                <span className="festival-time-sub">Mins</span>
+                              </div>
+                              <span className="festival-timer-colon">:</span>
+                              <div className="festival-time-box">
+                                <span className="festival-time-num">{String(countdown.seconds).padStart(2, '0')}</span>
+                                <span className="festival-time-sub">Secs</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Featured eligible products shelf */}
+                      {eligibleProducts.length > 0 && (
+                        <div className="festival-products-section">
+                          <div className="festival-products-header">
+                            <h4>
+                              <Sparkles size={16} style={{ color: '#d97706' }} /> Featured Festival Deals
+                            </h4>
+                            <span className="festival-scope-tag">
+                              {primaryActiveCampaign.targetScope === 'all'
+                                ? `All ${eligibleProducts.length} Toys Included`
+                                : `${eligibleProducts.length} Toys On Sale`}
+                            </span>
+                          </div>
+
+                          <div className="festival-products-grid">
+                            {eligibleProducts.slice(0, 4).map((p) => {
+                              const discountInfo = calculateProductDiscount(p, [primaryActiveCampaign]);
+                              const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+
+                              return (
+                                <article className="festival-product-card" key={`fest_${p.id}`}>
+                                  <span className="festival-card-badge">
+                                    {discountInfo.discountLabel}
+                                  </span>
+                                  <img src={firstImg} alt={p.name} className="festival-card-image" loading="lazy" />
+                                  <h5 className="festival-card-title">{p.name}</h5>
+                                  <div className="festival-card-pricing">
+                                    <span className="festival-final-price">{da(discountInfo.discountedPrice)}</span>
+                                    <span className="festival-original-price">{da(p.price)}</span>
+                                  </div>
+                                  <span className="festival-savings-pill">
+                                    Save {da(p.price - discountInfo.discountedPrice)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="festival-card-buy-btn"
+                                    onClick={() => {
+                                      setSelectedProductForBuy(p);
+                                      setSelectedDealForBuy(null);
+                                      setSelectedOfferForBuy(null);
+                                      setOrderQuantity(1);
+                                      setCheckoutMode(null);
+                                      setCheckoutForm({
+                                        name: '',
+                                        studentClass: '',
+                                        section: '',
+                                        phone: '',
+                                        address: '',
+                                        note: '',
+                                        colour: '',
+                                      });
+                                      setErrorMessage('');
+                                      setPage('buy');
+                                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                                    }}
+                                  >
+                                    <ShoppingBag size={14} /> Buy with Discount
+                                  </button>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </section>
+            )}
 
             {/* SCHEDULED OFFERS / SPECIAL OFFERS SECTION: Dedicated active promotions with countdowns */}
             {activeScheduledOffers.length > 0 && (
@@ -3749,6 +4218,17 @@ export default function App() {
                       const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
                       const isAboveFold = idx < 2;
                       const activeOffer = activeOffersByProductId.get(p.id);
+                      const campaignDiscount = calculateProductDiscount(p, activeDiscountCampaigns);
+                      const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
+                      const effectivePrice = activeOffer
+                        ? activeOffer.discountedPrice
+                        : campaignDiscount.isDiscounted
+                        ? campaignDiscount.discountedPrice
+                        : p.price;
+                      const originalPrice = p.price;
+                      const savingsAmount = originalPrice - effectivePrice;
+                      const discountPct =
+                        originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
 
                       return (
                         <article className="product-card" key={p.id}>
@@ -3774,11 +4254,15 @@ export default function App() {
                             ) : (
                               <div className="placeholder-toy">🧸</div>
                             )}
-                            {activeOffer && (
+                            {activeOffer ? (
                               <span className="catalog-card-offer-badge">
                                 <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
                               </span>
-                            )}
+                            ) : campaignDiscount.isDiscounted ? (
+                              <span className="catalog-festival-badge">
+                                <Sparkles size={10} /> {campaignDiscount.discountLabel}
+                              </span>
+                            ) : null}
                             <span className="product-badge">
                               {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
                             </span>
@@ -3787,25 +4271,29 @@ export default function App() {
                           <div className="product-info">
                             <span className="product-category">{p.category || 'Other'}</span>
 
-                            {activeOffer && (
+                            {activeOffer ? (
                               <div className="catalog-offer-timer-strip">
                                 <Clock size={12} /> Ends: {formatTimeRemaining(activeOffer.endAt, currentTime).formatted}
                               </div>
-                            )}
+                            ) : campaignDiscount.isDiscounted && primaryActiveCampaign ? (
+                              <div className="catalog-offer-timer-strip" style={{ color: '#b45309', background: '#fef3c7' }}>
+                                <Clock size={12} /> {primaryActiveCampaign.name}: {formatTimeRemaining(primaryActiveCampaign.endAt, currentTime).formatted}
+                              </div>
+                            ) : null}
 
                             <h3>{p.name}</h3>
                             <p className="product-desc">
                               {p.description || 'A fun new friend for playtime.'}
                             </p>
                             <div className="product-bottom">
-                              {activeOffer ? (
+                              {hasDiscount ? (
                                 <div>
                                   <span style={{ fontSize: '12px', color: '#88927e', textDecoration: 'line-through', marginRight: '6px' }}>
-                                    {da(p.price)}
+                                    {da(originalPrice)}
                                   </span>
-                                  <strong style={{ color: '#15803d', fontSize: '20px' }}>{da(activeOffer.discountedPrice)}</strong>
+                                  <strong style={{ color: '#15803d', fontSize: '20px' }}>{da(effectivePrice)}</strong>
                                   <span style={{ display: 'block', fontSize: '10px', color: '#15803d', fontWeight: 800 }}>
-                                    Save {da(activeOffer.originalPrice - activeOffer.discountedPrice)} ({Math.round(((activeOffer.originalPrice - activeOffer.discountedPrice) / activeOffer.originalPrice) * 100)}% OFF)
+                                    Save {da(savingsAmount)} ({discountPct}% OFF)
                                   </span>
                                 </div>
                               ) : (
@@ -3813,7 +4301,7 @@ export default function App() {
                               )}
                               <button
                                 className="buy-btn"
-                                style={activeOffer ? { background: '#273824', color: '#ffffff' } : {}}
+                                style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
                                 onClick={() => {
                                   if (activeOffer) {
                                     setSelectedOfferForBuy(activeOffer);
@@ -3837,7 +4325,7 @@ export default function App() {
                                   setPage('buy');
                                 }}
                               >
-                                {activeOffer ? 'Grab Offer' : 'Buy now'} <ArrowLeft size={15} />
+                                {hasDiscount ? 'Grab Deal' : 'Buy now'} <ArrowLeft size={15} />
                               </button>
                             </div>
                           </div>
@@ -4061,24 +4549,63 @@ export default function App() {
                       <h2>{selectedProductForBuy.name}</h2>
                       <p>{selectedProductForBuy.description || 'A little bundle of fun.'}</p>
 
-                      <div className="summary-price-box">
-                        {orderQuantity > 1 && (
-                          <div className="summary-price-breakdown">
-                            <div className="summary-breakdown-row">
-                              <span>Unit price</span>
-                              <span>{da(selectedProductForBuy.price)}</span>
-                            </div>
-                            <div className="summary-breakdown-row">
-                              <span>Quantity</span>
-                              <span>{orderQuantity} toys</span>
+                      {(() => {
+                        const campaignDisc = calculateProductDiscount(selectedProductForBuy, activeDiscountCampaigns);
+                        const effectiveUnit = campaignDisc.hasDiscount ? campaignDisc.discountedPrice : selectedProductForBuy.price;
+                        const originalUnit = selectedProductForBuy.price;
+
+                        return (
+                          <div className="summary-price-box">
+                            {campaignDisc.hasDiscount && (
+                              <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <span style={{ fontSize: '12px', fontWeight: 700, color: '#92400e', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                  🎉 {campaignDisc.campaignName}
+                                </span>
+                                <span style={{ fontSize: '11px', fontWeight: 800, background: '#b45309', color: '#fff', padding: '2px 8px', borderRadius: '999px' }}>
+                                  {campaignDisc.discountType === 'percentage' ? `${campaignDisc.discountValue}% OFF` : `SAVE ₹${campaignDisc.discountValue}`}
+                                </span>
+                              </div>
+                            )}
+
+                            {(orderQuantity > 1 || campaignDisc.hasDiscount) && (
+                              <div className="summary-price-breakdown">
+                                <div className="summary-breakdown-row">
+                                  <span>Unit price</span>
+                                  <span>
+                                    {campaignDisc.hasDiscount ? (
+                                      <>
+                                        <del style={{ color: '#9ca3af', marginRight: '6px' }}>{da(originalUnit)}</del>
+                                        <strong style={{ color: '#15803d' }}>{da(effectiveUnit)}</strong>
+                                      </>
+                                    ) : (
+                                      da(originalUnit)
+                                    )}
+                                  </span>
+                                </div>
+                                {orderQuantity > 1 && (
+                                  <div className="summary-breakdown-row">
+                                    <span>Quantity</span>
+                                    <span>{orderQuantity} toys</span>
+                                  </div>
+                                )}
+                                {campaignDisc.hasDiscount && (
+                                  <div className="summary-breakdown-row" style={{ color: '#15803d', fontWeight: 600 }}>
+                                    <span>Total savings</span>
+                                    <span>- {da(campaignDisc.savingsPerUnit * orderQuantity)}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="summary-price">
+                              <span>{orderQuantity > 1 ? 'Total Price' : 'Price'}</span>
+                              <strong style={campaignDisc.hasDiscount ? { color: '#15803d' } : undefined}>
+                                {da(effectiveUnit * orderQuantity)}
+                              </strong>
                             </div>
                           </div>
-                        )}
-                        <div className="summary-price">
-                          <span>{orderQuantity > 1 ? 'Total Price' : 'Price'}</span>
-                          <strong>{da(selectedProductForBuy.price * orderQuantity)}</strong>
-                        </div>
-                      </div>
+                        );
+                      })()}
                     </>
                   ) : null}
 
@@ -4928,7 +5455,7 @@ export default function App() {
               >
                 Suggestions ({ownerSuggestions.length})
               </button>
-              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals') && (
+              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -4938,6 +5465,7 @@ export default function App() {
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
+                  {ownerTab === 'campaigns' && `🎉 Festival Campaigns (${discountCampaigns.filter((c) => !c.deleted).length})`}
                   {ownerTab === 'scheduledOffers' && `🏷️ Scheduled Offers (${scheduledOffers.filter((o) => !o.deleted).length})`}
                   {ownerTab === 'rescueDeals' && `⚡ Rescue Deals (${rescueDeals.filter((d) => !d.claimed && !d.deleted).length})`}
                 </button>
@@ -6647,17 +7175,17 @@ export default function App() {
               </div>
             )}
 
-            {/* SCHEDULED OFFERS TAB: Owner Management of Time-Limited Promotions */}
-            {ownerTab === 'scheduledOffers' && (
-              <div className="offers-manager-panel">
-                <div className="offers-manager-header">
+            {/* FESTIVAL DISCOUNT CAMPAIGNS TAB: Owner Management of Festival & Storewide Promotions */}
+            {(ownerTab === 'campaigns' || ownerTab === 'scheduledOffers') && (
+              <div className="campaigns-manager-panel">
+                <div className="campaigns-manager-header">
                   <div>
-                    <span className="eyebrow scheduled-offers-eyebrow">
-                      <Sparkles size={13} /> MARKETING & CAMPAIGNS
+                    <span className="eyebrow festival-eyebrow">
+                      <Sparkles size={13} /> FESTIVAL CAMPAIGNS & STOREWIDE OFFERS
                     </span>
-                    <h3>🏷️ Scheduled Offers Manager</h3>
+                    <h3>✨ Festival Discount Campaigns</h3>
                     <p>
-                      Schedule promotional discounts with automatic activation and expiration in India Standard Time (IST). Offers activate and expire automatically across all customer devices even when this dashboard is closed.
+                      Schedule festival sales (Diwali, Christmas, New Year, etc.) with automatic percentage or flat discounts across all products, specific categories, or individual toys. Timezone is India Standard Time (IST). Pricing updates automatically and normal prices restore when campaigns expire without changing original toy catalog prices.
                     </p>
                   </div>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -6673,19 +7201,23 @@ export default function App() {
                       type="button"
                       className="primary-btn"
                       onClick={() => {
-                        if (isAddingOffer) {
-                          setIsAddingOffer(false);
-                          setEditingOfferId(null);
+                        if (isAddingCampaign) {
+                          setIsAddingCampaign(false);
+                          setEditingCampaignId(null);
                         } else {
-                          setIsAddingOffer(true);
-                          setEditingOfferId(null);
-                          setOfferForm({
-                            productId: products.find((p) => p.available !== false)?.id || '',
-                            title: '',
-                            originalPrice: products.find((p) => p.available !== false)?.price ? String(products.find((p) => p.available !== false)!.price) : '',
-                            discountedPrice: '',
+                          setIsAddingCampaign(true);
+                          setEditingCampaignId(null);
+                          setCampaignForm({
+                            name: 'Diwali Dhamaka Sale',
+                            description: 'Special festive celebration across our toy shelves! Limited time savings for all kids.',
+                            bannerImageUrl: 'diwali',
+                            discountType: 'percentage',
+                            discountValue: '20',
+                            targetScope: 'all',
+                            targetCategories: [],
+                            targetProductIds: [],
                             startAt: toDatetimeLocalString(new Date()),
-                            endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
+                            endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
                             isDraft: false,
                           });
                         }
@@ -6693,180 +7225,343 @@ export default function App() {
                         setSuccessMessage('');
                       }}
                     >
-                      {isAddingOffer ? '✕ Close Form' : '➕ Schedule New Offer'}
+                      {isAddingCampaign ? '✕ Close Form' : '➕ Create Festival Campaign'}
                     </button>
                   </div>
                 </div>
 
-                {/* CREATE / EDIT SCHEDULED OFFER FORM */}
-                {isAddingOffer && (
+                {/* CREATE / EDIT CAMPAIGN FORM */}
+                {isAddingCampaign && (
                   <form
                     className="panel-form add-form"
                     onSubmit={(e) => {
                       e.preventDefault();
-                      void handleSaveScheduledOffer(false);
+                      void handleSaveDiscountCampaign(false);
                     }}
                   >
                     <span className="eyebrow">
-                      {editingOfferId ? 'EDIT SCHEDULED OFFER' : 'NEW SCHEDULED OFFER'}
+                      {editingCampaignId ? 'EDIT FESTIVAL CAMPAIGN' : 'NEW FESTIVE PROMOTION'}
                     </span>
-                    <h2>{editingOfferId ? 'Edit Scheduled Offer' : 'Create a Scheduled Offer'}</h2>
+                    <h2>{editingCampaignId ? 'Edit Festival Campaign' : 'Create Festival Campaign'}</h2>
                     <p className="form-subtitle">
-                      Set a promotional discount price for a specific product. The product&apos;s regular catalog price remains completely unchanged.
+                      Set up celebration discounts for your customers. Original product catalog prices remain safely preserved at all times.
                     </p>
 
                     <label>
-                      Select Product from store catalog
-                      <select
-                        value={offerForm.productId}
-                        onChange={(e) => {
-                          const prod = products.find((p) => p.id === e.target.value);
-                          setOfferForm({
-                            ...offerForm,
-                            productId: e.target.value,
-                            originalPrice: prod ? String(prod.price) : offerForm.originalPrice,
-                            title: prod ? `${prod.name} Special Offer` : offerForm.title,
-                          });
-                        }}
-                        required
-                      >
-                        <option value="">-- Choose a product --</option>
-                        {products
-                          .filter((p) => p.available !== false)
-                          .map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name} — Regular price: {da(p.price)}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-
-                    <label>
-                      Offer Title (Visible to customers)
+                      Campaign Name (e.g. Diwali Sale, Christmas Carnival)
                       <input
                         type="text"
-                        value={offerForm.title}
-                        onChange={(e) => setOfferForm({ ...offerForm, title: e.target.value })}
-                        placeholder="e.g. Weekend Flash Sale, Special Noir Deal"
+                        value={campaignForm.name}
+                        onChange={(e) => setCampaignForm({ ...campaignForm, name: e.target.value })}
+                        placeholder="e.g. Diwali Dhamaka Sale, Christmas Joy Sale"
                         maxLength={100}
                         required
                       />
                     </label>
 
+                    <label>
+                      Description / Banner Tagline
+                      <textarea
+                        value={campaignForm.description}
+                        onChange={(e) => setCampaignForm({ ...campaignForm, description: e.target.value })}
+                        placeholder="e.g. Celebrate Diwali with 20% off all toys! Valid this week only."
+                        rows={2}
+                        maxLength={300}
+                      />
+                    </label>
+
+                    {/* FESTIVAL BANNER PRESET SELECTOR */}
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                        Choose Festival Theme & Banner Background
+                      </label>
+                      <div className="campaign-preset-selector">
+                        {FESTIVAL_BANNER_PRESETS.map((preset) => {
+                          const isSelected = campaignForm.bannerImageUrl === preset.id;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              className={`campaign-preset-chip ${isSelected ? 'active' : ''}`}
+                              onClick={() => {
+                                setCampaignForm({
+                                  ...campaignForm,
+                                  bannerImageUrl: preset.id,
+                                  name: campaignForm.name && campaignForm.name !== 'Diwali Dhamaka Sale' ? campaignForm.name : `${preset.name} Special Sale`,
+                                });
+                              }}
+                              style={{
+                                background: preset.gradient,
+                                color: '#ffffff',
+                                border: isSelected ? '2px solid #ffffff' : '2px solid transparent',
+                                boxShadow: isSelected ? '0 0 0 2px #d97706' : 'none',
+                              }}
+                            >
+                              <span>{preset.tagline}</span>
+                              <strong>{preset.name}</strong>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ marginTop: '10px' }}>
+                        <small style={{ color: '#687263', display: 'block', marginBottom: '4px' }}>
+                          Or provide a custom banner image URL (optional):
+                        </small>
+                        <input
+                          type="text"
+                          value={
+                            FESTIVAL_BANNER_PRESETS.some((p) => p.id === campaignForm.bannerImageUrl)
+                              ? ''
+                              : campaignForm.bannerImageUrl
+                          }
+                          onChange={(e) => setCampaignForm({ ...campaignForm, bannerImageUrl: e.target.value })}
+                          placeholder="https://example.com/festival-banner.jpg"
+                        />
+                      </div>
+                    </div>
+
+                    {/* DISCOUNT TYPE & VALUE */}
                     <div className="two-fields">
                       <label>
-                        Regular Store Price (₹)
-                        <input
-                          type="number"
-                          value={offerForm.originalPrice}
-                          onChange={(e) => setOfferForm({ ...offerForm, originalPrice: e.target.value })}
-                          placeholder="e.g. 79"
-                          min={1}
-                          required
-                        />
-                        <small style={{ color: '#798273' }}>
-                          Product catalog price stays unchanged.
-                        </small>
+                        Discount Type
+                        <select
+                          value={campaignForm.discountType}
+                          onChange={(e) => setCampaignForm({ ...campaignForm, discountType: e.target.value as CampaignDiscountType })}
+                        >
+                          <option value="percentage">Percentage Discount (% Off)</option>
+                          <option value="fixed">Fixed Amount Discount (₹ Flat Off)</option>
+                        </select>
                       </label>
 
                       <label>
-                        Discounted Offer Price (₹)
+                        {campaignForm.discountType === 'percentage' ? 'Discount Percentage (%)' : 'Discount Amount (₹)'}
                         <input
                           type="number"
-                          value={offerForm.discountedPrice}
-                          onChange={(e) => setOfferForm({ ...offerForm, discountedPrice: e.target.value })}
-                          placeholder="e.g. 49"
+                          value={campaignForm.discountValue}
+                          onChange={(e) => setCampaignForm({ ...campaignForm, discountValue: e.target.value })}
+                          placeholder={campaignForm.discountType === 'percentage' ? 'e.g. 20' : 'e.g. 50'}
                           min={1}
+                          max={campaignForm.discountType === 'percentage' ? 90 : 10000}
                           required
                         />
-                        {offerForm.originalPrice && offerForm.discountedPrice && parseFloat(offerForm.discountedPrice) < parseFloat(offerForm.originalPrice) && (
-                          <small style={{ color: '#15803d', fontWeight: 700 }}>
-                            Save {da(parseFloat(offerForm.originalPrice) - parseFloat(offerForm.discountedPrice))} ({Math.round(((parseFloat(offerForm.originalPrice) - parseFloat(offerForm.discountedPrice)) / parseFloat(offerForm.originalPrice)) * 100)}% OFF)
-                          </small>
-                        )}
                       </label>
                     </div>
 
+                    {/* TARGET SCOPE */}
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>
+                        Apply Discount To:
+                      </label>
+                      <div className="scope-options-group">
+                        <label className="scope-radio-label">
+                          <input
+                            type="radio"
+                            name="targetScope"
+                            checked={campaignForm.targetScope === 'all'}
+                            onChange={() => setCampaignForm({ ...campaignForm, targetScope: 'all' })}
+                          />
+                          <div>
+                            <strong>🌐 All Products</strong>
+                            <small>Entire store catalogue ({products.filter((p) => p.available !== false).length} toys)</small>
+                          </div>
+                        </label>
+
+                        <label className="scope-radio-label">
+                          <input
+                            type="radio"
+                            name="targetScope"
+                            checked={campaignForm.targetScope === 'categories'}
+                            onChange={() => setCampaignForm({ ...campaignForm, targetScope: 'categories' })}
+                          />
+                          <div>
+                            <strong>📂 Selected Categories</strong>
+                            <small>Apply to toys in specific categories only</small>
+                          </div>
+                        </label>
+
+                        <label className="scope-radio-label">
+                          <input
+                            type="radio"
+                            name="targetScope"
+                            checked={campaignForm.targetScope === 'products'}
+                            onChange={() => setCampaignForm({ ...campaignForm, targetScope: 'products' })}
+                          />
+                          <div>
+                            <strong>🎯 Selected Toys</strong>
+                            <small>Pick individual toys to receive this discount</small>
+                          </div>
+                        </label>
+                      </div>
+
+                      {/* CATEGORIES PICKER */}
+                      {campaignForm.targetScope === 'categories' && (
+                        <div style={{ marginTop: '12px', padding: '12px', background: '#fcfbf7', border: '1px solid #eeece5', borderRadius: '8px' }}>
+                          <p style={{ margin: '0 0 8px 0', fontSize: '12px', fontWeight: 700, color: '#374151' }}>
+                            Select eligible categories:
+                          </p>
+                          <div className="category-checkboxes-grid">
+                            {Array.from(new Set(products.map((p) => p.category || 'General toys'))).map((cat) => {
+                              const checked = campaignForm.targetCategories.includes(cat);
+                              return (
+                                <label key={cat} className="category-checkbox-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={(e) => {
+                                      const next = e.target.checked
+                                        ? [...campaignForm.targetCategories, cat]
+                                        : campaignForm.targetCategories.filter((c) => c !== cat);
+                                      setCampaignForm({ ...campaignForm, targetCategories: next });
+                                    }}
+                                  />
+                                  <span>{cat}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* PRODUCT PICKER */}
+                      {campaignForm.targetScope === 'products' && (
+                        <div className="product-picker-container">
+                          <p style={{ margin: '0 0 8px 0', fontSize: '12px', fontWeight: 700, color: '#374151' }}>
+                            Select toys ({campaignForm.targetProductIds.length} selected):
+                          </p>
+                          <div style={{ maxHeight: '220px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            {products
+                              .filter((p) => p.available !== false)
+                              .map((p) => {
+                                const checked = campaignForm.targetProductIds.includes(p.id);
+                                const numVal = parseFloat(campaignForm.discountValue) || 0;
+                                const previewPrice = campaignForm.discountType === 'percentage'
+                                  ? Math.max(1, Math.round(p.price * (1 - numVal / 100)))
+                                  : Math.max(1, p.price - numVal);
+
+                                return (
+                                  <label
+                                    key={p.id}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '10px',
+                                      padding: '8px 12px',
+                                      background: checked ? '#ecfdf5' : '#ffffff',
+                                      border: checked ? '1px solid #10b981' : '1px solid #e5e7eb',
+                                      borderRadius: '8px',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        const next = e.target.checked
+                                          ? [...campaignForm.targetProductIds, p.id]
+                                          : campaignForm.targetProductIds.filter((id) => id !== p.id);
+                                        setCampaignForm({ ...campaignForm, targetProductIds: next });
+                                      }}
+                                    />
+                                    <img
+                                      src={(p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                                      alt=""
+                                      style={{ width: '36px', height: '36px', borderRadius: '6px', objectFit: 'cover' }}
+                                    />
+                                    <div style={{ flex: 1, minWidth: 0, fontSize: '13px' }}>
+                                      <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {p.name}
+                                      </strong>
+                                      <span style={{ fontSize: '11px', color: '#6b7280' }}>
+                                        Regular: {da(p.price)}
+                                        {checked && numVal > 0 && (
+                                          <span style={{ color: '#059669', fontWeight: 700, marginLeft: '6px' }}>
+                                            → Sale: {da(previewPrice)}
+                                          </span>
+                                        )}
+                                      </span>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* DATES & TIMES */}
                     <div className="two-fields">
                       <label>
-                        Offer Start Date & Time (IST)
+                        Campaign Start Date & Time (IST)
                         <input
                           type="datetime-local"
-                          value={offerForm.startAt}
-                          onChange={(e) => setOfferForm({ ...offerForm, startAt: e.target.value })}
+                          value={campaignForm.startAt}
+                          onChange={(e) => setCampaignForm({ ...campaignForm, startAt: e.target.value })}
                           required
                         />
                         <small style={{ color: '#798273' }}>
-                          When the offer goes live.
+                          When promotion automatically begins.
                         </small>
                       </label>
 
                       <label>
-                        Offer End Date & Time (IST)
+                        Campaign End Date & Time (IST)
                         <input
                           type="datetime-local"
-                          value={offerForm.endAt}
-                          onChange={(e) => setOfferForm({ ...offerForm, endAt: e.target.value })}
+                          value={campaignForm.endAt}
+                          onChange={(e) => setCampaignForm({ ...campaignForm, endAt: e.target.value })}
                           required
                         />
                         <small style={{ color: '#798273' }}>
-                          When the offer automatically expires.
+                          When promotion automatically expires.
                         </small>
                       </label>
                     </div>
 
-                    {/* Real-time scheduling validation feedback */}
-                    {offerForm.startAt && offerForm.endAt && new Date(offerForm.endAt).getTime() <= new Date(offerForm.startAt).getTime() && (
+                    {/* Validation warning */}
+                    {campaignForm.startAt && campaignForm.endAt && new Date(campaignForm.endAt).getTime() <= new Date(campaignForm.startAt).getTime() && (
                       <div className="error-msg" style={{ margin: '10px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <AlertCircle size={16} /> End date & time must be strictly after the start date & time.
                       </div>
                     )}
 
-                    {offerForm.productId && offerForm.startAt && offerForm.endAt && new Date(offerForm.endAt).getTime() > new Date(offerForm.startAt).getTime() && checkOfferOverlap(offerForm.productId, new Date(offerForm.startAt).toISOString(), new Date(offerForm.endAt).toISOString(), editingOfferId || undefined) && (
-                      <div className="error-msg" style={{ margin: '10px 0', display: 'flex', alignItems: 'center', gap: '8px', background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a' }}>
-                        <AlertCircle size={16} /> Warning: Another active or scheduled offer already overlaps with this product during this timeframe.
-                      </div>
-                    )}
-
+                    {/* Action buttons */}
                     <div style={{ display: 'flex', gap: '10px', marginTop: '16px', flexWrap: 'wrap' }}>
                       <button
                         type="button"
                         className="secondary-btn"
-                        onClick={() => {
-                          if (!offerForm.productId) {
-                            setErrorMessage('Please select a product first to preview.');
-                            return;
-                          }
-                          setOfferPreviewModalOpen(true);
-                        }}
+                        onClick={() => setCampaignPreviewModalOpen(true)}
                       >
-                        👁️ Preview Offer
-                      </button>
-
-                      <button
-                        type="submit"
-                        className="primary-btn"
-                        disabled={offerSaving}
-                      >
-                        {offerSaving ? 'Saving offer…' : editingOfferId ? 'Update Scheduled Offer' : 'Save & Schedule Offer'}
+                        <Sparkles size={14} /> Preview Storefront Banner
                       </button>
 
                       <button
                         type="button"
                         className="secondary-btn"
-                        disabled={offerSaving}
-                        onClick={() => void handleSaveScheduledOffer(true)}
-                        title="Save this offer as a draft (hidden from customers until activated)"
+                        disabled={campaignSaving}
+                        onClick={() => void handleSaveDiscountCampaign(true)}
                       >
                         💾 Save as Draft
                       </button>
 
                       <button
+                        type="submit"
+                        className="primary-btn"
+                        disabled={campaignSaving}
+                      >
+                        {campaignSaving
+                          ? 'Saving…'
+                          : editingCampaignId
+                          ? 'Update Campaign'
+                          : '🚀 Schedule / Launch Campaign'}
+                      </button>
+
+                      <button
                         type="button"
                         className="secondary-btn"
                         onClick={() => {
-                          setIsAddingOffer(false);
-                          setEditingOfferId(null);
+                          setIsAddingCampaign(false);
+                          setEditingCampaignId(null);
                         }}
                       >
                         Cancel
@@ -6875,19 +7570,19 @@ export default function App() {
                   </form>
                 )}
 
-                {/* OFFER PREVIEW MODAL */}
-                {offerPreviewModalOpen && (
-                  <div className="offer-preview-modal-overlay" onClick={() => setOfferPreviewModalOpen(false)}>
-                    <div className="offer-preview-modal-content" onClick={(e) => e.stopPropagation()}>
+                {/* CAMPAIGN PREVIEW MODAL */}
+                {campaignPreviewModalOpen && (
+                  <div className="offer-preview-modal-overlay" onClick={() => setCampaignPreviewModalOpen(false)}>
+                    <div className="offer-preview-modal-content" style={{ maxWidth: '640px' }} onClick={(e) => e.stopPropagation()}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                        <span className="eyebrow" style={{ color: '#15803d', margin: 0 }}>
+                        <span className="eyebrow" style={{ color: '#b45309', margin: 0 }}>
                           <Sparkles size={12} style={{ display: 'inline', marginRight: '4px' }} />
-                          LIVE STOREFRONT PREVIEW
+                          LIVE STOREFRONT HERO PREVIEW
                         </span>
                         <button
                           type="button"
                           className="icon-btn"
-                          onClick={() => setOfferPreviewModalOpen(false)}
+                          onClick={() => setCampaignPreviewModalOpen(false)}
                           aria-label="Close preview"
                         >
                           ✕
@@ -6895,55 +7590,37 @@ export default function App() {
                       </div>
 
                       <p style={{ fontSize: '12px', color: '#687263', margin: '0 0 16px 0' }}>
-                        This is exactly how your scheduled offer card will appear to customers when active:
+                        This is how your promotional hero banner and discount showcase will appear to customers:
                       </p>
 
                       {(() => {
-                        const selectedProd = products.find((p) => p.id === offerForm.productId);
-                        const prodImg = (selectedProd?.imageUrls && selectedProd.imageUrls[0]) || selectedProd?.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
-                        const origP = parseFloat(offerForm.originalPrice) || selectedProd?.price || 0;
-                        const discP = parseFloat(offerForm.discountedPrice) || 0;
-                        const discPct = origP > discP && discP > 0 ? Math.round(((origP - discP) / origP) * 100) : 0;
-                        const countdownPreview = offerForm.endAt ? formatTimeRemaining(new Date(offerForm.endAt).toISOString(), currentTime) : { formatted: '23h 59m 59s' };
+                        const preset = FESTIVAL_BANNER_PRESETS.find((p) => p.id === campaignForm.bannerImageUrl);
+                        const isPreset = !!preset;
+                        const backgroundStyle = isPreset
+                          ? { background: preset.gradient }
+                          : { backgroundImage: `url(${campaignForm.bannerImageUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' };
+
+                        const discVal = parseFloat(campaignForm.discountValue) || 20;
+                        const discLabel = campaignForm.discountType === 'percentage'
+                          ? `${discVal}% OFF`
+                          : `₹${discVal} FLAT OFF`;
 
                         return (
-                          <div className="scheduled-offer-card" style={{ maxWidth: '340px', margin: '0 auto' }}>
-                            <div className="scheduled-offer-image-wrap">
-                              <img src={prodImg} alt="Preview" />
-                              <span className="special-offer-pill">
-                                <Sparkles size={11} /> SPECIAL OFFER
-                              </span>
-                              {discPct > 0 && (
-                                <span className="special-offer-discount-bubble">
-                                  {discPct}% OFF
+                          <div className="festival-campaign-showcase" style={{ margin: 0 }}>
+                            <div className="festival-hero-banner" style={backgroundStyle}>
+                              <div className="festival-hero-overlay" />
+                              <div className="festival-hero-content">
+                                <span className="festival-badge-pill">
+                                  <Sparkles size={12} /> {preset?.tagline || 'SPECIAL FESTIVE PROMOTION'}
                                 </span>
-                              )}
-                            </div>
-
-                            <div className="countdown-timer-box">
-                              <span className="timer-label"><Clock size={12} /> Ends in</span>
-                              <span className="timer-digits">{countdownPreview.formatted}</span>
-                            </div>
-
-                            <div className="scheduled-offer-body">
-                              <div className="scheduled-offer-meta">
-                                <span className="scheduled-offer-category">{selectedProd?.category || 'Special'}</span>
-                                <span style={{ fontSize: '11px', color: '#65715d' }}>{selectedProd?.name || 'Toy name'}</span>
-                              </div>
-
-                              <h3 className="scheduled-offer-title">{offerForm.title || 'Special Promotion'}</h3>
-                              <p className="scheduled-offer-desc">
-                                Save {da(origP - discP)} on {selectedProd?.name || 'this item'}! Regular store price is {da(origP)}.
-                              </p>
-
-                              <div className="scheduled-offer-price-row">
-                                <div className="scheduled-offer-price-block">
-                                  <span className="scheduled-offer-original-price">{da(origP)}</span>
-                                  <strong className="scheduled-offer-deal-price">{da(discP)}</strong>
+                                <h3 className="festival-hero-title">{campaignForm.name || 'Festival Discount'}</h3>
+                                <p className="festival-hero-desc">
+                                  {campaignForm.description || 'Celebrate with exclusive savings across our toy shelf!'}
+                                </p>
+                                <div className="festival-discount-highlight">
+                                  <span>SPECIAL OFFER</span>
+                                  <strong>{discLabel}</strong>
                                 </div>
-                                <span className="scheduled-offer-buy-btn" style={{ pointerEvents: 'none' }}>
-                                  <Tag size={13} /> Grab Offer
-                                </span>
                               </div>
                             </div>
                           </div>
@@ -6954,7 +7631,7 @@ export default function App() {
                         <button
                           type="button"
                           className="primary-btn"
-                          onClick={() => setOfferPreviewModalOpen(false)}
+                          onClick={() => setCampaignPreviewModalOpen(false)}
                         >
                           Close Preview
                         </button>
@@ -6963,49 +7640,57 @@ export default function App() {
                   </div>
                 )}
 
-                {/* FILTER TABS (All Offers, Scheduled, Active, Expired, Cancelled) */}
+                {/* FILTER TABS (All Campaigns, Active, Scheduled, Drafts, Expired, Cancelled) */}
                 <div className="offers-filter-tabs">
                   {(() => {
-                    const allCount = scheduledOffers.filter((o) => !o.deleted).length;
-                    const scheduledCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Scheduled').length;
-                    const activeCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Active').length;
-                    const expiredCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Expired').length;
-                    const cancelledCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Cancelled').length;
+                    const allCount = discountCampaigns.filter((c) => !c.deleted).length;
+                    const activeCount = discountCampaigns.filter((c) => !c.deleted && computeCampaignStatus(c, currentTime) === 'Active').length;
+                    const scheduledCount = discountCampaigns.filter((c) => !c.deleted && computeCampaignStatus(c, currentTime) === 'Scheduled').length;
+                    const draftCount = discountCampaigns.filter((c) => !c.deleted && computeCampaignStatus(c, currentTime) === 'Draft').length;
+                    const expiredCount = discountCampaigns.filter((c) => !c.deleted && computeCampaignStatus(c, currentTime) === 'Expired').length;
+                    const cancelledCount = discountCampaigns.filter((c) => !c.deleted && computeCampaignStatus(c, currentTime) === 'Cancelled').length;
 
                     return (
                       <>
                         <button
                           type="button"
-                          className={`offers-filter-tab-btn ${offerFilterTab === 'all' ? 'active' : ''}`}
-                          onClick={() => setOfferFilterTab('all')}
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'all' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('all')}
                         >
-                          All Offers ({allCount})
+                          All Campaigns ({allCount})
                         </button>
                         <button
                           type="button"
-                          className={`offers-filter-tab-btn ${offerFilterTab === 'scheduled' ? 'active' : ''}`}
-                          onClick={() => setOfferFilterTab('scheduled')}
-                        >
-                          <Calendar size={13} /> Scheduled ({scheduledCount})
-                        </button>
-                        <button
-                          type="button"
-                          className={`offers-filter-tab-btn ${offerFilterTab === 'active' ? 'active' : ''}`}
-                          onClick={() => setOfferFilterTab('active')}
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'active' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('active')}
                         >
                           <Sparkles size={13} /> Active ({activeCount})
                         </button>
                         <button
                           type="button"
-                          className={`offers-filter-tab-btn ${offerFilterTab === 'expired' ? 'active' : ''}`}
-                          onClick={() => setOfferFilterTab('expired')}
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'scheduled' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('scheduled')}
+                        >
+                          <Calendar size={13} /> Scheduled ({scheduledCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'drafts' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('drafts')}
+                        >
+                          <FileText size={13} /> Drafts ({draftCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'expired' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('expired')}
                         >
                           <Clock size={13} /> Expired ({expiredCount})
                         </button>
                         <button
                           type="button"
-                          className={`offers-filter-tab-btn ${offerFilterTab === 'cancelled' ? 'active' : ''}`}
-                          onClick={() => setOfferFilterTab('cancelled')}
+                          className={`offers-filter-tab-btn ${campaignFilterTab === 'cancelled' ? 'active' : ''}`}
+                          onClick={() => setCampaignFilterTab('cancelled')}
                         >
                           Cancelled ({cancelledCount})
                         </button>
@@ -7014,38 +7699,39 @@ export default function App() {
                   })()}
                 </div>
 
-                {/* OFFERS CARDS LIST */}
+                {/* CAMPAIGNS CARDS LIST */}
                 {(() => {
-                  const visibleOffers = scheduledOffers.filter((o) => {
-                    if (o.deleted) return false;
-                    const computed = computeOfferStatus(o, currentTime);
-                    if (offerFilterTab === 'all') return true;
-                    if (offerFilterTab === 'scheduled') return computed === 'Scheduled';
-                    if (offerFilterTab === 'active') return computed === 'Active';
-                    if (offerFilterTab === 'expired') return computed === 'Expired';
-                    if (offerFilterTab === 'cancelled') return computed === 'Cancelled';
+                  const visibleCampaigns = discountCampaigns.filter((c) => {
+                    if (c.deleted) return false;
+                    const computed = computeCampaignStatus(c, currentTime);
+                    if (campaignFilterTab === 'all') return true;
+                    if (campaignFilterTab === 'active') return computed === 'Active';
+                    if (campaignFilterTab === 'scheduled') return computed === 'Scheduled';
+                    if (campaignFilterTab === 'drafts') return computed === 'Draft';
+                    if (campaignFilterTab === 'expired') return computed === 'Expired';
+                    if (campaignFilterTab === 'cancelled') return computed === 'Cancelled';
                     return true;
                   });
 
-                  if (visibleOffers.length === 0) {
+                  if (visibleCampaigns.length === 0) {
                     return (
                       <div className="empty-state compact" style={{ padding: '40px 20px', textAlign: 'center' }}>
-                        <div className="empty-icon" style={{ fontSize: '36px', marginBottom: '10px' }}>🏷️</div>
-                        <h4>No offers in this section</h4>
+                        <div className="empty-icon" style={{ fontSize: '36px', marginBottom: '10px' }}>🎉</div>
+                        <h4>No campaigns in this section</h4>
                         <p style={{ margin: '6px 0 16px 0', color: '#798273', fontSize: '13px' }}>
-                          {offerFilterTab === 'all'
-                            ? 'No scheduled offers created yet. Tap "Schedule New Offer" to create your first promotion.'
-                            : `There are currently no ${offerFilterTab} offers.`}
+                          {campaignFilterTab === 'all'
+                            ? 'No festival campaigns created yet. Tap "Create Festival Campaign" to create your first promotion.'
+                            : `There are currently no ${campaignFilterTab} campaigns.`}
                         </p>
                         <button
                           type="button"
                           className="secondary-btn"
                           onClick={() => {
-                            setOfferFilterTab('all');
-                            setIsAddingOffer(true);
+                            setCampaignFilterTab('all');
+                            setIsAddingCampaign(true);
                           }}
                         >
-                          + Schedule an Offer
+                          + Create Festival Campaign
                         </button>
                       </div>
                     );
@@ -7053,32 +7739,44 @@ export default function App() {
 
                   return (
                     <div className="offers-cards-list">
-                      {visibleOffers.map((offer) => {
-                        const computedStatus = computeOfferStatus(offer, currentTime);
-                        const discountPct =
-                          offer.originalPrice > offer.discountedPrice
-                            ? Math.round(((offer.originalPrice - offer.discountedPrice) / offer.originalPrice) * 100)
-                            : 0;
-                        const countdown = formatTimeRemaining(offer.endAt, currentTime);
+                      {visibleCampaigns.map((camp) => {
+                        const computedStatus = computeCampaignStatus(camp, currentTime);
+                        const preset = FESTIVAL_BANNER_PRESETS.find((p) => p.id === camp.bannerImageUrl);
+                        const countdown = formatTimeRemaining(camp.endAt, currentTime);
+
+                        // Calculate product scope count
+                        let matchingCount = 0;
+                        if (camp.targetScope === 'all') {
+                          matchingCount = products.filter((p) => p.available !== false).length;
+                        } else if (camp.targetScope === 'categories') {
+                          matchingCount = products.filter(
+                            (p) => p.available !== false && camp.targetCategories?.includes(p.category || 'General toys')
+                          ).length;
+                        } else {
+                          matchingCount = products.filter(
+                            (p) => p.available !== false && camp.targetProductIds?.includes(p.id)
+                          ).length;
+                        }
 
                         return (
-                          <div className="owner-offer-card" key={offer.id}>
-                            <div className="owner-offer-card-top">
-                              <div className="owner-offer-thumb">
-                                <img
-                                  src={offer.productImageUrl || '/toys/toy-40ba4ba9-1.jpg'}
-                                  alt={offer.title}
-                                />
-                              </div>
-
-                              <div className="owner-offer-info">
-                                <h4 className="owner-offer-title" title={offer.title}>
-                                  {offer.title}
+                          <div className="owner-campaign-card" key={camp.id}>
+                            <div className="owner-campaign-banner-preview" style={{ background: preset?.gradient || '#374151' }}>
+                              <div style={{ position: 'relative', zIndex: 1, padding: '12px', color: '#ffffff' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', opacity: 0.9 }}>
+                                  {preset?.tagline || 'FESTIVAL SALE'}
+                                </span>
+                                <h4 style={{ margin: '4px 0 2px 0', fontSize: '16px', fontWeight: 800, color: '#ffffff' }}>
+                                  {camp.name}
                                 </h4>
-                                <p className="owner-offer-product-name">
-                                  {offer.productName} · <span style={{ color: '#526639', fontWeight: 600 }}>{offer.productCategory || 'Toy'}</span>
-                                </p>
-                                <div style={{ marginTop: '6px' }}>
+                                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '12px', fontWeight: 800, background: 'rgba(255,255,255,0.22)', padding: '2px 8px', borderRadius: '999px', marginTop: '4px' }}>
+                                  <Tag size={11} /> {camp.discountType === 'percentage' ? `${camp.discountValue}% OFF` : `₹${camp.discountValue} FLAT OFF`}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div style={{ padding: '16px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', marginBottom: '10px' }}>
+                                <div>
                                   {computedStatus === 'Active' && (
                                     <span className="offer-status-badge active">
                                       <span className="blinking-green-dot-inline" /> LIVE NOW
@@ -7087,6 +7785,11 @@ export default function App() {
                                   {computedStatus === 'Scheduled' && (
                                     <span className="offer-status-badge scheduled">
                                       <Calendar size={12} /> SCHEDULED
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Draft' && (
+                                    <span className="offer-status-badge draft">
+                                      📝 DRAFT
                                     </span>
                                   )}
                                   {computedStatus === 'Expired' && (
@@ -7099,88 +7802,86 @@ export default function App() {
                                       ✕ CANCELLED
                                     </span>
                                   )}
-                                  {computedStatus === 'Draft' && (
-                                    <span className="offer-status-badge draft">
-                                      📝 DRAFT
-                                    </span>
-                                  )}
-                                  {computedStatus === 'Completed' && (
-                                    <span className="offer-status-badge completed">
-                                      ✓ CLAIMED & SOLD
-                                    </span>
-                                  )}
+                                </div>
+
+                                <span style={{ fontSize: '12px', color: '#526639', fontWeight: 700 }}>
+                                  {camp.targetScope === 'all'
+                                    ? `All toys (${matchingCount})`
+                                    : camp.targetScope === 'categories'
+                                    ? `${camp.targetCategories?.length || 0} categories (${matchingCount} toys)`
+                                    : `${matchingCount} selected toys`}
+                                </span>
+                              </div>
+
+                              {camp.description && (
+                                <p style={{ fontSize: '13px', color: '#555d50', margin: '0 0 12px 0', lineHeight: 1.4 }}>
+                                  {camp.description}
+                                </p>
+                              )}
+
+                              <div className="owner-offer-details-grid" style={{ marginBottom: '12px' }}>
+                                <div>
+                                  <b>Start (IST)</b>
+                                  <span title={camp.startAt}>{formatInIST(camp.startAt)}</span>
+                                </div>
+                                <div>
+                                  <b>End (IST)</b>
+                                  <span title={camp.endAt}>{formatInIST(camp.endAt)}</span>
+                                </div>
+                                <div>
+                                  <b>Campaign Orders</b>
+                                  <span style={{ fontWeight: 700, color: '#15803d' }}>
+                                    {camp.totalOrdersCount || 0} orders
+                                  </span>
+                                </div>
+                                <div>
+                                  <b>Revenue Generated</b>
+                                  <span style={{ fontWeight: 700, color: '#15803d' }}>
+                                    {da(camp.totalRevenue || 0)}
+                                  </span>
                                 </div>
                               </div>
-                            </div>
 
-                            <div className="owner-offer-details-grid">
-                              <div>
-                                <b>Store Price</b>
-                                <span style={{ textDecoration: 'line-through', color: '#88927e' }}>
-                                  {da(offer.originalPrice)}
-                                </span>
-                              </div>
-                              <div>
-                                <b>Offer Price</b>
-                                <span style={{ color: '#15803d', fontWeight: 800 }}>
-                                  {da(offer.discountedPrice)} ({discountPct}% OFF)
-                                </span>
-                              </div>
-                              <div>
-                                <b>Start (IST)</b>
-                                <span title={offer.startAt}>{formatInIST(offer.startAt)}</span>
-                              </div>
-                              <div>
-                                <b>End (IST)</b>
-                                <span title={offer.endAt}>{formatInIST(offer.endAt)}</span>
-                              </div>
-                            </div>
+                              {computedStatus === 'Active' && (
+                                <div className="countdown-timer-box" style={{ borderRadius: '8px', marginBottom: '12px' }}>
+                                  <span className="timer-label"><Clock size={12} /> Auto-expires in</span>
+                                  <span className="timer-digits">{countdown.formatted}</span>
+                                </div>
+                              )}
 
-                            {computedStatus === 'Active' && (
-                              <div className="countdown-timer-box" style={{ borderRadius: '8px' }}>
-                                <span className="timer-label"><Clock size={12} /> Auto-expires in</span>
-                                <span className="timer-digits">{countdown.formatted}</span>
-                              </div>
-                            )}
-
-                            {offer.claimedByCustomer && (
-                              <div style={{ fontSize: '11px', color: '#4b5563', background: '#f5f3ff', padding: '6px 10px', borderRadius: '6px' }}>
-                                <b>Claimed by:</b> {offer.claimedByCustomer}
-                              </div>
-                            )}
-
-                            <div className="owner-offer-actions">
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={() => startEditOffer(offer)}
-                                title="Edit this offer"
-                                style={{ padding: '6px 12px', fontSize: '11px' }}
-                              >
-                                <Pencil size={13} /> Edit
-                              </button>
-
-                              {!['Cancelled', 'Expired', 'Completed'].includes(computedStatus) && (
+                              <div className="owner-offer-actions">
                                 <button
                                   type="button"
                                   className="secondary-btn"
-                                  onClick={() => void handleCancelScheduledOffer(offer.id)}
-                                  title="Cancel this offer"
-                                  style={{ padding: '6px 12px', fontSize: '11px', color: '#b91c1c' }}
+                                  onClick={() => startEditCampaign(camp)}
+                                  title="Edit campaign"
+                                  style={{ padding: '6px 12px', fontSize: '11px' }}
                                 >
-                                  Cancel offer
+                                  <Pencil size={13} /> Edit
                                 </button>
-                              )}
 
-                              <button
-                                type="button"
-                                className="icon-btn danger"
-                                onClick={() => void handleDeleteScheduledOffer(offer.id)}
-                                title="Delete offer permanently"
-                                aria-label="Delete offer"
-                              >
-                                <Trash2 size={15} />
-                              </button>
+                                {!['Cancelled', 'Expired'].includes(computedStatus) && (
+                                  <button
+                                    type="button"
+                                    className="secondary-btn"
+                                    onClick={() => void handleCancelDiscountCampaign(camp.id)}
+                                    title="Pause / Cancel campaign"
+                                    style={{ padding: '6px 12px', fontSize: '11px', color: '#b91c1c' }}
+                                  >
+                                    Pause / Cancel
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  className="icon-btn danger"
+                                  onClick={() => void handleDeleteDiscountCampaign(camp.id)}
+                                  title="Delete campaign"
+                                  aria-label="Delete campaign"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );
