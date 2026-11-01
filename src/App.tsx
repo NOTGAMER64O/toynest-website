@@ -3035,7 +3035,7 @@ export default function App() {
                 className="owner-dots-btn"
                 type="button"
                 onClick={() => setIsOwnerMenuOpen(true)}
-                title="Owner options menu (Shop Sections, Payment QR, Manage Colours)"
+                title="Owner options menu (Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
                 aria-label="Owner options menu"
               >
                 <MoreVertical size={20} />
@@ -3192,10 +3192,70 @@ export default function App() {
             </div>
 
             <div className="owner-panel-content">
+              <span className="owner-panel-section-label">PROMOTIONS & OFFERS</span>
+
+              <div className="owner-panel-items">
+                {/* 1. Scheduled Offers */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'scheduledOffers' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('scheduledOffers');
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon" style={{ backgroundColor: '#fef3c7', color: '#b45309' }}>
+                    <Tag size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Scheduled Offers</strong>
+                    <span>Timed discounts, flash sales & countdowns</span>
+                  </div>
+                  {ownerTab === 'scheduledOffers' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {activeScheduledOffers.length > 0
+                        ? `${activeScheduledOffers.length} live`
+                        : `${scheduledOffers.filter((o) => !o.deleted).length} total`}
+                    </span>
+                  )}
+                </button>
+
+                {/* 2. Rescue Deals */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'rescueDeals' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('rescueDeals');
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon" style={{ backgroundColor: '#ffedd5', color: '#c2410c' }}>
+                    <Flame size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Rescue Deals</strong>
+                    <span>Single-stock clearance & bargain shelf</span>
+                  </div>
+                  {ownerTab === 'rescueDeals' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {rescueDeals.filter((d) => !d.claimed && !d.deleted).length} available
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              <div className="owner-panel-divider" />
+
               <span className="owner-panel-section-label">STORE CONFIGURATION</span>
 
               <div className="owner-panel-items">
-                {/* 1. Shop Sections */}
+                {/* 3. Shop Sections */}
                 <button
                   type="button"
                   className={`owner-panel-item ${ownerTab === 'sections' ? 'active' : ''}`}
@@ -3228,7 +3288,7 @@ export default function App() {
                   )}
                 </button>
 
-                {/* 2. Payment QR */}
+                {/* 4. Payment QR */}
                 <button
                   type="button"
                   className={`owner-panel-item ${ownerTab === 'payment' ? 'active' : ''}`}
@@ -3255,7 +3315,7 @@ export default function App() {
                   )}
                 </button>
 
-                {/* 3. Manage Colours */}
+                {/* 5. Manage Colours */}
                 <button
                   type="button"
                   className={`owner-panel-item ${ownerTab === 'colours' ? 'active' : ''}`}
@@ -3328,26 +3388,6 @@ export default function App() {
                   }}
                 >
                   <MessageSquare size={15} /> Suggestions ({ownerSuggestions.length})
-                </button>
-                <button
-                  type="button"
-                  className={`owner-quick-btn ${ownerTab === 'rescueDeals' ? 'active' : ''}`}
-                  onClick={() => {
-                    setOwnerTab('rescueDeals');
-                    setIsOwnerMenuOpen(false);
-                  }}
-                >
-                  <Flame size={15} /> Rescue Deals ({rescueDeals.length})
-                </button>
-                <button
-                  type="button"
-                  className={`owner-quick-btn ${ownerTab === 'scheduledOffers' ? 'active' : ''}`}
-                  onClick={() => {
-                    setOwnerTab('scheduledOffers');
-                    setIsOwnerMenuOpen(false);
-                  }}
-                >
-                  <Tag size={15} /> Scheduled Offers ({scheduledOffers.filter((o) => !o.deleted).length})
                 </button>
               </div>
             </div>
@@ -4780,7 +4820,7 @@ export default function App() {
                   className="owner-dots-btn-inline"
                   type="button"
                   onClick={() => setIsOwnerMenuOpen(true)}
-                  title="Owner options (Shop Sections, Payment QR, Manage Colours)"
+                  title="Owner options (Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
                   aria-label="Owner options menu"
                 >
                   <MoreVertical size={19} />
@@ -4888,23 +4928,7 @@ export default function App() {
               >
                 Suggestions ({ownerSuggestions.length})
               </button>
-              <button
-                className={ownerTab === 'rescueDeals' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('rescueDeals');
-                }}
-              >
-                ⚡ Rescue Deals ({rescueDeals.length})
-              </button>
-              <button
-                className={ownerTab === 'scheduledOffers' ? 'active' : ''}
-                onClick={() => {
-                  setOwnerTab('scheduledOffers');
-                }}
-              >
-                🏷️ Scheduled Offers ({scheduledOffers.filter((o) => !o.deleted).length})
-              </button>
-              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours') && (
+              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -4914,6 +4938,8 @@ export default function App() {
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
+                  {ownerTab === 'scheduledOffers' && `🏷️ Scheduled Offers (${scheduledOffers.filter((o) => !o.deleted).length})`}
+                  {ownerTab === 'rescueDeals' && `⚡ Rescue Deals (${rescueDeals.filter((d) => !d.claimed && !d.deleted).length})`}
                 </button>
               )}
             </div>
@@ -6223,17 +6249,27 @@ export default function App() {
                       Create and monitor single-quantity clearance offers. When ordered by a customer, the deal is automatically marked sold and removed from public view across all devices.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="primary-btn"
-                    onClick={() => {
-                      setIsAddingDeal(!isAddingDeal);
-                      setErrorMessage('');
-                      setSuccessMessage('');
-                    }}
-                  >
-                    {isAddingDeal ? '✕ Close Form' : '➕ Add Rescue Deal'}
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => setOwnerTab('products')}
+                      title="Return to products"
+                    >
+                      ← Back to Products
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      onClick={() => {
+                        setIsAddingDeal(!isAddingDeal);
+                        setErrorMessage('');
+                        setSuccessMessage('');
+                      }}
+                    >
+                      {isAddingDeal ? '✕ Close Form' : '➕ Add Rescue Deal'}
+                    </button>
+                  </div>
                 </div>
 
                 {/* ADD NEW RESCUE DEAL FORM */}
@@ -6624,32 +6660,42 @@ export default function App() {
                       Schedule promotional discounts with automatic activation and expiration in India Standard Time (IST). Offers activate and expire automatically across all customer devices even when this dashboard is closed.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="primary-btn"
-                    onClick={() => {
-                      if (isAddingOffer) {
-                        setIsAddingOffer(false);
-                        setEditingOfferId(null);
-                      } else {
-                        setIsAddingOffer(true);
-                        setEditingOfferId(null);
-                        setOfferForm({
-                          productId: products.find((p) => p.available !== false)?.id || '',
-                          title: '',
-                          originalPrice: products.find((p) => p.available !== false)?.price ? String(products.find((p) => p.available !== false)!.price) : '',
-                          discountedPrice: '',
-                          startAt: toDatetimeLocalString(new Date()),
-                          endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
-                          isDraft: false,
-                        });
-                      }
-                      setErrorMessage('');
-                      setSuccessMessage('');
-                    }}
-                  >
-                    {isAddingOffer ? '✕ Close Form' : '➕ Schedule New Offer'}
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => setOwnerTab('products')}
+                      title="Return to products"
+                    >
+                      ← Back to Products
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      onClick={() => {
+                        if (isAddingOffer) {
+                          setIsAddingOffer(false);
+                          setEditingOfferId(null);
+                        } else {
+                          setIsAddingOffer(true);
+                          setEditingOfferId(null);
+                          setOfferForm({
+                            productId: products.find((p) => p.available !== false)?.id || '',
+                            title: '',
+                            originalPrice: products.find((p) => p.available !== false)?.price ? String(products.find((p) => p.available !== false)!.price) : '',
+                            discountedPrice: '',
+                            startAt: toDatetimeLocalString(new Date()),
+                            endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
+                            isDraft: false,
+                          });
+                        }
+                        setErrorMessage('');
+                        setSuccessMessage('');
+                      }}
+                    >
+                      {isAddingOffer ? '✕ Close Form' : '➕ Schedule New Offer'}
+                    </button>
+                  </div>
                 </div>
 
                 {/* CREATE / EDIT SCHEDULED OFFER FORM */}
