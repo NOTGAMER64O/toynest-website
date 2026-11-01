@@ -40,6 +40,8 @@ export interface Order {
   isRescueDeal?: boolean;
   rescueDealId?: string;
   rescueCondition?: string;
+  isScheduledOffer?: boolean;
+  scheduledOfferId?: string;
 }
 
 export interface Suggestion {
@@ -66,6 +68,106 @@ export interface RescueDeal {
   claimedByCustomer?: string;
   deleted?: boolean;
   createdAt: string;
+}
+
+export interface ScheduledOffer {
+  id: string;
+  productId: string;
+  productName: string;
+  productImageUrl?: string;
+  productCategory?: string;
+  title: string;
+  originalPrice: number;
+  discountedPrice: number;
+  startAt: string; // ISO 8601 string
+  endAt: string;   // ISO 8601 string
+  status: 'Scheduled' | 'Active' | 'Expired' | 'Cancelled' | 'Draft' | 'Completed';
+  isDraft?: boolean;
+  cancelled?: boolean;
+  claimed?: boolean;
+  claimedAt?: string;
+  claimedByOrder?: string;
+  claimedByCustomer?: string;
+  deleted?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+}
+
+export type OfferComputedStatus = 'Scheduled' | 'Active' | 'Expired' | 'Cancelled' | 'Draft' | 'Completed';
+
+/**
+ * Computes offer status dynamically based on current timestamp (default Date.now()).
+ * Ensures offers activate and expire automatically without dashboard dependency.
+ */
+export function computeOfferStatus(
+  offer: ScheduledOffer,
+  nowMs: number = Date.now()
+): OfferComputedStatus {
+  if (offer.deleted) return 'Cancelled';
+  if (offer.isDraft) return 'Draft';
+  if (offer.cancelled || offer.status === 'Cancelled') return 'Cancelled';
+  if (offer.claimed || offer.status === 'Completed') return 'Completed';
+
+  const startMs = new Date(offer.startAt).getTime();
+  const endMs = new Date(offer.endAt).getTime();
+
+  if (isNaN(startMs) || isNaN(endMs)) return 'Scheduled';
+  if (nowMs < startMs) return 'Scheduled';
+  if (nowMs >= startMs && nowMs <= endMs) return 'Active';
+  return 'Expired';
+}
+
+/**
+ * Formats date/time in India Standard Time (Asia/Kolkata).
+ */
+export function formatInIST(dateStrOrMs: string | number): string {
+  try {
+    const d = new Date(dateStrOrMs);
+    if (isNaN(d.getTime())) return String(dateStrOrMs);
+    return new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    }).format(d) + ' IST';
+  } catch {
+    return String(dateStrOrMs);
+  }
+}
+
+/**
+ * Returns formatted countdown remaining until endAt in Asia/Kolkata context.
+ */
+export function formatTimeRemaining(endAt: string, nowMs: number = Date.now()): {
+  formatted: string;
+  isExpired: boolean;
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+} {
+  const endMs = new Date(endAt).getTime();
+  const diff = endMs - nowMs;
+  if (diff <= 0 || isNaN(diff)) {
+    return { formatted: '00h 00m 00s', isExpired: true, days: 0, hours: 0, minutes: 0, seconds: 0 };
+  }
+  const totalSeconds = Math.floor(diff / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  let formatted = '';
+  if (days > 0) {
+    formatted = `${days}d ${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  } else {
+    formatted = `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  return { formatted, isExpired: false, days, hours, minutes, seconds };
 }
 
 export interface MoneyAdjustmentItem {

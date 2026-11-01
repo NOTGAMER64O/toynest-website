@@ -30,6 +30,8 @@ import {
   Tag,
   Sparkles,
   AlertCircle,
+  Calendar,
+  Clock,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -198,6 +200,8 @@ import {
   type Order,
   type Suggestion,
   type RescueDeal,
+  type ScheduledOffer,
+  type OfferComputedStatus,
   type MoneyAdjustmentItem,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
@@ -205,6 +209,9 @@ import {
   saveStoredMoneyAdjustment,
   getStoredMoneyAdjustmentHistory,
   saveStoredMoneyAdjustmentHistory,
+  computeOfferStatus,
+  formatInIST,
+  formatTimeRemaining,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -236,6 +243,12 @@ import {
   saveRescueDealToCloud,
   deleteRescueDealFromCloud,
   claimRescueDealInCloud,
+  fetchScheduledOffersFromCloud,
+  subscribeToScheduledOffers,
+  saveScheduledOfferToCloud,
+  deleteScheduledOfferFromCloud,
+  cancelScheduledOfferInCloud,
+  claimScheduledOfferInCloud,
 } from './firebase';
 
 function getStoredColours(): string[] {
@@ -253,6 +266,37 @@ function saveStoredColours(colours: string[]) {
   try {
     localStorage.setItem('playnix_colours', JSON.stringify(colours));
   } catch {}
+}
+
+function getStoredScheduledOffers(): ScheduledOffer[] {
+  try {
+    const raw = localStorage.getItem('playnix_scheduled_offers');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function saveStoredScheduledOffers(offers: ScheduledOffer[]) {
+  try {
+    localStorage.setItem('playnix_scheduled_offers', JSON.stringify(offers));
+  } catch {}
+}
+
+/**
+ * Format a Date object to YYYY-MM-DDTHH:mm for HTML datetime-local inputs.
+ * Uses local browser time which aligns with user's Indian Standard Time input.
+ */
+function toDatetimeLocalString(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 const COLOR_NAME_MAP: Record<string, string> = {
@@ -731,7 +775,7 @@ export default function App() {
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals' | 'scheduledOffers'
   >('products');
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
   const [dealSaving, setDealSaving] = useState<boolean>(false);
@@ -746,6 +790,43 @@ export default function App() {
     description: '',
     imageUrl: '',
   });
+
+  // Scheduled Offers System States
+  const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
+  const [scheduledOffers, setScheduledOffers] = useState<ScheduledOffer[]>(() => getStoredScheduledOffers());
+  const [selectedOfferForBuy, setSelectedOfferForBuy] = useState<ScheduledOffer | null>(null);
+  const [offerFilterTab, setOfferFilterTab] = useState<'all' | 'scheduled' | 'active' | 'expired' | 'cancelled'>('all');
+  const [isAddingOffer, setIsAddingOffer] = useState<boolean>(false);
+  const [editingOfferId, setEditingOfferId] = useState<string | null>(null);
+  const [offerSaving, setOfferSaving] = useState<boolean>(false);
+  const [offerPreviewModalOpen, setOfferPreviewModalOpen] = useState<boolean>(false);
+  const [offerForm, setOfferForm] = useState({
+    productId: '',
+    title: '',
+    originalPrice: '',
+    discountedPrice: '',
+    startAt: toDatetimeLocalString(new Date()),
+    endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
+    isDraft: false,
+  });
+
+  // Active scheduled offers for customer storefront (calculated with reliable currentTime)
+  const activeScheduledOffers = useMemo(() => {
+    return scheduledOffers.filter(
+      (o) => !o.deleted && !o.claimed && computeOfferStatus(o, currentTime) === 'Active'
+    );
+  }, [scheduledOffers, currentTime]);
+
+  // Lookup map for quick catalog badge/price overlay
+  const activeOffersByProductId = useMemo(() => {
+    const map = new Map<string, ScheduledOffer>();
+    for (const offer of activeScheduledOffers) {
+      if (offer.productId && !map.has(offer.productId)) {
+        map.set(offer.productId, offer);
+      }
+    }
+    return map;
+  }, [activeScheduledOffers]);
 
   const availableRescueDeals = useMemo(() => {
     return rescueDeals.filter((d) => !d.claimed && d.status !== 'claimed');
@@ -1327,10 +1408,35 @@ export default function App() {
       }).catch(() => {});
     }
 
+    let unsubOffers = () => {};
+    try {
+      unsubOffers = subscribeToScheduledOffers((cloudOffers) => {
+        if (Array.isArray(cloudOffers)) {
+          setScheduledOffers(cloudOffers);
+          saveStoredScheduledOffers(cloudOffers);
+        }
+      });
+    } catch (err) {
+      console.warn('Real-time scheduled offers subscription error:', err);
+      fetchScheduledOffersFromCloud().then((offers) => {
+        if (Array.isArray(offers)) {
+          setScheduledOffers(offers);
+          saveStoredScheduledOffers(offers);
+        }
+      }).catch(() => {});
+    }
+
+    // 1-second live clock for offer activation, countdowns, and instant expiration without page reload
+    const clockTimer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+
     return () => {
       unsubProducts();
       unsubColours();
       unsubDeals();
+      unsubOffers();
+      clearInterval(clockTimer);
     };
   }, []);
 
@@ -2174,11 +2280,219 @@ export default function App() {
     }
   };
 
+  // ----------------- SCHEDULED OFFERS OWNER HANDLERS -----------------
+  const checkOfferOverlap = (
+    productId: string,
+    startAtIso: string,
+    endAtIso: string,
+    excludeOfferId?: string
+  ): boolean => {
+    const newStart = new Date(startAtIso).getTime();
+    const newEnd = new Date(endAtIso).getTime();
+
+    return scheduledOffers.some((o) => {
+      if (o.id === excludeOfferId) return false;
+      if (o.deleted || o.cancelled || o.claimed || o.isDraft) return false;
+      if (o.productId !== productId) return false;
+
+      const existingStart = new Date(o.startAt).getTime();
+      const existingEnd = new Date(o.endAt).getTime();
+
+      // Check if time intervals overlap
+      return Math.max(newStart, existingStart) < Math.min(newEnd, existingEnd);
+    });
+  };
+
+  const handleSaveScheduledOffer = async (asDraft: boolean = false) => {
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    if (!offerForm.productId) {
+      setErrorMessage('Please select a product from the list for this scheduled offer.');
+      return;
+    }
+
+    const selectedProd = products.find((p) => p.id === offerForm.productId);
+    if (!selectedProd) {
+      setErrorMessage('Selected product could not be found.');
+      return;
+    }
+
+    const title = offerForm.title.trim() || `${selectedProd.name} Special Offer`;
+    const origPrice = parseFloat(offerForm.originalPrice) || selectedProd.price;
+    const discPrice = parseFloat(offerForm.discountedPrice);
+
+    if (isNaN(discPrice) || discPrice <= 0) {
+      setErrorMessage('Please enter a valid discounted price greater than ₹0.');
+      return;
+    }
+
+    if (discPrice >= origPrice) {
+      setErrorMessage(`Discounted price (₹${discPrice}) must be lower than the regular price (₹${origPrice}).`);
+      return;
+    }
+
+    if (!offerForm.startAt || !offerForm.endAt) {
+      setErrorMessage('Please select both a start date/time and an end date/time.');
+      return;
+    }
+
+    const startDate = new Date(offerForm.startAt);
+    const endDate = new Date(offerForm.endAt);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      setErrorMessage('Invalid start or end date/time format.');
+      return;
+    }
+
+    if (endDate.getTime() <= startDate.getTime()) {
+      setErrorMessage('Offer end date and time must be after the start date and time.');
+      return;
+    }
+
+    const startAtIso = startDate.toISOString();
+    const endAtIso = endDate.toISOString();
+
+    // Prevent overlapping active offers for the same product
+    if (!asDraft && checkOfferOverlap(selectedProd.id, startAtIso, endAtIso, editingOfferId || undefined)) {
+      setErrorMessage(
+        `Another offer is already scheduled for "${selectedProd.name}" during this timeframe. Please choose non-overlapping dates or edit the existing offer.`
+      );
+      return;
+    }
+
+    setOfferSaving(true);
+
+    const offerId = editingOfferId || `offer_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const productImg = (selectedProd.imageUrls && selectedProd.imageUrls[0]) || selectedProd.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+
+    const offerToSave: ScheduledOffer = {
+      id: offerId,
+      productId: selectedProd.id,
+      productName: selectedProd.name,
+      productImageUrl: productImg,
+      productCategory: selectedProd.category || 'Other',
+      title,
+      originalPrice: origPrice,
+      discountedPrice: discPrice,
+      startAt: startAtIso,
+      endAt: endAtIso,
+      status: asDraft ? 'Draft' : 'Scheduled',
+      isDraft: asDraft,
+      cancelled: false,
+      claimed: false,
+      deleted: false,
+      createdAt: editingOfferId
+        ? (scheduledOffers.find((o) => o.id === editingOfferId)?.createdAt || new Date().toISOString())
+        : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: 'Owner',
+    };
+
+    // Calculate initial dynamic status
+    offerToSave.status = computeOfferStatus(offerToSave, Date.now());
+
+    try {
+      await saveScheduledOfferToCloud(offerToSave);
+
+      setScheduledOffers((prev) => {
+        const idx = prev.findIndex((o) => o.id === offerId);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = offerToSave;
+          saveStoredScheduledOffers(next);
+          return next;
+        }
+        const next = [offerToSave, ...prev];
+        saveStoredScheduledOffers(next);
+        return next;
+      });
+
+      setSuccessMessage(
+        asDraft
+          ? `Offer for "${selectedProd.name}" saved as draft.`
+          : editingOfferId
+          ? `Offer "${title}" updated successfully.`
+          : `Offer "${title}" scheduled successfully!`
+      );
+
+      // Reset form
+      setIsAddingOffer(false);
+      setEditingOfferId(null);
+      setOfferPreviewModalOpen(false);
+      setOfferForm({
+        productId: '',
+        title: '',
+        originalPrice: '',
+        discountedPrice: '',
+        startAt: toDatetimeLocalString(new Date()),
+        endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
+        isDraft: false,
+      });
+    } catch (err: any) {
+      console.error('Error saving scheduled offer:', err);
+      setErrorMessage(err?.message || 'Could not save scheduled offer to cloud.');
+    } finally {
+      setOfferSaving(false);
+    }
+  };
+
+  const handleCancelScheduledOffer = async (offerId: string) => {
+    if (!window.confirm('Cancel this scheduled offer? It will immediately stop and be marked as cancelled.')) {
+      return;
+    }
+    setErrorMessage('');
+    try {
+      await cancelScheduledOfferInCloud(offerId);
+      setScheduledOffers((prev) =>
+        prev.map((o) => (o.id === offerId ? { ...o, cancelled: true, status: 'Cancelled' } : o))
+      );
+      setSuccessMessage('Offer was cancelled.');
+    } catch (err) {
+      console.error('Could not cancel offer:', err);
+      setErrorMessage('Failed to cancel offer.');
+    }
+  };
+
+  const handleDeleteScheduledOffer = async (offerId: string) => {
+    if (!window.confirm('Permanently delete this scheduled offer? This cannot be undone.')) {
+      return;
+    }
+    setErrorMessage('');
+    try {
+      await deleteScheduledOfferFromCloud(offerId);
+      setScheduledOffers((prev) => prev.filter((o) => o.id !== offerId));
+      setSuccessMessage('Offer deleted successfully.');
+    } catch (err) {
+      console.error('Could not delete offer:', err);
+      setErrorMessage('Failed to delete offer.');
+    }
+  };
+
+  const startEditOffer = (offer: ScheduledOffer) => {
+    setEditingOfferId(offer.id);
+    const startDate = new Date(offer.startAt);
+    const endDate = new Date(offer.endAt);
+
+    setOfferForm({
+      productId: offer.productId,
+      title: offer.title,
+      originalPrice: String(offer.originalPrice),
+      discountedPrice: String(offer.discountedPrice),
+      startAt: toDatetimeLocalString(isNaN(startDate.getTime()) ? new Date() : startDate),
+      endAt: toDatetimeLocalString(isNaN(endDate.getTime()) ? new Date(Date.now() + 24 * 3600 * 1000) : endDate),
+      isDraft: offer.isDraft === true,
+    });
+    setIsAddingOffer(true);
+    setOfferPreviewModalOpen(false);
+    window.scrollTo({ top: 300, behavior: 'smooth' });
+  };
+
   const handlePlaceOrder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setErrorMessage('');
 
-    const targetItem = selectedDealForBuy || selectedProductForBuy;
+    const targetItem = selectedDealForBuy || selectedOfferForBuy || selectedProductForBuy;
     if (!targetItem || !checkoutForm.name.trim()) {
       setErrorMessage('Please enter your name.');
       return;
@@ -2192,6 +2506,18 @@ export default function App() {
       }
     }
 
+    // If checkout is for a Scheduled Offer, verify it's not claimed or expired
+    if (selectedOfferForBuy) {
+      if (selectedOfferForBuy.claimed || selectedOfferForBuy.status === 'Completed') {
+        setErrorMessage('This Special Offer is no longer available as it has already been claimed.');
+        return;
+      }
+      if (computeOfferStatus(selectedOfferForBuy, Date.now()) !== 'Active') {
+        setErrorMessage('This Special Offer is no longer active.');
+        return;
+      }
+    }
+
     let validatedQuantity = 1;
     let unitPrice = 0;
     let totalPrice = 0;
@@ -2200,6 +2526,10 @@ export default function App() {
       validatedQuantity = 1; // Strict single-quantity offer
       unitPrice = selectedDealForBuy.dealPrice;
       totalPrice = selectedDealForBuy.dealPrice;
+    } else if (selectedOfferForBuy) {
+      validatedQuantity = 1; // Limited scheduled offer
+      unitPrice = selectedOfferForBuy.discountedPrice;
+      totalPrice = selectedOfferForBuy.discountedPrice;
     } else if (selectedProductForBuy) {
       const parsedQty = parseInt(String(orderQuantity), 10);
       if (isNaN(parsedQty) || parsedQty < 1 || parsedQty > 5) {
@@ -2243,9 +2573,13 @@ export default function App() {
     const orderNumber = `TN-${Math.floor(1000 + Math.random() * 9000)}`;
     const orderItemName = selectedDealForBuy
       ? `[Rescue Deal] ${selectedDealForBuy.title}`
+      : selectedOfferForBuy
+      ? `[Special Offer] ${selectedOfferForBuy.title}`
       : selectedProductForBuy!.name;
     const orderItemImage = selectedDealForBuy
       ? selectedDealForBuy.imageUrl
+      : selectedOfferForBuy
+      ? (selectedOfferForBuy.productImageUrl || '')
       : (selectedProductForBuy!.imageUrl || (selectedProductForBuy!.imageUrls && selectedProductForBuy!.imageUrls[0]) || '');
 
     const orderData: Order = {
@@ -2253,7 +2587,11 @@ export default function App() {
       orderNumber,
       customerId,
       mode: checkoutMode || 'Child',
-      productId: selectedDealForBuy ? (selectedDealForBuy.productId || selectedDealForBuy.id) : selectedProductForBuy!.id,
+      productId: selectedDealForBuy
+        ? (selectedDealForBuy.productId || selectedDealForBuy.id)
+        : selectedOfferForBuy
+        ? selectedOfferForBuy.productId
+        : selectedProductForBuy!.id,
       productName: orderItemName,
       productImageUrl: orderItemImage,
       price: totalPrice,
@@ -2269,10 +2607,16 @@ export default function App() {
       createdAt: new Date().toISOString(),
       colour: finalColour,
       isRescueDeal: Boolean(selectedDealForBuy),
+      isScheduledOffer: Boolean(selectedOfferForBuy),
       ...(selectedDealForBuy
         ? {
             rescueDealId: selectedDealForBuy.id,
             rescueCondition: selectedDealForBuy.condition || '',
+          }
+        : {}),
+      ...(selectedOfferForBuy
+        ? {
+            scheduledOfferId: selectedOfferForBuy.id,
           }
         : {}),
     };
@@ -2295,6 +2639,23 @@ export default function App() {
         // Update local state immediately so user sees it right away
         setRescueDeals((prev) =>
           prev.map((d) => (d.id === selectedDealForBuy.id ? { ...d, claimed: true, status: 'claimed' } : d))
+        );
+      } else if (selectedOfferForBuy) {
+        // ATOMIC TRANSACTION FOR SCHEDULED OFFERS:
+        // Validates offer is active and unclaimed, writes the order,
+        // and marks the scheduled offer as completed/sold in a single atomic commit.
+        await claimScheduledOfferInCloud(selectedOfferForBuy.id, orderData);
+
+        try {
+          await api.post('/api/orders', {
+            ...orderData,
+            productName: orderItemName,
+          });
+        } catch {}
+
+        // Update local state immediately so offer is removed from customer active view
+        setScheduledOffers((prev) =>
+          prev.map((o) => (o.id === selectedOfferForBuy.id ? { ...o, claimed: true, status: 'Completed' } : o))
         );
       } else {
         let createdOrder: Order | null = null;
@@ -2335,16 +2696,23 @@ export default function App() {
       setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '', colour: '' });
       setSelectedProductForBuy(null);
       setSelectedDealForBuy(null);
+      setSelectedOfferForBuy(null);
       setOrderQuantity(1);
     } catch (saveErr: any) {
       console.error('Error completing order:', saveErr);
       const msg = saveErr?.message || String(saveErr);
       if (msg.includes('already been claimed') || msg.includes('claimed by another customer')) {
-        setErrorMessage('Sorry! This Rescue Deal has already been claimed by another customer and is no longer available.');
+        setErrorMessage('Sorry! This special offer has already been claimed by another customer and is no longer available.');
         try {
-          const fresh = await fetchRescueDealsFromCloud();
-          setRescueDeals(fresh);
+          const freshDeals = await fetchRescueDealsFromCloud();
+          setRescueDeals(freshDeals);
         } catch {}
+        try {
+          const freshOffers = await fetchScheduledOffersFromCloud();
+          setScheduledOffers(freshOffers);
+        } catch {}
+      } else if (msg.includes('expired')) {
+        setErrorMessage('Sorry! This special offer has expired and is no longer active.');
       } else {
         setErrorMessage('Failed to place order. Please try again.');
       }
@@ -2971,6 +3339,16 @@ export default function App() {
                 >
                   <Flame size={15} /> Rescue Deals ({rescueDeals.length})
                 </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'scheduledOffers' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('scheduledOffers');
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <Tag size={15} /> Scheduled Offers ({scheduledOffers.filter((o) => !o.deleted).length})
+                </button>
               </div>
             </div>
 
@@ -3041,6 +3419,113 @@ export default function App() {
                 <div className="hero-caption">PLAY MORE. SMILE MORE.</div>
               </div>
             </section>
+
+            {/* SCHEDULED OFFERS / SPECIAL OFFERS SECTION: Dedicated active promotions with countdowns */}
+            {activeScheduledOffers.length > 0 && (
+              <section className="scheduled-offers-section" id="special-offers">
+                <div className="scheduled-offers-header">
+                  <div>
+                    <span className="eyebrow scheduled-offers-eyebrow">
+                      <Sparkles size={13} /> TIME-LIMITED SPECIAL OFFERS
+                    </span>
+                    <h2>
+                      Special Offers <span className="rescue-counter" style={{ background: '#dcfce7', color: '#15803d' }}>({activeScheduledOffers.length} Active)</span>
+                    </h2>
+                    <p>
+                      Exclusive limited-time discounts on favorite toys! Prices automatically return to regular after the countdown.
+                    </p>
+                  </div>
+                  <div className="rescue-pill-banner" style={{ background: '#e8f5e3', color: '#166534', border: '1px solid #bbf7d0' }}>
+                    <Clock size={15} /> Real-Time Countdown · Instant Claim
+                  </div>
+                </div>
+
+                <div className="scheduled-offers-grid">
+                  {activeScheduledOffers.map((offer) => {
+                    const discountPct =
+                      offer.originalPrice > offer.discountedPrice
+                        ? Math.round(((offer.originalPrice - offer.discountedPrice) / offer.originalPrice) * 100)
+                        : 0;
+                    const countdown = formatTimeRemaining(offer.endAt, currentTime);
+
+                    return (
+                      <article className="scheduled-offer-card" key={offer.id}>
+                        <div className="scheduled-offer-image-wrap">
+                          <img
+                            src={offer.productImageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                            alt={offer.title}
+                            loading="lazy"
+                          />
+                          <span className="special-offer-pill">
+                            <Sparkles size={11} /> SPECIAL OFFER
+                          </span>
+                          {discountPct > 0 && (
+                            <span className="special-offer-discount-bubble">
+                              {discountPct}% OFF
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="countdown-timer-box">
+                          <span className="timer-label">
+                            <Clock size={12} /> Ends in
+                          </span>
+                          <span className="timer-digits">
+                            {countdown.formatted}
+                          </span>
+                        </div>
+
+                        <div className="scheduled-offer-body">
+                          <div className="scheduled-offer-meta">
+                            <span className="scheduled-offer-category">{offer.productCategory || 'Special'}</span>
+                            <span style={{ fontSize: '11px', color: '#65715d' }}>{offer.productName}</span>
+                          </div>
+
+                          <h3 className="scheduled-offer-title">{offer.title}</h3>
+                          <p className="scheduled-offer-desc">
+                            Save {da(offer.originalPrice - offer.discountedPrice)} on {offer.productName}! Regular price is {da(offer.originalPrice)}.
+                          </p>
+
+                          <div className="scheduled-offer-price-row">
+                            <div className="scheduled-offer-price-block">
+                              <span className="scheduled-offer-original-price">{da(offer.originalPrice)}</span>
+                              <strong className="scheduled-offer-deal-price">{da(offer.discountedPrice)}</strong>
+                            </div>
+
+                            <button
+                              type="button"
+                              className="scheduled-offer-buy-btn"
+                              onClick={() => {
+                                const matchedProd = products.find((p) => p.id === offer.productId);
+                                setSelectedOfferForBuy(offer);
+                                setSelectedProductForBuy(matchedProd || null);
+                                setSelectedDealForBuy(null);
+                                setOrderQuantity(1);
+                                setCheckoutMode(null);
+                                setCheckoutForm({
+                                  name: '',
+                                  studentClass: '',
+                                  section: '',
+                                  phone: '',
+                                  address: '',
+                                  note: '',
+                                  colour: '',
+                                });
+                                setErrorMessage('');
+                                setPage('buy');
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                            >
+                              <Tag size={13} /> Grab Offer
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* RESCUE DEALS SECTION: Available Single-Quantity Clearance & Special Offers */}
             {availableRescueDeals.length > 0 && (
@@ -3223,6 +3708,8 @@ export default function App() {
                       const count = (p.imageUrls && p.imageUrls.length) || (p.imageUrl ? 1 : 0);
                       const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
                       const isAboveFold = idx < 2;
+                      const activeOffer = activeOffersByProductId.get(p.id);
+
                       return (
                         <article className="product-card" key={p.id}>
                           <button
@@ -3247,6 +3734,11 @@ export default function App() {
                             ) : (
                               <div className="placeholder-toy">🧸</div>
                             )}
+                            {activeOffer && (
+                              <span className="catalog-card-offer-badge">
+                                <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
+                              </span>
+                            )}
                             <span className="product-badge">
                               {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
                             </span>
@@ -3254,16 +3746,42 @@ export default function App() {
 
                           <div className="product-info">
                             <span className="product-category">{p.category || 'Other'}</span>
+
+                            {activeOffer && (
+                              <div className="catalog-offer-timer-strip">
+                                <Clock size={12} /> Ends: {formatTimeRemaining(activeOffer.endAt, currentTime).formatted}
+                              </div>
+                            )}
+
                             <h3>{p.name}</h3>
                             <p className="product-desc">
                               {p.description || 'A fun new friend for playtime.'}
                             </p>
                             <div className="product-bottom">
-                              <strong>{da(p.price)}</strong>
+                              {activeOffer ? (
+                                <div>
+                                  <span style={{ fontSize: '12px', color: '#88927e', textDecoration: 'line-through', marginRight: '6px' }}>
+                                    {da(p.price)}
+                                  </span>
+                                  <strong style={{ color: '#15803d', fontSize: '20px' }}>{da(activeOffer.discountedPrice)}</strong>
+                                  <span style={{ display: 'block', fontSize: '10px', color: '#15803d', fontWeight: 800 }}>
+                                    Save {da(activeOffer.originalPrice - activeOffer.discountedPrice)} ({Math.round(((activeOffer.originalPrice - activeOffer.discountedPrice) / activeOffer.originalPrice) * 100)}% OFF)
+                                  </span>
+                                </div>
+                              ) : (
+                                <strong>{da(p.price)}</strong>
+                              )}
                               <button
                                 className="buy-btn"
+                                style={activeOffer ? { background: '#273824', color: '#ffffff' } : {}}
                                 onClick={() => {
+                                  if (activeOffer) {
+                                    setSelectedOfferForBuy(activeOffer);
+                                  } else {
+                                    setSelectedOfferForBuy(null);
+                                  }
                                   setSelectedProductForBuy(p);
+                                  setSelectedDealForBuy(null);
                                   setOrderQuantity(1);
                                   setCheckoutMode(null);
                                   setCheckoutForm({
@@ -3279,7 +3797,7 @@ export default function App() {
                                   setPage('buy');
                                 }}
                               >
-                                Buy now <ArrowLeft size={15} />
+                                {activeOffer ? 'Grab Offer' : 'Buy now'} <ArrowLeft size={15} />
                               </button>
                             </div>
                           </div>
@@ -3333,7 +3851,7 @@ export default function App() {
         )}
 
         {/* BUY / CHECKOUT VIEW */}
-        {page === 'buy' && (selectedProductForBuy || selectedDealForBuy) && (
+        {page === 'buy' && (selectedProductForBuy || selectedDealForBuy || selectedOfferForBuy) && (
           <section className="form-page">
             <button
               className="back-link"
@@ -3341,6 +3859,7 @@ export default function App() {
                 setPage('home');
                 setErrorMessage('');
                 setSelectedDealForBuy(null);
+                setSelectedOfferForBuy(null);
                 setSelectedProductForBuy(null);
               }}
             >
@@ -3351,7 +3870,74 @@ export default function App() {
               <div className="form-layout">
                 {/* Order Summary */}
                 <div className="order-summary">
-                  {selectedDealForBuy ? (
+                  {selectedOfferForBuy ? (
+                    <>
+                      <span className="eyebrow scheduled-offers-eyebrow">
+                        <Sparkles size={12} /> SPECIAL SCHEDULED OFFER
+                      </span>
+                      <div className="summary-image">
+                        <img
+                          src={selectedOfferForBuy.productImageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                          alt={selectedOfferForBuy.title}
+                        />
+                      </div>
+
+                      <div style={{ marginBottom: '10px' }}>
+                        <span className="special-offer-pill">
+                          <Sparkles size={11} /> SPECIAL OFFER · {Math.round(((selectedOfferForBuy.originalPrice - selectedOfferForBuy.discountedPrice) / selectedOfferForBuy.originalPrice) * 100)}% OFF
+                        </span>
+                      </div>
+
+                      <h2>{selectedOfferForBuy.title}</h2>
+                      <p>{selectedOfferForBuy.productName} — Limited time promotion.</p>
+
+                      {Boolean(selectedOfferForBuy.claimed || selectedOfferForBuy.status === 'Completed') ? (
+                        <div className="rescue-claimed-warning-box" role="alert">
+                          <AlertCircle size={22} style={{ flexShrink: 0 }} />
+                          <div>
+                            <strong>No Longer Available</strong>
+                            <p>This special offer has already been claimed by another customer.</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="countdown-timer-box" style={{ borderRadius: '8px', marginBottom: '14px' }}>
+                          <span className="timer-label"><Clock size={13} /> Time remaining</span>
+                          <span className="timer-digits">{formatTimeRemaining(selectedOfferForBuy.endAt, currentTime).formatted}</span>
+                        </div>
+                      )}
+
+                      <div className="summary-price-box">
+                        <div className="summary-price-breakdown">
+                          <div className="summary-breakdown-row">
+                            <span>Regular store price</span>
+                            <span style={{ textDecoration: 'line-through', color: '#9ca3af' }}>
+                              {da(selectedOfferForBuy.originalPrice)}
+                            </span>
+                          </div>
+                          <div className="summary-breakdown-row">
+                            <span>Promotional Offer Price</span>
+                            <span style={{ color: '#15803d', fontWeight: 800 }}>
+                              {da(selectedOfferForBuy.discountedPrice)}
+                            </span>
+                          </div>
+                          <div className="summary-breakdown-row">
+                            <span>Instant Savings</span>
+                            <span style={{ color: '#15803d', fontWeight: 700 }}>
+                              Save {da(selectedOfferForBuy.originalPrice - selectedOfferForBuy.discountedPrice)}
+                            </span>
+                          </div>
+                          <div className="summary-breakdown-row">
+                            <span>Quantity</span>
+                            <span>1 toy</span>
+                          </div>
+                        </div>
+                        <div className="summary-price">
+                          <span>Total Price</span>
+                          <strong style={{ color: '#15803d' }}>{da(selectedOfferForBuy.discountedPrice)}</strong>
+                        </div>
+                      </div>
+                    </>
+                  ) : selectedDealForBuy ? (
                     <>
                       <span className="eyebrow rescue-eyebrow">⚡ RESCUE DEAL · LIMITED OFFER</span>
                       <div className="summary-image">
@@ -4309,6 +4895,14 @@ export default function App() {
                 }}
               >
                 ⚡ Rescue Deals ({rescueDeals.length})
+              </button>
+              <button
+                className={ownerTab === 'scheduledOffers' ? 'active' : ''}
+                onClick={() => {
+                  setOwnerTab('scheduledOffers');
+                }}
+              >
+                🏷️ Scheduled Offers ({scheduledOffers.filter((o) => !o.deleted).length})
               </button>
               {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours') && (
                 <button
@@ -6014,6 +6608,540 @@ export default function App() {
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* SCHEDULED OFFERS TAB: Owner Management of Time-Limited Promotions */}
+            {ownerTab === 'scheduledOffers' && (
+              <div className="offers-manager-panel">
+                <div className="offers-manager-header">
+                  <div>
+                    <span className="eyebrow scheduled-offers-eyebrow">
+                      <Sparkles size={13} /> MARKETING & CAMPAIGNS
+                    </span>
+                    <h3>🏷️ Scheduled Offers Manager</h3>
+                    <p>
+                      Schedule promotional discounts with automatic activation and expiration in India Standard Time (IST). Offers activate and expire automatically across all customer devices even when this dashboard is closed.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      if (isAddingOffer) {
+                        setIsAddingOffer(false);
+                        setEditingOfferId(null);
+                      } else {
+                        setIsAddingOffer(true);
+                        setEditingOfferId(null);
+                        setOfferForm({
+                          productId: products.find((p) => p.available !== false)?.id || '',
+                          title: '',
+                          originalPrice: products.find((p) => p.available !== false)?.price ? String(products.find((p) => p.available !== false)!.price) : '',
+                          discountedPrice: '',
+                          startAt: toDatetimeLocalString(new Date()),
+                          endAt: toDatetimeLocalString(new Date(Date.now() + 24 * 3600 * 1000)),
+                          isDraft: false,
+                        });
+                      }
+                      setErrorMessage('');
+                      setSuccessMessage('');
+                    }}
+                  >
+                    {isAddingOffer ? '✕ Close Form' : '➕ Schedule New Offer'}
+                  </button>
+                </div>
+
+                {/* CREATE / EDIT SCHEDULED OFFER FORM */}
+                {isAddingOffer && (
+                  <form
+                    className="panel-form add-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void handleSaveScheduledOffer(false);
+                    }}
+                  >
+                    <span className="eyebrow">
+                      {editingOfferId ? 'EDIT SCHEDULED OFFER' : 'NEW SCHEDULED OFFER'}
+                    </span>
+                    <h2>{editingOfferId ? 'Edit Scheduled Offer' : 'Create a Scheduled Offer'}</h2>
+                    <p className="form-subtitle">
+                      Set a promotional discount price for a specific product. The product&apos;s regular catalog price remains completely unchanged.
+                    </p>
+
+                    <label>
+                      Select Product from store catalog
+                      <select
+                        value={offerForm.productId}
+                        onChange={(e) => {
+                          const prod = products.find((p) => p.id === e.target.value);
+                          setOfferForm({
+                            ...offerForm,
+                            productId: e.target.value,
+                            originalPrice: prod ? String(prod.price) : offerForm.originalPrice,
+                            title: prod ? `${prod.name} Special Offer` : offerForm.title,
+                          });
+                        }}
+                        required
+                      >
+                        <option value="">-- Choose a product --</option>
+                        {products
+                          .filter((p) => p.available !== false)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name} — Regular price: {da(p.price)}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Offer Title (Visible to customers)
+                      <input
+                        type="text"
+                        value={offerForm.title}
+                        onChange={(e) => setOfferForm({ ...offerForm, title: e.target.value })}
+                        placeholder="e.g. Weekend Flash Sale, Special Noir Deal"
+                        maxLength={100}
+                        required
+                      />
+                    </label>
+
+                    <div className="two-fields">
+                      <label>
+                        Regular Store Price (₹)
+                        <input
+                          type="number"
+                          value={offerForm.originalPrice}
+                          onChange={(e) => setOfferForm({ ...offerForm, originalPrice: e.target.value })}
+                          placeholder="e.g. 79"
+                          min={1}
+                          required
+                        />
+                        <small style={{ color: '#798273' }}>
+                          Product catalog price stays unchanged.
+                        </small>
+                      </label>
+
+                      <label>
+                        Discounted Offer Price (₹)
+                        <input
+                          type="number"
+                          value={offerForm.discountedPrice}
+                          onChange={(e) => setOfferForm({ ...offerForm, discountedPrice: e.target.value })}
+                          placeholder="e.g. 49"
+                          min={1}
+                          required
+                        />
+                        {offerForm.originalPrice && offerForm.discountedPrice && parseFloat(offerForm.discountedPrice) < parseFloat(offerForm.originalPrice) && (
+                          <small style={{ color: '#15803d', fontWeight: 700 }}>
+                            Save {da(parseFloat(offerForm.originalPrice) - parseFloat(offerForm.discountedPrice))} ({Math.round(((parseFloat(offerForm.originalPrice) - parseFloat(offerForm.discountedPrice)) / parseFloat(offerForm.originalPrice)) * 100)}% OFF)
+                          </small>
+                        )}
+                      </label>
+                    </div>
+
+                    <div className="two-fields">
+                      <label>
+                        Offer Start Date & Time (IST)
+                        <input
+                          type="datetime-local"
+                          value={offerForm.startAt}
+                          onChange={(e) => setOfferForm({ ...offerForm, startAt: e.target.value })}
+                          required
+                        />
+                        <small style={{ color: '#798273' }}>
+                          When the offer goes live.
+                        </small>
+                      </label>
+
+                      <label>
+                        Offer End Date & Time (IST)
+                        <input
+                          type="datetime-local"
+                          value={offerForm.endAt}
+                          onChange={(e) => setOfferForm({ ...offerForm, endAt: e.target.value })}
+                          required
+                        />
+                        <small style={{ color: '#798273' }}>
+                          When the offer automatically expires.
+                        </small>
+                      </label>
+                    </div>
+
+                    {/* Real-time scheduling validation feedback */}
+                    {offerForm.startAt && offerForm.endAt && new Date(offerForm.endAt).getTime() <= new Date(offerForm.startAt).getTime() && (
+                      <div className="error-msg" style={{ margin: '10px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <AlertCircle size={16} /> End date & time must be strictly after the start date & time.
+                      </div>
+                    )}
+
+                    {offerForm.productId && offerForm.startAt && offerForm.endAt && new Date(offerForm.endAt).getTime() > new Date(offerForm.startAt).getTime() && checkOfferOverlap(offerForm.productId, new Date(offerForm.startAt).toISOString(), new Date(offerForm.endAt).toISOString(), editingOfferId || undefined) && (
+                      <div className="error-msg" style={{ margin: '10px 0', display: 'flex', alignItems: 'center', gap: '8px', background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a' }}>
+                        <AlertCircle size={16} /> Warning: Another active or scheduled offer already overlaps with this product during this timeframe.
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '10px', marginTop: '16px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={() => {
+                          if (!offerForm.productId) {
+                            setErrorMessage('Please select a product first to preview.');
+                            return;
+                          }
+                          setOfferPreviewModalOpen(true);
+                        }}
+                      >
+                        👁️ Preview Offer
+                      </button>
+
+                      <button
+                        type="submit"
+                        className="primary-btn"
+                        disabled={offerSaving}
+                      >
+                        {offerSaving ? 'Saving offer…' : editingOfferId ? 'Update Scheduled Offer' : 'Save & Schedule Offer'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        disabled={offerSaving}
+                        onClick={() => void handleSaveScheduledOffer(true)}
+                        title="Save this offer as a draft (hidden from customers until activated)"
+                      >
+                        💾 Save as Draft
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={() => {
+                          setIsAddingOffer(false);
+                          setEditingOfferId(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* OFFER PREVIEW MODAL */}
+                {offerPreviewModalOpen && (
+                  <div className="offer-preview-modal-overlay" onClick={() => setOfferPreviewModalOpen(false)}>
+                    <div className="offer-preview-modal-content" onClick={(e) => e.stopPropagation()}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                        <span className="eyebrow" style={{ color: '#15803d', margin: 0 }}>
+                          <Sparkles size={12} style={{ display: 'inline', marginRight: '4px' }} />
+                          LIVE STOREFRONT PREVIEW
+                        </span>
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          onClick={() => setOfferPreviewModalOpen(false)}
+                          aria-label="Close preview"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      <p style={{ fontSize: '12px', color: '#687263', margin: '0 0 16px 0' }}>
+                        This is exactly how your scheduled offer card will appear to customers when active:
+                      </p>
+
+                      {(() => {
+                        const selectedProd = products.find((p) => p.id === offerForm.productId);
+                        const prodImg = (selectedProd?.imageUrls && selectedProd.imageUrls[0]) || selectedProd?.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+                        const origP = parseFloat(offerForm.originalPrice) || selectedProd?.price || 0;
+                        const discP = parseFloat(offerForm.discountedPrice) || 0;
+                        const discPct = origP > discP && discP > 0 ? Math.round(((origP - discP) / origP) * 100) : 0;
+                        const countdownPreview = offerForm.endAt ? formatTimeRemaining(new Date(offerForm.endAt).toISOString(), currentTime) : { formatted: '23h 59m 59s' };
+
+                        return (
+                          <div className="scheduled-offer-card" style={{ maxWidth: '340px', margin: '0 auto' }}>
+                            <div className="scheduled-offer-image-wrap">
+                              <img src={prodImg} alt="Preview" />
+                              <span className="special-offer-pill">
+                                <Sparkles size={11} /> SPECIAL OFFER
+                              </span>
+                              {discPct > 0 && (
+                                <span className="special-offer-discount-bubble">
+                                  {discPct}% OFF
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="countdown-timer-box">
+                              <span className="timer-label"><Clock size={12} /> Ends in</span>
+                              <span className="timer-digits">{countdownPreview.formatted}</span>
+                            </div>
+
+                            <div className="scheduled-offer-body">
+                              <div className="scheduled-offer-meta">
+                                <span className="scheduled-offer-category">{selectedProd?.category || 'Special'}</span>
+                                <span style={{ fontSize: '11px', color: '#65715d' }}>{selectedProd?.name || 'Toy name'}</span>
+                              </div>
+
+                              <h3 className="scheduled-offer-title">{offerForm.title || 'Special Promotion'}</h3>
+                              <p className="scheduled-offer-desc">
+                                Save {da(origP - discP)} on {selectedProd?.name || 'this item'}! Regular store price is {da(origP)}.
+                              </p>
+
+                              <div className="scheduled-offer-price-row">
+                                <div className="scheduled-offer-price-block">
+                                  <span className="scheduled-offer-original-price">{da(origP)}</span>
+                                  <strong className="scheduled-offer-deal-price">{da(discP)}</strong>
+                                </div>
+                                <span className="scheduled-offer-buy-btn" style={{ pointerEvents: 'none' }}>
+                                  <Tag size={13} /> Grab Offer
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      <div style={{ marginTop: '20px', textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          className="primary-btn"
+                          onClick={() => setOfferPreviewModalOpen(false)}
+                        >
+                          Close Preview
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* FILTER TABS (All Offers, Scheduled, Active, Expired, Cancelled) */}
+                <div className="offers-filter-tabs">
+                  {(() => {
+                    const allCount = scheduledOffers.filter((o) => !o.deleted).length;
+                    const scheduledCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Scheduled').length;
+                    const activeCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Active').length;
+                    const expiredCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Expired').length;
+                    const cancelledCount = scheduledOffers.filter((o) => !o.deleted && computeOfferStatus(o, currentTime) === 'Cancelled').length;
+
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${offerFilterTab === 'all' ? 'active' : ''}`}
+                          onClick={() => setOfferFilterTab('all')}
+                        >
+                          All Offers ({allCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${offerFilterTab === 'scheduled' ? 'active' : ''}`}
+                          onClick={() => setOfferFilterTab('scheduled')}
+                        >
+                          <Calendar size={13} /> Scheduled ({scheduledCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${offerFilterTab === 'active' ? 'active' : ''}`}
+                          onClick={() => setOfferFilterTab('active')}
+                        >
+                          <Sparkles size={13} /> Active ({activeCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${offerFilterTab === 'expired' ? 'active' : ''}`}
+                          onClick={() => setOfferFilterTab('expired')}
+                        >
+                          <Clock size={13} /> Expired ({expiredCount})
+                        </button>
+                        <button
+                          type="button"
+                          className={`offers-filter-tab-btn ${offerFilterTab === 'cancelled' ? 'active' : ''}`}
+                          onClick={() => setOfferFilterTab('cancelled')}
+                        >
+                          Cancelled ({cancelledCount})
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* OFFERS CARDS LIST */}
+                {(() => {
+                  const visibleOffers = scheduledOffers.filter((o) => {
+                    if (o.deleted) return false;
+                    const computed = computeOfferStatus(o, currentTime);
+                    if (offerFilterTab === 'all') return true;
+                    if (offerFilterTab === 'scheduled') return computed === 'Scheduled';
+                    if (offerFilterTab === 'active') return computed === 'Active';
+                    if (offerFilterTab === 'expired') return computed === 'Expired';
+                    if (offerFilterTab === 'cancelled') return computed === 'Cancelled';
+                    return true;
+                  });
+
+                  if (visibleOffers.length === 0) {
+                    return (
+                      <div className="empty-state compact" style={{ padding: '40px 20px', textAlign: 'center' }}>
+                        <div className="empty-icon" style={{ fontSize: '36px', marginBottom: '10px' }}>🏷️</div>
+                        <h4>No offers in this section</h4>
+                        <p style={{ margin: '6px 0 16px 0', color: '#798273', fontSize: '13px' }}>
+                          {offerFilterTab === 'all'
+                            ? 'No scheduled offers created yet. Tap "Schedule New Offer" to create your first promotion.'
+                            : `There are currently no ${offerFilterTab} offers.`}
+                        </p>
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          onClick={() => {
+                            setOfferFilterTab('all');
+                            setIsAddingOffer(true);
+                          }}
+                        >
+                          + Schedule an Offer
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="offers-cards-list">
+                      {visibleOffers.map((offer) => {
+                        const computedStatus = computeOfferStatus(offer, currentTime);
+                        const discountPct =
+                          offer.originalPrice > offer.discountedPrice
+                            ? Math.round(((offer.originalPrice - offer.discountedPrice) / offer.originalPrice) * 100)
+                            : 0;
+                        const countdown = formatTimeRemaining(offer.endAt, currentTime);
+
+                        return (
+                          <div className="owner-offer-card" key={offer.id}>
+                            <div className="owner-offer-card-top">
+                              <div className="owner-offer-thumb">
+                                <img
+                                  src={offer.productImageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                                  alt={offer.title}
+                                />
+                              </div>
+
+                              <div className="owner-offer-info">
+                                <h4 className="owner-offer-title" title={offer.title}>
+                                  {offer.title}
+                                </h4>
+                                <p className="owner-offer-product-name">
+                                  {offer.productName} · <span style={{ color: '#526639', fontWeight: 600 }}>{offer.productCategory || 'Toy'}</span>
+                                </p>
+                                <div style={{ marginTop: '6px' }}>
+                                  {computedStatus === 'Active' && (
+                                    <span className="offer-status-badge active">
+                                      <span className="blinking-green-dot-inline" /> LIVE NOW
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Scheduled' && (
+                                    <span className="offer-status-badge scheduled">
+                                      <Calendar size={12} /> SCHEDULED
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Expired' && (
+                                    <span className="offer-status-badge expired">
+                                      <Clock size={12} /> EXPIRED
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Cancelled' && (
+                                    <span className="offer-status-badge cancelled">
+                                      ✕ CANCELLED
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Draft' && (
+                                    <span className="offer-status-badge draft">
+                                      📝 DRAFT
+                                    </span>
+                                  )}
+                                  {computedStatus === 'Completed' && (
+                                    <span className="offer-status-badge completed">
+                                      ✓ CLAIMED & SOLD
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="owner-offer-details-grid">
+                              <div>
+                                <b>Store Price</b>
+                                <span style={{ textDecoration: 'line-through', color: '#88927e' }}>
+                                  {da(offer.originalPrice)}
+                                </span>
+                              </div>
+                              <div>
+                                <b>Offer Price</b>
+                                <span style={{ color: '#15803d', fontWeight: 800 }}>
+                                  {da(offer.discountedPrice)} ({discountPct}% OFF)
+                                </span>
+                              </div>
+                              <div>
+                                <b>Start (IST)</b>
+                                <span title={offer.startAt}>{formatInIST(offer.startAt)}</span>
+                              </div>
+                              <div>
+                                <b>End (IST)</b>
+                                <span title={offer.endAt}>{formatInIST(offer.endAt)}</span>
+                              </div>
+                            </div>
+
+                            {computedStatus === 'Active' && (
+                              <div className="countdown-timer-box" style={{ borderRadius: '8px' }}>
+                                <span className="timer-label"><Clock size={12} /> Auto-expires in</span>
+                                <span className="timer-digits">{countdown.formatted}</span>
+                              </div>
+                            )}
+
+                            {offer.claimedByCustomer && (
+                              <div style={{ fontSize: '11px', color: '#4b5563', background: '#f5f3ff', padding: '6px 10px', borderRadius: '6px' }}>
+                                <b>Claimed by:</b> {offer.claimedByCustomer}
+                              </div>
+                            )}
+
+                            <div className="owner-offer-actions">
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                onClick={() => startEditOffer(offer)}
+                                title="Edit this offer"
+                                style={{ padding: '6px 12px', fontSize: '11px' }}
+                              >
+                                <Pencil size={13} /> Edit
+                              </button>
+
+                              {!['Cancelled', 'Expired', 'Completed'].includes(computedStatus) && (
+                                <button
+                                  type="button"
+                                  className="secondary-btn"
+                                  onClick={() => void handleCancelScheduledOffer(offer.id)}
+                                  title="Cancel this offer"
+                                  style={{ padding: '6px 12px', fontSize: '11px', color: '#b91c1c' }}
+                                >
+                                  Cancel offer
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                className="icon-btn danger"
+                                onClick={() => void handleDeleteScheduledOffer(offer.id)}
+                                title="Delete offer permanently"
+                                aria-label="Delete offer"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </section>

@@ -23,11 +23,13 @@ import {
   type Product,
   type Suggestion,
   type RescueDeal,
+  type ScheduledOffer,
   type MoneyAdjustmentItem,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
   markRescueDealDeletedLocally,
+  computeOfferStatus,
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -936,6 +938,246 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
     } catch {}
   } catch (error: any) {
     if (error?.message && error.message.includes('already been claimed')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+// ----------------- SCHEDULED OFFERS SYSTEM -----------------
+export function normalizeScheduledOfferData(data: any, docId: string): ScheduledOffer {
+  return {
+    id: data.id || docId,
+    productId: data.productId || '',
+    productName: String(data.productName || data.name || '').trim(),
+    productImageUrl: data.productImageUrl || data.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
+    productCategory: data.productCategory || 'Other',
+    title: String(data.title || '').trim(),
+    originalPrice: typeof data.originalPrice === 'number' ? data.originalPrice : parseFloat(String(data.originalPrice)) || 0,
+    discountedPrice: typeof data.discountedPrice === 'number' ? data.discountedPrice : parseFloat(String(data.discountedPrice)) || 0,
+    startAt: data.startAt || new Date().toISOString(),
+    endAt: data.endAt || new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+    status: data.status || 'Scheduled',
+    isDraft: data.isDraft === true,
+    cancelled: data.cancelled === true || data.status === 'Cancelled',
+    claimed: data.claimed === true || data.status === 'Completed',
+    claimedAt: data.claimedAt || undefined,
+    claimedByOrder: data.claimedByOrder || undefined,
+    claimedByCustomer: data.claimedByCustomer || undefined,
+    deleted: data.deleted === true,
+    createdAt: data.createdAt || new Date().toISOString(),
+    updatedAt: data.updatedAt || new Date().toISOString(),
+    createdBy: data.createdBy || 'Owner',
+  };
+}
+
+export async function fetchScheduledOffersFromCloud(): Promise<ScheduledOffer[]> {
+  const path = 'scheduledOffers';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'scheduledOffers'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'scheduledOffers'));
+    }
+
+    const list: ScheduledOffer[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.deleted !== true) {
+        list.push(normalizeScheduledOfferData(data, d.id));
+      }
+    });
+
+    return list.sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+  } catch (error) {
+    console.error('Firestore scheduled offers fetch error:', error);
+    return [];
+  }
+}
+
+export function subscribeToScheduledOffers(callback: (offers: ScheduledOffer[]) => void): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'scheduledOffers'),
+      (snapshot) => {
+        const list: ScheduledOffer[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.deleted !== true) {
+            list.push(normalizeScheduledOfferData(data, d.id));
+          }
+        });
+
+        const sorted = list.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        callback(sorted);
+      },
+      (error) => {
+        console.warn('Firestore scheduled offers subscription warning:', error);
+      }
+    );
+  } catch (err) {
+    console.warn('Could not subscribe to scheduled offers:', err);
+    return () => {};
+  }
+}
+
+export async function saveScheduledOfferToCloud(offer: ScheduledOffer): Promise<void> {
+  const path = `scheduledOffers/${offer.id}`;
+  try {
+    const cleanData = {
+      id: offer.id,
+      productId: offer.productId,
+      productName: String(offer.productName || '').trim(),
+      productImageUrl: offer.productImageUrl || '/toys/toy-40ba4ba9-1.jpg',
+      productCategory: offer.productCategory || 'Other',
+      title: String(offer.title || '').trim(),
+      originalPrice: typeof offer.originalPrice === 'number' ? offer.originalPrice : parseFloat(String(offer.originalPrice)) || 0,
+      discountedPrice: typeof offer.discountedPrice === 'number' ? offer.discountedPrice : parseFloat(String(offer.discountedPrice)) || 0,
+      startAt: offer.startAt,
+      endAt: offer.endAt,
+      status: offer.status,
+      isDraft: offer.isDraft === true,
+      cancelled: offer.cancelled === true || offer.status === 'Cancelled',
+      claimed: offer.claimed === true || offer.status === 'Completed',
+      claimedAt: offer.claimedAt || null,
+      claimedByOrder: offer.claimedByOrder || null,
+      claimedByCustomer: offer.claimedByCustomer || null,
+      deleted: offer.deleted === true,
+      createdAt: offer.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: offer.createdBy || 'Owner',
+    };
+
+    await setDoc(doc(db, 'scheduledOffers', offer.id), sanitizeForFirestore(cleanData), { merge: true });
+
+    try {
+      await getDocFromServer(doc(db, 'scheduledOffers', offer.id));
+    } catch {}
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function cancelScheduledOfferInCloud(offerId: string): Promise<void> {
+  const path = `scheduledOffers/${offerId}`;
+  try {
+    await updateDoc(doc(db, 'scheduledOffers', offerId), {
+      cancelled: true,
+      status: 'Cancelled',
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteScheduledOfferFromCloud(offerId: string): Promise<void> {
+  const path = `scheduledOffers/${offerId}`;
+  try {
+    await setDoc(
+      doc(db, 'scheduledOffers', offerId),
+      {
+        id: offerId,
+        deleted: true,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    try {
+      await deleteDoc(doc(db, 'scheduledOffers', offerId));
+    } catch {}
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * ATOMIC TRANSACTION:
+ * Atomically verifies offer is active, unclaimed, writes the order,
+ * and sets the offer status to Completed.
+ * Guarantees no two customers can claim the same limited offer concurrently.
+ */
+export async function claimScheduledOfferInCloud(offerId: string, order: Order): Promise<void> {
+  const path = `scheduledOffers/${offerId} & orders/${order.id}`;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const offerRef = doc(db, 'scheduledOffers', offerId);
+      const offerSnap = await transaction.get(offerRef);
+
+      if (!offerSnap.exists()) {
+        throw new Error('This Scheduled Offer does not exist or has been removed.');
+      }
+
+      const offerData = offerSnap.data() as ScheduledOffer;
+
+      // Check if already claimed, cancelled, deleted, or draft
+      if (offerData.claimed === true || offerData.status === 'Completed') {
+        throw new Error('This special offer has already been claimed by another customer.');
+      }
+      if (offerData.deleted || offerData.cancelled || offerData.status === 'Cancelled') {
+        throw new Error('This special offer is no longer available.');
+      }
+      if (offerData.isDraft || offerData.status === 'Draft') {
+        throw new Error('This special offer is not currently active.');
+      }
+
+      // Check time availability
+      const nowMs = Date.now();
+      const startMs = new Date(offerData.startAt).getTime();
+      const endMs = new Date(offerData.endAt).getTime();
+      if (nowMs < startMs) {
+        throw new Error('This special offer has not started yet.');
+      }
+      if (nowMs > endMs) {
+        throw new Error('This special offer has expired.');
+      }
+
+      // 1. Write the order atomically to Firestore
+      const orderRef = doc(db, 'orders', order.id);
+      transaction.set(
+        orderRef,
+        sanitizeForFirestore({
+          ...order,
+          isScheduledOffer: true,
+          scheduledOfferId: offerId,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+
+      // 2. Mark the offer as claimed atomically
+      transaction.set(
+        offerRef,
+        sanitizeForFirestore({
+          ...offerData,
+          id: offerId,
+          claimed: true,
+          status: 'Completed',
+          claimedAt: new Date().toISOString(),
+          claimedByOrder: order.id,
+          claimedByCustomer: order.name,
+          updatedAt: new Date().toISOString(),
+        }),
+        { merge: true }
+      );
+    });
+
+    // Server verification after transaction commit
+    try {
+      await getDocFromServer(doc(db, 'orders', order.id));
+    } catch {}
+  } catch (error: any) {
+    if (
+      error?.message &&
+      (error.message.includes('already been claimed') ||
+        error.message.includes('expired') ||
+        error.message.includes('not started') ||
+        error.message.includes('no longer available'))
+    ) {
       throw error;
     }
     handleFirestoreError(error, OperationType.WRITE, path);

@@ -94,6 +94,35 @@
         "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "title", "dealPrice", "claimed", "createdAt"]
+    },
+    "ScheduledOffer": {
+      "title": "Scheduled Offer",
+      "description": "A scheduled promotion or discounted offer with start and end times",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "productImageUrl": { "type": "string", "maxLength": 1000 },
+        "productCategory": { "type": "string", "maxLength": 100 },
+        "title": { "type": "string", "maxLength": 200 },
+        "originalPrice": { "type": "number" },
+        "discountedPrice": { "type": "number" },
+        "startAt": { "type": "string", "maxLength": 64 },
+        "endAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "maxLength": 50 },
+        "isDraft": { "type": "boolean" },
+        "cancelled": { "type": "boolean" },
+        "claimed": { "type": "boolean" },
+        "claimedAt": { "type": "string", "maxLength": 64 },
+        "claimedByOrder": { "type": "string", "maxLength": 128 },
+        "claimedByCustomer": { "type": "string", "maxLength": 100 },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "createdBy": { "type": "string", "maxLength": 100 }
+      },
+      "required": ["id", "productId", "title", "originalPrice", "discountedPrice", "startAt", "endAt", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -112,6 +141,10 @@
     "/rescueDeals/{dealId}": {
       "schema": { "$ref": "#/entities/RescueDeal" },
       "description": "Single-quantity Rescue Deals offers"
+    },
+    "/scheduledOffers/{offerId}": {
+      "schema": { "$ref": "#/entities/ScheduledOffer" },
+      "description": "Time-scheduled promotional offers"
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/Setting" },
