@@ -1035,8 +1035,6 @@ export default function App() {
   const [savedItems, setSavedItems] = useState<SavedForLaterItem[]>(() => getStoredSavedItems(getCustomerKey()));
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
   const [cartToastMessage, setCartToastMessage] = useState<string>('');
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
-  const [syncInputKey, setSyncInputKey] = useState<string>('');
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [myOrdersLoading, setMyOrdersLoading] = useState<boolean>(false);
   const [myOrdersError, setMyOrdersError] = useState<string>('');
@@ -2186,19 +2184,6 @@ export default function App() {
     setErrorMessage('');
     setPage('buy');
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleSyncCustomerKey = (newKey: string) => {
-    const trimmed = newKey.trim();
-    if (!trimmed) return;
-    localStorage.setItem('toynest_customer_key', trimmed);
-    setCustomerId(trimmed);
-    const localCart = getStoredCart(trimmed);
-    const localSaved = getStoredSavedItems(trimmed);
-    setCartItems(localCart);
-    setSavedItems(localSaved);
-    setIsSyncModalOpen(false);
-    showCartToast('Synced customer identity for this browser!');
   };
 
   const ownerPost = async (url: string, body: any) => {
@@ -8996,25 +8981,6 @@ export default function App() {
 
             {/* Drawer Body */}
             <div className="cart-drawer-body">
-              {/* Customer Cross-Device Sync Notice */}
-              <div className="cart-sync-banner">
-                <span>
-                  Sync Key: <code>{customerId.slice(0, 10)}…</code>
-                </span>
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  style={{ padding: '3px 8px', fontSize: '11px' }}
-                  onClick={() => {
-                    setSyncInputKey(customerId);
-                    setIsSyncModalOpen(true);
-                  }}
-                  title="Sync cart and saved items across devices"
-                >
-                  Device Sync
-                </button>
-              </div>
-
               {/* ---------------- 1. ACTIVE SHOPPING CART SECTION ---------------- */}
               <section className="cart-active-section">
                 <div className="cart-section-header">
@@ -9352,97 +9318,6 @@ export default function App() {
         <div className="cart-toast-banner" role="status">
           <BookmarkCheck size={16} style={{ color: '#38bdf8' }} />
           <span>{cartToastMessage}</span>
-        </div>
-      )}
-
-      {/* CUSTOMER CROSS-DEVICE SYNC MODAL */}
-      {isSyncModalOpen && (
-        <div
-          className="money-modal-overlay"
-          role="presentation"
-          onClick={() => setIsSyncModalOpen(false)}
-        >
-          <div
-            className="money-modal-card"
-            style={{ maxWidth: '440px' }}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Cross-Device Customer Sync"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="money-modal-header">
-              <div className="money-modal-title-wrap">
-                <div className="money-modal-icon" style={{ background: '#e0f2fe', color: '#0369a1' }}>
-                  <Bookmark size={22} />
-                </div>
-                <div>
-                  <h3>Device & Cart Sync</h3>
-                  <p>Access your saved toys and active cart on any computer or phone.</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => setIsSyncModalOpen(false)}
-                aria-label="Close sync modal"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 700, color: '#374151', display: 'block', marginBottom: '6px' }}>
-                  Your Current Customer Identity Key:
-                </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="text"
-                    value={syncInputKey}
-                    onChange={(e) => setSyncInputKey(e.target.value)}
-                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '13px' }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(customerId);
-                        showCartToast('Customer key copied to clipboard!');
-                      } catch {}
-                    }}
-                  >
-                    Copy
-                  </button>
-                </div>
-                <small style={{ color: '#64748b', fontSize: '11px', display: 'block', marginTop: '4px' }}>
-                  Copy this key to paste into Playnix Shop on another phone or computer.
-                </small>
-              </div>
-
-              <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '12px' }}>
-                <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#475569' }}>
-                  Already have a key from another device? Paste it above and tap <strong>"Sync Device"</strong> to load your cart and saved items here.
-                </p>
-                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() => setIsSyncModalOpen(false)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="primary-btn"
-                    onClick={() => handleSyncCustomerKey(syncInputKey)}
-                  >
-                    Sync Device
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 

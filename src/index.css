@@ -3512,30 +3512,6 @@ footer > button:hover {
   gap: 24px;
 }
 
-/* Device Sync Banner in Drawer */
-.cart-sync-banner {
-  background: #f4f6ee;
-  border: 1px dashed #cbd5be;
-  border-radius: 10px;
-  padding: 10px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12px;
-  color: #4b5845;
-}
-
-.cart-sync-banner code {
-  font-family: monospace;
-  font-weight: 700;
-  color: #273824;
-  background: #ffffff;
-  padding: 2px 6px;
-  border-radius: 4px;
-  border: 1px solid #e1e6d8;
-}
-
 /* Active Cart Section */
 .cart-active-section {
   display: flex;
