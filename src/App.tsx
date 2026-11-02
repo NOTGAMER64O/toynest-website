@@ -33,6 +33,9 @@ import {
   AlertTriangle,
   Calendar,
   Clock,
+  Bookmark,
+  BookmarkCheck,
+  ShoppingCart,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -211,6 +214,8 @@ import {
   type ProductDiscountInfo,
   type MoneyAdjustmentItem,
   type CampaignConflict,
+  type CartItem,
+  type SavedForLaterItem,
   DEFAULT_RESCUE_DEALS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
@@ -218,6 +223,10 @@ import {
   saveStoredMoneyAdjustment,
   getStoredMoneyAdjustmentHistory,
   saveStoredMoneyAdjustmentHistory,
+  getStoredCart,
+  saveStoredCart,
+  getStoredSavedItems,
+  saveStoredSavedItems,
   computeOfferStatus,
   computeCampaignStatus,
   calculateProductDiscount,
@@ -270,6 +279,14 @@ import {
   cancelDiscountCampaignInCloud,
   deleteDiscountCampaignFromCloud,
   recordCampaignOrderInCloud,
+  saveSavedItemToCloud,
+  deleteSavedItemFromCloud,
+  fetchSavedItemsFromCloud,
+  subscribeToSavedItems,
+  saveCartItemToCloud,
+  deleteCartItemFromCloud,
+  fetchCartItemsFromCloud,
+  subscribeToCartItems,
 } from './firebase';
 
 function getStoredColours(): string[] {
@@ -1013,7 +1030,13 @@ export default function App() {
     [editingProductId, products]
   );
   const [successMessage, setSuccessMessage] = useState<string>('');
-  const [customerId] = useState<string>(() => getCustomerKey());
+  const [customerId, setCustomerId] = useState<string>(() => getCustomerKey());
+  const [cartItems, setCartItems] = useState<CartItem[]>(() => getStoredCart(getCustomerKey()));
+  const [savedItems, setSavedItems] = useState<SavedForLaterItem[]>(() => getStoredSavedItems(getCustomerKey()));
+  const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
+  const [cartToastMessage, setCartToastMessage] = useState<string>('');
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
+  const [syncInputKey, setSyncInputKey] = useState<string>('');
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [myOrdersLoading, setMyOrdersLoading] = useState<boolean>(false);
   const [myOrdersError, setMyOrdersError] = useState<string>('');
@@ -1723,6 +1746,50 @@ export default function App() {
     };
   }, [customerId]);
 
+  // Real-time Firestore sync for customer Cart & Saved for Later items
+  useEffect(() => {
+    if (!customerId) return;
+    let unsubCart = () => {};
+    let unsubSaved = () => {};
+
+    try {
+      unsubCart = subscribeToCartItems(customerId, (liveCart) => {
+        setCartItems(liveCart);
+        saveStoredCart(customerId, liveCart);
+      });
+      unsubSaved = subscribeToSavedItems(customerId, (liveSaved) => {
+        setSavedItems(liveSaved);
+        saveStoredSavedItems(customerId, liveSaved);
+      });
+    } catch (err) {
+      console.warn('Cart or saved items subscription error:', err);
+    }
+
+    // Initial load from cloud if needed
+    fetchCartItemsFromCloud(customerId)
+      .then((items) => {
+        if (items && items.length > 0) {
+          setCartItems(items);
+          saveStoredCart(customerId, items);
+        }
+      })
+      .catch(() => {});
+
+    fetchSavedItemsFromCloud(customerId)
+      .then((items) => {
+        if (items && items.length > 0) {
+          setSavedItems(items);
+          saveStoredSavedItems(customerId, items);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      unsubCart();
+      unsubSaved();
+    };
+  }, [customerId]);
+
   // Real-time Firestore sync when owner dashboard is active
   useEffect(() => {
     if (page === 'owner') {
@@ -1880,6 +1947,259 @@ export default function App() {
       setIsOwnerMenuOpen(false);
     }
   }, [page]);
+
+  // ----------------- SHOPPING CART & SAVED FOR LATER HANDLERS -----------------
+  const showCartToast = (msg: string) => {
+    setCartToastMessage(msg);
+    setTimeout(() => {
+      setCartToastMessage((curr) => (curr === msg ? '' : curr));
+    }, 3200);
+  };
+
+  const handleAddToCart = async (
+    prod: Product,
+    colour?: string,
+    qty: number = 1,
+    isRescueDeal?: boolean,
+    rescueDealId?: string,
+    isScheduledOffer?: boolean,
+    scheduledOfferId?: string
+  ) => {
+    const cleanColour = colour || '';
+    const existingIndex = cartItems.findIndex(
+      (it) => it.productId === prod.id && (it.colour || '') === cleanColour
+    );
+    let updated: CartItem[];
+    let targetItem: CartItem;
+
+    if (existingIndex >= 0) {
+      const current = cartItems[existingIndex];
+      const newQty = isRescueDeal ? 1 : Math.min(5, (current.quantity || 1) + qty);
+      targetItem = { ...current, quantity: newQty };
+      updated = [...cartItems];
+      updated[existingIndex] = targetItem;
+    } else {
+      const itemId = `cart_${customerId}_${prod.id}_${cleanColour ? cleanColour.replace(/[^a-zA-Z0-9]/g, '_') : 'default'}`;
+      targetItem = {
+        id: itemId,
+        customerId,
+        productId: prod.id,
+        productName: prod.name,
+        productImageUrl: (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
+        category: prod.category,
+        price: prod.price,
+        colour: cleanColour,
+        quantity: isRescueDeal ? 1 : Math.min(5, Math.max(1, qty)),
+        isRescueDeal: Boolean(isRescueDeal),
+        rescueDealId,
+        isScheduledOffer: Boolean(isScheduledOffer),
+        scheduledOfferId,
+        addedAt: new Date().toISOString(),
+      };
+      updated = [targetItem, ...cartItems];
+    }
+
+    setCartItems(updated);
+    saveStoredCart(customerId, updated);
+    showCartToast(`Added "${prod.name}" to cart`);
+
+    try {
+      await saveCartItemToCloud(targetItem);
+    } catch (err) {
+      console.warn('Could not save cart item to cloud:', err);
+    }
+  };
+
+  const handleRemoveFromCart = async (itemId: string) => {
+    const target = cartItems.find((it) => it.id === itemId);
+    const next = cartItems.filter((it) => it.id !== itemId);
+    setCartItems(next);
+    saveStoredCart(customerId, next);
+    if (target) showCartToast(`Removed "${target.productName}" from cart`);
+    try {
+      await deleteCartItemFromCloud(itemId);
+    } catch (err) {
+      console.warn('Could not delete cart item from cloud:', err);
+    }
+  };
+
+  const handleUpdateCartQty = async (itemId: string, newQty: number) => {
+    if (newQty < 1) {
+      await handleRemoveFromCart(itemId);
+      return;
+    }
+    const clamped = Math.min(5, Math.max(1, newQty));
+    const target = cartItems.find((it) => it.id === itemId);
+    if (!target) return;
+    const updatedItem = { ...target, quantity: clamped };
+    const next = cartItems.map((it) => (it.id === itemId ? updatedItem : it));
+    setCartItems(next);
+    saveStoredCart(customerId, next);
+    try {
+      await saveCartItemToCloud(updatedItem);
+    } catch (err) {
+      console.warn('Could not update cart item in cloud:', err);
+    }
+  };
+
+  const handleSaveForLater = async (cartItem: CartItem) => {
+    // 1. Remove from active cart
+    const nextCart = cartItems.filter((it) => it.id !== cartItem.id);
+    setCartItems(nextCart);
+    saveStoredCart(customerId, nextCart);
+
+    // 2. Add to saved for later
+    const cleanColour = cartItem.colour ? cartItem.colour.replace(/[^a-zA-Z0-9]/g, '_') : 'default';
+    const savedId = `saved_${customerId}_${cartItem.productId}_${cleanColour}`;
+    const newSavedItem: SavedForLaterItem = {
+      id: savedId,
+      customerId,
+      productId: cartItem.productId,
+      productName: cartItem.productName,
+      productImageUrl: cartItem.productImageUrl,
+      category: cartItem.category,
+      price: cartItem.price,
+      colour: cartItem.colour,
+      quantity: cartItem.quantity || 1,
+      isRescueDeal: cartItem.isRescueDeal,
+      rescueDealId: cartItem.rescueDealId,
+      isScheduledOffer: cartItem.isScheduledOffer,
+      scheduledOfferId: cartItem.scheduledOfferId,
+      savedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const nextSaved = [newSavedItem, ...savedItems.filter((s) => s.id !== savedId)];
+    setSavedItems(nextSaved);
+    saveStoredSavedItems(customerId, nextSaved);
+    showCartToast(`Moved "${cartItem.productName}" to Saved for Later`);
+
+    try {
+      await Promise.all([
+        deleteCartItemFromCloud(cartItem.id),
+        saveSavedItemToCloud(newSavedItem),
+      ]);
+    } catch (err) {
+      console.warn('Could not sync save for later to cloud:', err);
+    }
+  };
+
+  const handleMoveToCart = async (savedItem: SavedForLaterItem) => {
+    // Check product availability
+    const prod = products.find((p) => p.id === savedItem.productId);
+    if (!prod || prod.available === false) {
+      setErrorMessage(`"${savedItem.productName}" is currently unavailable or out of stock.`);
+      return;
+    }
+    if (savedItem.isRescueDeal) {
+      const deal = rescueDeals.find((d) => d.id === (savedItem.rescueDealId || savedItem.productId));
+      if (!deal || deal.claimed || deal.status === 'claimed' || deal.deleted) {
+        setErrorMessage(`This Rescue Deal has already been claimed and is no longer available.`);
+        return;
+      }
+    }
+
+    // 1. Remove from saved items
+    const nextSaved = savedItems.filter((s) => s.id !== savedItem.id);
+    setSavedItems(nextSaved);
+    saveStoredSavedItems(customerId, nextSaved);
+
+    // 2. Add to active cart
+    const cleanColour = savedItem.colour ? savedItem.colour.replace(/[^a-zA-Z0-9]/g, '_') : 'default';
+    const cartId = `cart_${customerId}_${savedItem.productId}_${cleanColour}`;
+    const newCartItem: CartItem = {
+      id: cartId,
+      customerId,
+      productId: savedItem.productId,
+      productName: savedItem.productName,
+      productImageUrl: (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || savedItem.productImageUrl,
+      category: prod.category || savedItem.category,
+      price: prod.price,
+      colour: savedItem.colour || '',
+      quantity: savedItem.quantity || 1,
+      isRescueDeal: savedItem.isRescueDeal,
+      rescueDealId: savedItem.rescueDealId,
+      isScheduledOffer: savedItem.isScheduledOffer,
+      scheduledOfferId: savedItem.scheduledOfferId,
+      addedAt: new Date().toISOString(),
+    };
+
+    const existingIndex = cartItems.findIndex((it) => it.id === cartId);
+    let nextCart: CartItem[];
+    if (existingIndex >= 0) {
+      nextCart = [...cartItems];
+      nextCart[existingIndex] = {
+        ...nextCart[existingIndex],
+        quantity: Math.min(5, (nextCart[existingIndex].quantity || 1) + (newCartItem.quantity || 1)),
+      };
+    } else {
+      nextCart = [newCartItem, ...cartItems];
+    }
+
+    setCartItems(nextCart);
+    saveStoredCart(customerId, nextCart);
+    showCartToast(`Moved "${savedItem.productName}" back to active cart`);
+
+    try {
+      await Promise.all([
+        deleteSavedItemFromCloud(savedItem.id),
+        saveCartItemToCloud(newCartItem),
+      ]);
+    } catch (err) {
+      console.warn('Could not sync move to cart to cloud:', err);
+    }
+  };
+
+  const handleRemoveFromSaved = async (savedItemId: string, productName?: string) => {
+    const nextSaved = savedItems.filter((s) => s.id !== savedItemId);
+    setSavedItems(nextSaved);
+    saveStoredSavedItems(customerId, nextSaved);
+    showCartToast(`Removed "${productName || 'item'}" from Saved for Later`);
+    try {
+      await deleteSavedItemFromCloud(savedItemId);
+    } catch (err) {
+      console.warn('Could not delete saved item from cloud:', err);
+    }
+  };
+
+  const handleCheckoutCartItem = (cartItem: CartItem) => {
+    const prod = products.find((p) => p.id === cartItem.productId);
+    if (!prod || prod.available === false) {
+      setErrorMessage(`"${cartItem.productName}" is currently unavailable.`);
+      return;
+    }
+    setSelectedProductForBuy(prod);
+    setSelectedDealForBuy(null);
+    setSelectedOfferForBuy(null);
+    setOrderQuantity(cartItem.quantity || 1);
+    setCheckoutForm({
+      name: '',
+      studentClass: '',
+      section: '',
+      phone: '',
+      address: '',
+      note: '',
+      colour: cartItem.colour || '',
+    });
+    setCheckoutMode(null);
+    setIsCartOpen(false);
+    setErrorMessage('');
+    setPage('buy');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSyncCustomerKey = (newKey: string) => {
+    const trimmed = newKey.trim();
+    if (!trimmed) return;
+    localStorage.setItem('toynest_customer_key', trimmed);
+    setCustomerId(trimmed);
+    const localCart = getStoredCart(trimmed);
+    const localSaved = getStoredSavedItems(trimmed);
+    setCartItems(localCart);
+    setSavedItems(localSaved);
+    setIsSyncModalOpen(false);
+    showCartToast('Synced customer identity for this browser!');
+  };
 
   const ownerPost = async (url: string, body: any) => {
     let pinToSend = ownerPin;
@@ -3374,6 +3694,21 @@ export default function App() {
                 )}
               </button>
               <button
+                className="owner-link cart-nav-btn"
+                type="button"
+                style={{ position: 'relative' }}
+                onClick={() => setIsCartOpen(true)}
+                title="View Shopping Cart & Saved for Later"
+              >
+                <ShoppingCart size={16} /> Cart
+                {cartItems.length > 0 && (
+                  <span className="cart-badge-count">{cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}</span>
+                )}
+                {savedItems.length > 0 && cartItems.length === 0 && (
+                  <span className="saved-badge-indicator" title={`${savedItems.length} items saved for later`}>🔖</span>
+                )}
+              </button>
+              <button
                 className="owner-link"
                 style={{ position: 'relative' }}
                 onClick={handleOpenOwnerAccess}
@@ -3452,6 +3787,29 @@ export default function App() {
                 }}
               >
                 <Boxes size={19} /> Home
+              </button>
+              <button
+                type="button"
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  width: '100%',
+                }}
+                onClick={() => {
+                  setIsSideMenuOpen(false);
+                  setIsCartOpen(true);
+                }}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <ShoppingCart size={19} /> Shopping Cart
+                </span>
+                {(cartItems.length > 0 || savedItems.length > 0) && (
+                  <span className="cart-badge-count" style={{ marginLeft: 'auto' }}>
+                    {cartItems.length > 0 ? cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0) : `🔖 ${savedItems.length}`}
+                  </span>
+                )}
               </button>
               <button
                 type="button"
@@ -4394,34 +4752,48 @@ export default function App() {
                               ) : (
                                 <strong>{da(p.price)}</strong>
                               )}
-                              <button
-                                className="buy-btn"
-                                style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
-                                onClick={() => {
-                                  if (activeOffer) {
-                                    setSelectedOfferForBuy(activeOffer);
-                                  } else {
-                                    setSelectedOfferForBuy(null);
-                                  }
-                                  setSelectedProductForBuy(p);
-                                  setSelectedDealForBuy(null);
-                                  setOrderQuantity(1);
-                                  setCheckoutMode(null);
-                                  setCheckoutForm({
-                                    name: '',
-                                    studentClass: '',
-                                    section: '',
-                                    phone: '',
-                                    address: '',
-                                    note: '',
-                                    colour: '',
-                                  });
-                                  setErrorMessage('');
-                                  setPage('buy');
-                                }}
-                              >
-                                {hasDiscount ? 'Grab Deal' : 'Buy now'} <ArrowLeft size={15} />
-                              </button>
+                              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                <button
+                                  type="button"
+                                  className="secondary-btn"
+                                  style={{ padding: '8px 11px', borderRadius: '10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                                  title="Add to cart"
+                                  aria-label={`Add ${p.name} to cart`}
+                                  onClick={() => {
+                                    void handleAddToCart(p, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
+                                  }}
+                                >
+                                  <ShoppingCart size={15} />
+                                </button>
+                                <button
+                                  className="buy-btn"
+                                  style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
+                                  onClick={() => {
+                                    if (activeOffer) {
+                                      setSelectedOfferForBuy(activeOffer);
+                                    } else {
+                                      setSelectedOfferForBuy(null);
+                                    }
+                                    setSelectedProductForBuy(p);
+                                    setSelectedDealForBuy(null);
+                                    setOrderQuantity(1);
+                                    setCheckoutMode(null);
+                                    setCheckoutForm({
+                                      name: '',
+                                      studentClass: '',
+                                      section: '',
+                                      phone: '',
+                                      address: '',
+                                      note: '',
+                                      colour: '',
+                                    });
+                                    setErrorMessage('');
+                                    setPage('buy');
+                                  }}
+                                >
+                                  {hasDiscount ? 'Grab Deal' : 'Buy now'} <ArrowLeft size={15} />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         </article>
@@ -8566,7 +8938,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Footer */}
             <div className="money-modal-footer">
               <button
                 type="button"
@@ -8590,6 +8961,488 @@ export default function App() {
               </button>
             </div>
           </section>
+        </div>
+      )}
+
+      {/* SHOPPING CART & SAVED FOR LATER SLIDE-OVER DRAWER */}
+      {isCartOpen && (
+        <div
+          className="cart-drawer-backdrop"
+          role="presentation"
+          onClick={() => setIsCartOpen(false)}
+        >
+          <aside
+            className="cart-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Shopping Cart and Saved for Later"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Drawer Header */}
+            <div className="cart-drawer-header">
+              <div className="cart-drawer-title">
+                <ShoppingCart size={22} style={{ color: '#273824' }} />
+                <h2>Shopping Cart</h2>
+              </div>
+              <button
+                type="button"
+                className="cart-drawer-close"
+                onClick={() => setIsCartOpen(false)}
+                aria-label="Close cart drawer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Drawer Body */}
+            <div className="cart-drawer-body">
+              {/* Customer Cross-Device Sync Notice */}
+              <div className="cart-sync-banner">
+                <span>
+                  Sync Key: <code>{customerId.slice(0, 10)}…</code>
+                </span>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  style={{ padding: '3px 8px', fontSize: '11px' }}
+                  onClick={() => {
+                    setSyncInputKey(customerId);
+                    setIsSyncModalOpen(true);
+                  }}
+                  title="Sync cart and saved items across devices"
+                >
+                  Device Sync
+                </button>
+              </div>
+
+              {/* ---------------- 1. ACTIVE SHOPPING CART SECTION ---------------- */}
+              <section className="cart-active-section">
+                <div className="cart-section-header">
+                  <h3 className="cart-section-title">
+                    <ShoppingBag size={17} style={{ color: '#273824' }} />
+                    Active Cart
+                  </h3>
+                  <span className="cart-section-count">
+                    {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)} {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0) === 1 ? 'item' : 'items'}
+                  </span>
+                </div>
+
+                {cartItems.length === 0 ? (
+                  <div className="empty-state compact" style={{ padding: '24px 16px', textAlign: 'center', background: '#ffffff', borderRadius: '12px', border: '1.5px dashed #e2e8f0' }}>
+                    <div style={{ fontSize: '32px', marginBottom: '8px' }}>🛒</div>
+                    <h4 style={{ margin: '0 0 4px 0', fontSize: '15px', color: '#1f271e' }}>Your active cart is empty</h4>
+                    <p style={{ margin: '0 0 14px 0', fontSize: '12px', color: '#6d7568' }}>
+                      Browse toys to add them to your cart, or restore any products from your Saved for Later list below.
+                    </p>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      style={{ fontSize: '12px', padding: '6px 14px' }}
+                      onClick={() => {
+                        setIsCartOpen(false);
+                        setPage('home');
+                        window.scrollTo({ top: 380, behavior: 'smooth' });
+                      }}
+                    >
+                      Browse toy shelf →
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="cart-items-list">
+                      {cartItems.map((item) => {
+                        const prod = products.find((p) => p.id === item.productId);
+                        const isUnavailable = !prod || prod.available === false;
+                        const campaignDisc = prod ? calculateProductDiscount(prod, activeDiscountCampaigns) : { hasDiscount: false, discountedPrice: item.price, savingsPerUnit: 0, discountPercent: 0, discountLabel: '' };
+                        const unitPrice = campaignDisc.hasDiscount ? campaignDisc.discountedPrice : (prod ? prod.price : item.price);
+                        const originalUnit = prod ? prod.price : item.price;
+                        const qty = item.quantity || 1;
+                        const itemTotal = unitPrice * qty;
+
+                        return (
+                          <div className="cart-item-card" key={item.id}>
+                            <img
+                              src={item.productImageUrl || (prod?.imageUrls && prod.imageUrls[0]) || prod?.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                              alt={item.productName}
+                              className="cart-item-thumb"
+                            />
+                            <div className="cart-item-info">
+                              <h4 className="cart-item-name">{item.productName}</h4>
+                              {item.category && <div className="cart-item-category">{item.category}</div>}
+
+                              {item.colour && (
+                                <div className="cart-item-colour-pill">
+                                  <ColourDot colour={item.colour} size={10} />
+                                  <span>{item.colour}</span>
+                                </div>
+                              )}
+
+                              <div className="cart-item-pricing">
+                                <span className="cart-item-price">{da(itemTotal)}</span>
+                                {campaignDisc.hasDiscount && (
+                                  <>
+                                    <span className="cart-item-original-price">{da(originalUnit * qty)}</span>
+                                    <span style={{ fontSize: '10px', color: '#15803d', fontWeight: 800 }}>
+                                      {campaignDisc.discountLabel}
+                                    </span>
+                                  </>
+                                )}
+                                {qty > 1 && (
+                                  <span style={{ fontSize: '11px', color: '#6d7568' }}>({da(unitPrice)} each)</span>
+                                )}
+                              </div>
+
+                              <div className="cart-item-stepper-row">
+                                {/* Quantity Stepper */}
+                                <div className="cart-qty-stepper">
+                                  <button
+                                    type="button"
+                                    className="cart-qty-btn"
+                                    onClick={() => void handleUpdateCartQty(item.id, qty - 1)}
+                                    title="Decrease quantity"
+                                    aria-label="Decrease quantity"
+                                  >
+                                    <Minus size={12} />
+                                  </button>
+                                  <span className="cart-qty-num">{qty}</span>
+                                  <button
+                                    type="button"
+                                    className="cart-qty-btn"
+                                    disabled={Boolean(item.isRescueDeal) || qty >= 5}
+                                    onClick={() => void handleUpdateCartQty(item.id, qty + 1)}
+                                    title="Increase quantity"
+                                    aria-label="Increase quantity"
+                                  >
+                                    <Plus size={12} />
+                                  </button>
+                                </div>
+
+                                {/* Cart Item Action Buttons: Save for Later & Remove */}
+                                <div className="cart-item-actions">
+                                  <button
+                                    type="button"
+                                    className="btn-save-for-later"
+                                    onClick={() => void handleSaveForLater(item)}
+                                    title="Save this product for later"
+                                  >
+                                    <Bookmark size={12} /> Save for Later
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-remove-cart"
+                                    onClick={() => void handleRemoveFromCart(item.id)}
+                                    title="Remove from cart"
+                                    aria-label={`Remove ${item.productName} from cart`}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Single Item Quick Order Link */}
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ width: '100%', marginTop: '8px', fontSize: '12px', padding: '6px', textAlign: 'center', background: '#fafaf8' }}
+                                disabled={isUnavailable}
+                                onClick={() => handleCheckoutCartItem(item)}
+                              >
+                                {isUnavailable ? 'Currently Unavailable' : 'Order This Toy →'}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Active Cart Summary & Order Action */}
+                    <div className="cart-summary-box">
+                      <div className="cart-summary-line">
+                        <span>Items ({cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)})</span>
+                        <span>
+                          {da(
+                            cartItems.reduce((acc, it) => {
+                              const prod = products.find((p) => p.id === it.productId);
+                              const base = prod ? prod.price : it.price;
+                              return acc + base * (it.quantity || 1);
+                            }, 0)
+                          )}
+                        </span>
+                      </div>
+
+                      {(() => {
+                        const totalSavings = cartItems.reduce((acc, it) => {
+                          const prod = products.find((p) => p.id === it.productId);
+                          if (!prod) return acc;
+                          const campaignDisc = calculateProductDiscount(prod, activeDiscountCampaigns);
+                          return acc + (campaignDisc.hasDiscount ? campaignDisc.savingsPerUnit * (it.quantity || 1) : 0);
+                        }, 0);
+
+                        if (totalSavings > 0) {
+                          return (
+                            <div className="cart-summary-line" style={{ color: '#15803d', fontWeight: 700 }}>
+                              <span>Promotional Savings</span>
+                              <span>- {da(totalSavings)}</span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
+
+                      <div className="cart-summary-line total">
+                        <span>Cart Total</span>
+                        <strong style={{ color: '#15803d' }}>
+                          {da(
+                            cartItems.reduce((acc, it) => {
+                              const prod = products.find((p) => p.id === it.productId);
+                              const campaignDisc = prod ? calculateProductDiscount(prod, activeDiscountCampaigns) : { hasDiscount: false, discountedPrice: it.price };
+                              const unitPrice = campaignDisc.hasDiscount ? campaignDisc.discountedPrice : (prod ? prod.price : it.price);
+                              return acc + unitPrice * (it.quantity || 1);
+                            }, 0)
+                          )}
+                        </strong>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="primary-btn cart-checkout-btn"
+                        onClick={() => {
+                          if (cartItems.length > 0) {
+                            handleCheckoutCartItem(cartItems[0]);
+                          }
+                        }}
+                      >
+                        Proceed to Checkout <ArrowLeft size={16} style={{ transform: 'rotate(180deg)' }} />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+
+              {/* ---------------- 2. SAVED FOR LATER SECTION ---------------- */}
+              <section className="save-for-later-section" aria-label="Saved for Later Products">
+                <div className="cart-section-header">
+                  <h3 className="cart-section-title">
+                    <Bookmark size={17} style={{ color: '#0284c7' }} />
+                    Saved for Later
+                  </h3>
+                  <span className="cart-section-count">
+                    {savedItems.length} {savedItems.length === 1 ? 'item' : 'items'}
+                  </span>
+                </div>
+
+                <div className="saved-section-banner">
+                  <span style={{ fontWeight: 700, color: '#1e293b' }}>🔖 Your Private Wishlist:</span> Items saved here remain securely stored across devices and visits. Saving an item does not create an order or reserve stock.
+                </div>
+
+                {savedItems.length === 0 ? (
+                  <div className="empty-state compact" style={{ padding: '24px 16px', textAlign: 'center', background: '#ffffff', borderRadius: '12px', border: '1.5px dashed #e2e8f0' }}>
+                    <div style={{ fontSize: '30px', marginBottom: '6px' }}>🔖</div>
+                    <h4 style={{ margin: '0 0 4px 0', fontSize: '14px', color: '#1f271e' }}>No items saved for later</h4>
+                    <p style={{ margin: 0, fontSize: '12px', color: '#64748b', lineHeight: 1.4 }}>
+                      Want to save a toy for your next visit? Click <strong>"Save for Later"</strong> on any item in your active cart above.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="saved-items-grid">
+                    {savedItems.map((sItem) => {
+                      const prod = products.find((p) => p.id === sItem.productId);
+                      const isProductDeletedOrUnavailable = !prod || prod.available === false;
+                      const isRescueClaimed = Boolean(
+                        sItem.isRescueDeal &&
+                        rescueDeals.find((d) => d.id === (sItem.rescueDealId || sItem.productId))?.claimed
+                      );
+                      const isUnavailable = isProductDeletedOrUnavailable || isRescueClaimed;
+                      const displayPrice = prod ? prod.price : sItem.price;
+
+                      return (
+                        <div
+                          key={sItem.id}
+                          className={`saved-item-card ${isUnavailable ? 'is-unavailable' : ''}`}
+                        >
+                          <img
+                            src={sItem.productImageUrl || (prod?.imageUrls && prod.imageUrls[0]) || prod?.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                            alt={sItem.productName}
+                            className="saved-item-thumb"
+                          />
+
+                          <div className="saved-item-info">
+                            {/* Availability Status Badge (Requirement 11) */}
+                            {isUnavailable ? (
+                              <span className="saved-status-badge unavailable">
+                                <AlertCircle size={10} />
+                                {isRescueClaimed ? 'Sold Out (Claimed)' : 'Currently Unavailable / Out of Stock'}
+                              </span>
+                            ) : (
+                              <span className="saved-status-badge in-stock">
+                                <Check size={10} /> In Stock
+                              </span>
+                            )}
+
+                            <h4 className="cart-item-name">{sItem.productName}</h4>
+                            {sItem.category && <div className="cart-item-category">{sItem.category}</div>}
+
+                            {sItem.colour && (
+                              <div className="cart-item-colour-pill">
+                                <ColourDot colour={sItem.colour} size={10} />
+                                <span>{sItem.colour}</span>
+                              </div>
+                            )}
+
+                            <div style={{ fontSize: '14px', fontWeight: 800, color: '#1f271e', margin: '4px 0' }}>
+                              {da(displayPrice)}
+                            </div>
+
+                            {/* Saved Actions: Move to Cart & Remove */}
+                            <div className="saved-item-actions">
+                              <button
+                                type="button"
+                                className="btn-move-to-cart"
+                                disabled={isUnavailable}
+                                onClick={() => void handleMoveToCart(sItem)}
+                                title={isUnavailable ? 'This product is currently out of stock' : 'Move back into your active shopping cart'}
+                              >
+                                <ShoppingCart size={13} /> Move to Cart
+                              </button>
+
+                              <button
+                                type="button"
+                                className="btn-remove-saved"
+                                onClick={() => void handleRemoveFromSaved(sItem.id, sItem.productName)}
+                                title="Remove permanently from saved for later"
+                              >
+                                <Trash2 size={12} /> Remove
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* FLOATING CART BUTTON ON CUSTOMER PAGES */}
+      {page !== 'owner' && !isCartOpen && (
+        <button
+          type="button"
+          className="cart-floating-trigger"
+          onClick={() => setIsCartOpen(true)}
+          title="Open Shopping Cart & Saved for Later"
+          aria-label="Open Shopping Cart"
+        >
+          <ShoppingCart size={18} />
+          <span>Cart</span>
+          {cartItems.length > 0 ? (
+            <span className="cart-floating-badge">
+              {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
+            </span>
+          ) : savedItems.length > 0 ? (
+            <span className="cart-floating-badge">🔖 {savedItems.length}</span>
+          ) : null}
+        </button>
+      )}
+
+      {/* CART TOAST NOTIFICATION BANNER */}
+      {cartToastMessage && (
+        <div className="cart-toast-banner" role="status">
+          <BookmarkCheck size={16} style={{ color: '#38bdf8' }} />
+          <span>{cartToastMessage}</span>
+        </div>
+      )}
+
+      {/* CUSTOMER CROSS-DEVICE SYNC MODAL */}
+      {isSyncModalOpen && (
+        <div
+          className="money-modal-overlay"
+          role="presentation"
+          onClick={() => setIsSyncModalOpen(false)}
+        >
+          <div
+            className="money-modal-card"
+            style={{ maxWidth: '440px' }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Cross-Device Customer Sync"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="money-modal-header">
+              <div className="money-modal-title-wrap">
+                <div className="money-modal-icon" style={{ background: '#e0f2fe', color: '#0369a1' }}>
+                  <Bookmark size={22} />
+                </div>
+                <div>
+                  <h3>Device & Cart Sync</h3>
+                  <p>Access your saved toys and active cart on any computer or phone.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setIsSyncModalOpen(false)}
+                aria-label="Close sync modal"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: '#374151', display: 'block', marginBottom: '6px' }}>
+                  Your Current Customer Identity Key:
+                </label>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <input
+                    type="text"
+                    value={syncInputKey}
+                    onChange={(e) => setSyncInputKey(e.target.value)}
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '13px' }}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(customerId);
+                        showCartToast('Customer key copied to clipboard!');
+                      } catch {}
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+                <small style={{ color: '#64748b', fontSize: '11px', display: 'block', marginTop: '4px' }}>
+                  Copy this key to paste into Playnix Shop on another phone or computer.
+                </small>
+              </div>
+
+              <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '12px' }}>
+                <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#475569' }}>
+                  Already have a key from another device? Paste it above and tap <strong>"Sync Device"</strong> to load your cart and saved items here.
+                </p>
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => setIsSyncModalOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => handleSyncCustomerKey(syncInputKey)}
+                  >
+                    Sync Device
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

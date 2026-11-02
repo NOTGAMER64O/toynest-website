@@ -26,6 +26,8 @@ import {
   type ScheduledOffer,
   type DiscountCampaign,
   type MoneyAdjustmentItem,
+  type CartItem,
+  type SavedForLaterItem,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
@@ -1357,3 +1359,148 @@ export async function recordCampaignOrderInCloud(
     console.warn('Failed to record campaign order metric:', error);
   }
 }
+
+// ----------------- SAVED FOR LATER FIRESTORE SYNC -----------------
+
+export async function saveSavedItemToCloud(item: SavedForLaterItem): Promise<void> {
+  const path = `savedItems/${item.id}`;
+  try {
+    const docRef = doc(db, 'savedItems', item.id);
+    await setDoc(
+      docRef,
+      sanitizeForFirestore({
+        ...item,
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteSavedItemFromCloud(itemId: string): Promise<void> {
+  const path = `savedItems/${itemId}`;
+  try {
+    const docRef = doc(db, 'savedItems', itemId);
+    await deleteDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function fetchSavedItemsFromCloud(customerId: string): Promise<SavedForLaterItem[]> {
+  if (!customerId) return [];
+  const path = `savedItems (customerId: ${customerId})`;
+  try {
+    const q = query(collection(db, 'savedItems'), where('customerId', '==', customerId));
+    const snapshot = await getDocs(q);
+    const items: SavedForLaterItem[] = [];
+    snapshot.forEach((d) => {
+      items.push(d.data() as SavedForLaterItem);
+    });
+    return items.sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime());
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToSavedItems(
+  customerId: string,
+  callback: (items: SavedForLaterItem[]) => void
+): () => void {
+  if (!customerId) return () => {};
+  try {
+    const q = query(collection(db, 'savedItems'), where('customerId', '==', customerId));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const items: SavedForLaterItem[] = [];
+        snapshot.forEach((d) => {
+          items.push(d.data() as SavedForLaterItem);
+        });
+        items.sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime());
+        callback(items);
+      },
+      (error) => {
+        console.warn('Saved items subscription error:', error);
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+// ----------------- ACTIVE CART FIRESTORE SYNC -----------------
+
+export async function saveCartItemToCloud(item: CartItem): Promise<void> {
+  const path = `cartItems/${item.id}`;
+  try {
+    const docRef = doc(db, 'cartItems', item.id);
+    await setDoc(
+      docRef,
+      sanitizeForFirestore({
+        ...item,
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteCartItemFromCloud(cartItemId: string): Promise<void> {
+  const path = `cartItems/${cartItemId}`;
+  try {
+    const docRef = doc(db, 'cartItems', cartItemId);
+    await deleteDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function fetchCartItemsFromCloud(customerId: string): Promise<CartItem[]> {
+  if (!customerId) return [];
+  const path = `cartItems (customerId: ${customerId})`;
+  try {
+    const q = query(collection(db, 'cartItems'), where('customerId', '==', customerId));
+    const snapshot = await getDocs(q);
+    const items: CartItem[] = [];
+    snapshot.forEach((d) => {
+      items.push(d.data() as CartItem);
+    });
+    return items.sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToCartItems(
+  customerId: string,
+  callback: (items: CartItem[]) => void
+): () => void {
+  if (!customerId) return () => {};
+  try {
+    const q = query(collection(db, 'cartItems'), where('customerId', '==', customerId));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const items: CartItem[] = [];
+        snapshot.forEach((d) => {
+          items.push(d.data() as CartItem);
+        });
+        items.sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+        callback(items);
+      },
+      (error) => {
+        console.warn('Cart items subscription error:', error);
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+

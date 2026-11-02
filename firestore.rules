@@ -98,6 +98,26 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(settingId);
     }
+
+    // Saved for Later Collection:
+    match /savedItems/{savedItemId} {
+      allow read: if true;
+      allow create: if isValidId(savedItemId)
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && request.resource.data.productId is string;
+      allow update, delete: if isValidId(savedItemId);
+    }
+
+    // Cart Items Collection (Cross-device shopping cart persistence):
+    match /cartItems/{cartItemId} {
+      allow read: if true;
+      allow create: if isValidId(cartItemId)
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && request.resource.data.productId is string;
+      allow update, delete: if isValidId(cartItemId);
+    }
   }
 }
 

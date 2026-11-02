@@ -747,3 +747,77 @@ export function saveStoredMoneyAdjustmentHistory(list: MoneyAdjustmentItem[]): v
     localStorage.setItem('toynest_money_adjustment_history', JSON.stringify(list));
   } catch {}
 }
+
+export interface CartItem {
+  id: string;
+  customerId: string;
+  productId: string;
+  productName: string;
+  productImageUrl: string;
+  category?: string;
+  price: number;
+  colour?: string;
+  quantity: number;
+  isRescueDeal?: boolean;
+  rescueDealId?: string;
+  isScheduledOffer?: boolean;
+  scheduledOfferId?: string;
+  addedAt: string;
+}
+
+export interface SavedForLaterItem {
+  id: string;
+  customerId: string;
+  productId: string;
+  productName: string;
+  productImageUrl: string;
+  category?: string;
+  price: number;
+  colour?: string;
+  quantity: number;
+  isRescueDeal?: boolean;
+  rescueDealId?: string;
+  isScheduledOffer?: boolean;
+  scheduledOfferId?: string;
+  savedAt: string;
+  updatedAt?: string;
+}
+
+export function getStoredCart(customerId: string): CartItem[] {
+  if (!customerId) return [];
+  try {
+    const raw = localStorage.getItem(`playnix_cart_${customerId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredCart(customerId: string, items: CartItem[]): void {
+  if (!customerId) return;
+  try {
+    localStorage.setItem(`playnix_cart_${customerId}`, JSON.stringify(items));
+  } catch {}
+}
+
+export function getStoredSavedItems(customerId: string): SavedForLaterItem[] {
+  if (!customerId) return [];
+  try {
+    const raw = localStorage.getItem(`playnix_saved_${customerId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredSavedItems(customerId: string, items: SavedForLaterItem[]): void {
+  if (!customerId) return;
+  try {
+    localStorage.setItem(`playnix_saved_${customerId}`, JSON.stringify(items));
+  } catch {}
+}
+
