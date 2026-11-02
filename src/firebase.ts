@@ -1229,7 +1229,8 @@ export function normalizeDiscountCampaignData(docId: string, raw: any): Discount
     deleted: Boolean(raw.deleted),
     createdAt: raw.createdAt || new Date().toISOString(),
     updatedAt: raw.updatedAt || new Date().toISOString(),
-    createdBy: raw.createdBy || 'Owner',
+    autoIncludeNewProducts: raw.autoIncludeNewProducts !== false,
+    allowConflictOverride: Boolean(raw.allowConflictOverride),
     totalOrdersCount: Number(raw.totalOrdersCount || 0),
     totalRevenue: Number(raw.totalRevenue || 0),
   };

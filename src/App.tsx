@@ -30,6 +30,7 @@ import {
   Tag,
   Sparkles,
   AlertCircle,
+  AlertTriangle,
   Calendar,
   Clock,
 } from 'lucide-react';
@@ -209,6 +210,7 @@ import {
   type FestivalBannerPreset,
   type ProductDiscountInfo,
   type MoneyAdjustmentItem,
+  type CampaignConflict,
   DEFAULT_RESCUE_DEALS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
@@ -221,6 +223,8 @@ import {
   calculateProductDiscount,
   getStoredDiscountCampaigns,
   saveStoredDiscountCampaigns,
+  detectCampaignConflicts,
+  getCampaignTargetProductIds,
   formatInIST,
   formatTimeRemaining,
 } from './defaultData';
@@ -846,6 +850,8 @@ export default function App() {
     startAt: string;
     endAt: string;
     isDraft: boolean;
+    autoIncludeNewProducts: boolean;
+    allowConflictOverride: boolean;
   }>({
     name: 'Diwali Dhamaka Sale',
     description: 'Special festive celebration across our toy shelves! Limited time savings for all kids.',
@@ -858,7 +864,11 @@ export default function App() {
     startAt: toDatetimeLocalString(new Date()),
     endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
     isDraft: false,
+    autoIncludeNewProducts: true,
+    allowConflictOverride: false,
   });
+  const [campaignProductSearch, setCampaignProductSearch] = useState<string>('');
+  const [customerActiveCampaignId, setCustomerActiveCampaignId] = useState<string>('all');
 
   // Active discount campaigns evaluated against reliable currentTime (ticks every 1s)
   const activeDiscountCampaigns = useMemo(() => {
@@ -867,10 +877,54 @@ export default function App() {
     );
   }, [discountCampaigns, currentTime]);
 
-  // Primary active campaign for the customer homepage showcase
-  const primaryActiveCampaign = useMemo(() => {
+  // Selected or primary active campaign for the customer homepage showcase
+  const selectedCustomerCampaign = useMemo(() => {
+    if (customerActiveCampaignId !== 'all') {
+      const found = activeDiscountCampaigns.find((c) => c.id === customerActiveCampaignId);
+      if (found) return found;
+    }
     return activeDiscountCampaigns.length > 0 ? activeDiscountCampaigns[0] : null;
-  }, [activeDiscountCampaigns]);
+  }, [customerActiveCampaignId, activeDiscountCampaigns]);
+
+  const primaryActiveCampaign = selectedCustomerCampaign;
+
+  // Real-time conflict detector for the campaign creation form
+  const detectedCampaignConflicts = useMemo<CampaignConflict[]>(() => {
+    if (!isAddingCampaign) return [];
+    try {
+      const sDate = new Date(campaignForm.startAt);
+      const eDate = new Date(campaignForm.endAt);
+      if (isNaN(sDate.getTime()) || isNaN(eDate.getTime()) || eDate.getTime() <= sDate.getTime()) {
+        return [];
+      }
+      return detectCampaignConflicts(
+        {
+          id: editingCampaignId || undefined,
+          targetScope: campaignForm.targetScope,
+          targetCategories: campaignForm.targetCategories,
+          targetProductIds: campaignForm.targetProductIds,
+          startAt: sDate.toISOString(),
+          endAt: eDate.toISOString(),
+        },
+        discountCampaigns,
+        products,
+        currentTime
+      );
+    } catch {
+      return [];
+    }
+  }, [
+    isAddingCampaign,
+    editingCampaignId,
+    campaignForm.targetScope,
+    campaignForm.targetCategories,
+    campaignForm.targetProductIds,
+    campaignForm.startAt,
+    campaignForm.endAt,
+    discountCampaigns,
+    products,
+    currentTime,
+  ]);
 
   // Active scheduled offers for customer storefront (calculated with reliable currentTime)
   const activeScheduledOffers = useMemo(() => {
@@ -2618,6 +2672,14 @@ export default function App() {
       return;
     }
 
+    if (!asDraft && detectedCampaignConflicts.length > 0 && !campaignForm.allowConflictOverride) {
+      const conflictCount = detectedCampaignConflicts.reduce((sum, c) => sum + c.conflictingProductIds.length, 0);
+      setErrorMessage(
+        `Discount conflict: ${conflictCount} product(s) overlap with another active or scheduled campaign. Please resolve the overlapping selection or check "Allow Best Discount (Anti-Stacking)" to proceed.`
+      );
+      return;
+    }
+
     setCampaignSaving(true);
 
     const campaignId = editingCampaignId || `camp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -2640,6 +2702,8 @@ export default function App() {
       isDraft: asDraft,
       cancelled: false,
       deleted: false,
+      autoIncludeNewProducts: campaignForm.autoIncludeNewProducts !== false,
+      allowConflictOverride: Boolean(campaignForm.allowConflictOverride),
       createdAt: editingCampaignId
         ? (discountCampaigns.find((c) => c.id === editingCampaignId)?.createdAt || new Date().toISOString())
         : new Date().toISOString(),
@@ -2682,6 +2746,7 @@ export default function App() {
       setIsAddingCampaign(false);
       setEditingCampaignId(null);
       setCampaignPreviewModalOpen(false);
+      setCampaignProductSearch('');
       setCampaignForm({
         name: 'Diwali Dhamaka Sale',
         description: 'Special festive celebration across our toy shelves! Limited time savings for all kids.',
@@ -2694,6 +2759,8 @@ export default function App() {
         startAt: toDatetimeLocalString(new Date()),
         endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
         isDraft: false,
+        autoIncludeNewProducts: true,
+        allowConflictOverride: false,
       });
     } catch (err: any) {
       console.error('Error saving discount campaign:', err);
@@ -2740,6 +2807,7 @@ export default function App() {
     const startDate = new Date(campaign.startAt);
     const endDate = new Date(campaign.endAt);
 
+    setCampaignProductSearch('');
     setCampaignForm({
       name: campaign.name,
       description: campaign.description || '',
@@ -2752,6 +2820,8 @@ export default function App() {
       startAt: toDatetimeLocalString(isNaN(startDate.getTime()) ? new Date() : startDate),
       endAt: toDatetimeLocalString(isNaN(endDate.getTime()) ? new Date(Date.now() + 7 * 24 * 3600 * 1000) : endDate),
       isDraft: campaign.isDraft === true,
+      autoIncludeNewProducts: campaign.autoIncludeNewProducts !== false,
+      allowConflictOverride: Boolean(campaign.allowConflictOverride),
     });
     setIsAddingCampaign(true);
     setCampaignPreviewModalOpen(false);
@@ -3761,23 +3831,48 @@ export default function App() {
             </section>
 
             {/* FESTIVAL-WIDE DISCOUNT CAMPAIGN SHOWCASE: Dedicated promotional section */}
-            {primaryActiveCampaign && (
+            {activeDiscountCampaigns.length > 0 && selectedCustomerCampaign && (
               <section className="festival-campaign-showcase" id="festival-campaign">
+                {/* Multi-Campaign Switcher Tabs for Customers to Browse Different Active Campaigns */}
+                {activeDiscountCampaigns.length > 1 && (
+                  <div className="customer-campaigns-nav">
+                    <span style={{ fontSize: '12px', fontWeight: 800, color: '#475569', display: 'flex', alignItems: 'center', gap: '4px', marginRight: '6px', flexShrink: 0 }}>
+                      <Sparkles size={14} style={{ color: '#d97706' }} /> Active Campaigns ({activeDiscountCampaigns.length}):
+                    </span>
+                    {activeDiscountCampaigns.map((camp) => {
+                      const isActive = selectedCustomerCampaign.id === camp.id;
+                      const discTag = camp.discountType === 'percentage' ? `${camp.discountValue}% OFF` : `₹${camp.discountValue} FLAT OFF`;
+                      return (
+                        <button
+                          key={camp.id}
+                          type="button"
+                          className={`customer-campaign-pill ${isActive ? 'active' : ''}`}
+                          onClick={() => setCustomerActiveCampaignId(camp.id)}
+                        >
+                          <span>{camp.name}</span>
+                          <span className="pill-discount-tag">{discTag}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {(() => {
-                  const preset = FESTIVAL_BANNER_PRESETS.find((p) => p.id === primaryActiveCampaign.bannerImageUrl);
-                  const bgImage = preset?.imageUrl || (primaryActiveCampaign.bannerImageUrl?.startsWith('http') ? primaryActiveCampaign.bannerImageUrl : undefined);
+                  const currentCamp = selectedCustomerCampaign;
+                  const preset = FESTIVAL_BANNER_PRESETS.find((p) => p.id === currentCamp.bannerImageUrl);
+                  const bgImage = preset?.imageUrl || (currentCamp.bannerImageUrl?.startsWith('http') ? currentCamp.bannerImageUrl : undefined);
                   const gradient = preset?.gradient || 'linear-gradient(135deg, #78350f 0%, #b45309 45%, #f59e0b 100%)';
                   const badge = preset?.badge || '🎉 FESTIVAL SALE';
-                  const countdown = formatTimeRemaining(primaryActiveCampaign.endAt, currentTime);
+                  const countdown = formatTimeRemaining(currentCamp.endAt, currentTime);
 
                   const eligibleProducts = products.filter((p) => {
                     if (p.available === false) return false;
-                    if (primaryActiveCampaign.targetScope === 'all') return true;
-                    if (primaryActiveCampaign.targetScope === 'categories') {
-                      return primaryActiveCampaign.targetCategories?.includes(p.category || 'Other');
+                    if (currentCamp.targetScope === 'all') return true;
+                    if (currentCamp.targetScope === 'categories') {
+                      return currentCamp.targetCategories?.includes(p.category || 'Other');
                     }
-                    if (primaryActiveCampaign.targetScope === 'products') {
-                      return primaryActiveCampaign.targetProductIds?.includes(p.id);
+                    if (currentCamp.targetScope === 'products') {
+                      return currentCamp.targetProductIds?.includes(p.id);
                     }
                     return false;
                   });
@@ -3804,23 +3899,23 @@ export default function App() {
                             <Sparkles size={12} /> {badge}
                           </span>
                           <h2 className="festival-hero-title">
-                            {primaryActiveCampaign.name.toUpperCase()} – GET{' '}
-                            {primaryActiveCampaign.discountType === 'percentage'
-                              ? `${primaryActiveCampaign.discountValue}% OFF`
-                              : `₹${primaryActiveCampaign.discountValue} FLAT OFF`}
+                            {currentCamp.name.toUpperCase()} – GET{' '}
+                            {currentCamp.discountType === 'percentage'
+                              ? `${currentCamp.discountValue}% OFF`
+                              : `₹${currentCamp.discountValue} FLAT OFF`}
                             !
                           </h2>
-                          {primaryActiveCampaign.description && (
-                            <p className="festival-hero-desc">{primaryActiveCampaign.description}</p>
+                          {currentCamp.description && (
+                            <p className="festival-hero-desc">{currentCamp.description}</p>
                           )}
                           <div className="festival-discount-highlight">
                             <Tag size={16} />
                             <span>
-                              {primaryActiveCampaign.targetScope === 'all'
-                                ? `FLAT ${primaryActiveCampaign.discountType === 'percentage' ? `${primaryActiveCampaign.discountValue}% OFF STOREWIDE` : `₹${primaryActiveCampaign.discountValue} OFF ON ALL TOYS`}`
-                                : primaryActiveCampaign.targetScope === 'categories'
-                                ? `FLAT ${primaryActiveCampaign.discountType === 'percentage' ? `${primaryActiveCampaign.discountValue}% OFF` : `₹${primaryActiveCampaign.discountValue} OFF`} ON ${primaryActiveCampaign.targetCategories?.join(', ')}`
-                                : `SPECIAL DISCOUNT ON ${primaryActiveCampaign.targetProductIds?.length} FEATURED TOYS`}
+                              {currentCamp.targetScope === 'all'
+                                ? `FLAT ${currentCamp.discountType === 'percentage' ? `${currentCamp.discountValue}% OFF STOREWIDE` : `₹${currentCamp.discountValue} OFF ON ALL TOYS`}`
+                                : currentCamp.targetScope === 'categories'
+                                ? `FLAT ${currentCamp.discountType === 'percentage' ? `${currentCamp.discountValue}% OFF` : `₹${currentCamp.discountValue} OFF`} ON ${currentCamp.targetCategories?.join(', ')}`
+                                : `SPECIAL DISCOUNT ON ${currentCamp.targetProductIds?.length} FEATURED TOYS`}
                             </span>
                           </div>
 
@@ -3867,15 +3962,15 @@ export default function App() {
                               <Sparkles size={16} style={{ color: '#d97706' }} /> Featured Festival Deals
                             </h4>
                             <span className="festival-scope-tag">
-                              {primaryActiveCampaign.targetScope === 'all'
+                              {currentCamp.targetScope === 'all'
                                 ? `All ${eligibleProducts.length} Toys Included`
                                 : `${eligibleProducts.length} Toys On Sale`}
                             </span>
                           </div>
 
                           <div className="festival-products-grid">
-                            {eligibleProducts.slice(0, 4).map((p) => {
-                              const discountInfo = calculateProductDiscount(p, [primaryActiveCampaign]);
+                            {eligibleProducts.slice(0, 6).map((p) => {
+                              const discountInfo = calculateProductDiscount(p, [currentCamp]);
                               const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
 
                               return (
@@ -7219,6 +7314,8 @@ export default function App() {
                             startAt: toDatetimeLocalString(new Date()),
                             endAt: toDatetimeLocalString(new Date(Date.now() + 7 * 24 * 3600 * 1000)),
                             isDraft: false,
+                            autoIncludeNewProducts: true,
+                            allowConflictOverride: false,
                           });
                         }
                         setErrorMessage('');
@@ -7394,15 +7491,56 @@ export default function App() {
                         </label>
                       </div>
 
-                      {/* CATEGORIES PICKER */}
-                      {campaignForm.targetScope === 'categories' && (
-                        <div style={{ marginTop: '12px', padding: '12px', background: '#fcfbf7', border: '1px solid #eeece5', borderRadius: '8px' }}>
-                          <p style={{ margin: '0 0 8px 0', fontSize: '12px', fontWeight: 700, color: '#374151' }}>
-                            Select eligible categories:
+                      {/* OPTION A: ALL PRODUCTS TOGGLES */}
+                      {campaignForm.targetScope === 'all' && (
+                        <div style={{ marginTop: '10px', padding: '10px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', margin: 0, fontSize: '13px', fontWeight: 600, color: '#334155' }}>
+                            <input
+                              type="checkbox"
+                              checked={campaignForm.autoIncludeNewProducts !== false}
+                              onChange={(e) => setCampaignForm({ ...campaignForm, autoIncludeNewProducts: e.target.checked })}
+                            />
+                            <span>Automatically include newly added products in this campaign</span>
+                          </label>
+                          <p style={{ margin: '4px 0 0 24px', fontSize: '11px', color: '#64748b' }}>
+                            Any new toys added to the store catalog will automatically receive this campaign discount while it is active.
                           </p>
+                        </div>
+                      )}
+
+                      {/* OPTION C: CATEGORIES PICKER */}
+                      {campaignForm.targetScope === 'categories' && (
+                        <div style={{ marginTop: '12px', padding: '14px', background: '#fcfbf7', border: '1px solid #eeece5', borderRadius: '8px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
+                            <p style={{ margin: 0, fontSize: '12px', fontWeight: 700, color: '#374151' }}>
+                              Select eligible categories ({campaignForm.targetCategories.length} selected):
+                            </p>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ padding: '3px 8px', fontSize: '11px' }}
+                                onClick={() => {
+                                  const allCats = Array.from(new Set(products.map((p) => p.category || 'General toys')));
+                                  setCampaignForm({ ...campaignForm, targetCategories: allCats });
+                                }}
+                              >
+                                Select All
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ padding: '3px 8px', fontSize: '11px' }}
+                                onClick={() => setCampaignForm({ ...campaignForm, targetCategories: [] })}
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
                           <div className="category-checkboxes-grid">
                             {Array.from(new Set(products.map((p) => p.category || 'General toys'))).map((cat) => {
                               const checked = campaignForm.targetCategories.includes(cat);
+                              const count = products.filter((p) => (p.category || 'General toys') === cat && p.available !== false).length;
                               return (
                                 <label key={cat} className="category-checkbox-item">
                                   <input
@@ -7415,7 +7553,9 @@ export default function App() {
                                       setCampaignForm({ ...campaignForm, targetCategories: next });
                                     }}
                                   />
-                                  <span>{cat}</span>
+                                  <span>
+                                    {cat} <small style={{ color: '#64748b', fontWeight: 500 }}>({count})</small>
+                                  </span>
                                 </label>
                               );
                             })}
@@ -7423,68 +7563,163 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* PRODUCT PICKER */}
+                      {/* OPTION B: SEARCHABLE PRODUCT PICKER */}
                       {campaignForm.targetScope === 'products' && (
-                        <div className="product-picker-container">
-                          <p style={{ margin: '0 0 8px 0', fontSize: '12px', fontWeight: 700, color: '#374151' }}>
-                            Select toys ({campaignForm.targetProductIds.length} selected):
-                          </p>
-                          <div style={{ maxHeight: '220px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            {products
-                              .filter((p) => p.available !== false)
-                              .map((p) => {
-                                const checked = campaignForm.targetProductIds.includes(p.id);
-                                const numVal = parseFloat(campaignForm.discountValue) || 0;
-                                const previewPrice = campaignForm.discountType === 'percentage'
-                                  ? Math.max(1, Math.round(p.price * (1 - numVal / 100)))
-                                  : Math.max(1, p.price - numVal);
-
-                                return (
-                                  <label
-                                    key={p.id}
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '10px',
-                                      padding: '8px 12px',
-                                      background: checked ? '#ecfdf5' : '#ffffff',
-                                      border: checked ? '1px solid #10b981' : '1px solid #e5e7eb',
-                                      borderRadius: '8px',
-                                      cursor: 'pointer',
-                                    }}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      onChange={(e) => {
-                                        const next = e.target.checked
-                                          ? [...campaignForm.targetProductIds, p.id]
-                                          : campaignForm.targetProductIds.filter((id) => id !== p.id);
-                                        setCampaignForm({ ...campaignForm, targetProductIds: next });
-                                      }}
-                                    />
-                                    <img
-                                      src={(p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
-                                      alt=""
-                                      style={{ width: '36px', height: '36px', borderRadius: '6px', objectFit: 'cover' }}
-                                    />
-                                    <div style={{ flex: 1, minWidth: 0, fontSize: '13px' }}>
-                                      <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                        {p.name}
-                                      </strong>
-                                      <span style={{ fontSize: '11px', color: '#6b7280' }}>
-                                        Regular: {da(p.price)}
-                                        {checked && numVal > 0 && (
-                                          <span style={{ color: '#059669', fontWeight: 700, marginLeft: '6px' }}>
-                                            → Sale: {da(previewPrice)}
-                                          </span>
-                                        )}
-                                      </span>
-                                    </div>
-                                  </label>
-                                );
-                              })}
+                        <div className="product-picker-container" style={{ marginTop: '12px', padding: '14px', background: '#fcfbf7', border: '1px solid #eeece5', borderRadius: '8px' }}>
+                          <div className="product-picker-search-bar">
+                            <Search size={15} style={{ color: '#94a3b8' }} />
+                            <input
+                              type="text"
+                              placeholder="Search toys by name or category..."
+                              value={campaignProductSearch}
+                              onChange={(e) => setCampaignProductSearch(e.target.value)}
+                            />
+                            {campaignProductSearch && (
+                              <button
+                                type="button"
+                                onClick={() => setCampaignProductSearch('')}
+                                style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, color: '#94a3b8' }}
+                                aria-label="Clear search"
+                              >
+                                ✕
+                              </button>
+                            )}
                           </div>
+
+                          {(() => {
+                            const q = campaignProductSearch.trim().toLowerCase();
+                            const filteredToys = products
+                              .filter((p) => p.available !== false)
+                              .filter((p) => !q || p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
+
+                            return (
+                              <>
+                                <div className="product-picker-toolbar">
+                                  <span style={{ fontSize: '12px', fontWeight: 700, color: '#374151' }}>
+                                    Showing {filteredToys.length} of {products.filter((p) => p.available !== false).length} toys
+                                    <span style={{ marginLeft: '6px', color: '#059669', fontWeight: 800 }}>
+                                      ({campaignForm.targetProductIds.length} selected)
+                                    </span>
+                                  </span>
+
+                                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                    <button
+                                      type="button"
+                                      className="secondary-btn"
+                                      style={{ padding: '3px 8px', fontSize: '11px' }}
+                                      onClick={() => {
+                                        const visibleIds = filteredToys.map((p) => p.id);
+                                        const combined = Array.from(new Set([...campaignForm.targetProductIds, ...visibleIds]));
+                                        setCampaignForm({ ...campaignForm, targetProductIds: combined });
+                                      }}
+                                    >
+                                      Select All Visible
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="secondary-btn"
+                                      style={{ padding: '3px 8px', fontSize: '11px' }}
+                                      onClick={() => {
+                                        const visibleIds = new Set(filteredToys.map((p) => p.id));
+                                        setCampaignForm({
+                                          ...campaignForm,
+                                          targetProductIds: campaignForm.targetProductIds.filter((id) => !visibleIds.has(id)),
+                                        });
+                                      }}
+                                    >
+                                      Deselect Visible
+                                    </button>
+                                    {campaignForm.targetProductIds.length > 0 && (
+                                      <button
+                                        type="button"
+                                        className="secondary-btn"
+                                        style={{ padding: '3px 8px', fontSize: '11px', color: '#b91c1c' }}
+                                        onClick={() => setCampaignForm({ ...campaignForm, targetProductIds: [] })}
+                                      >
+                                        Clear All
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div style={{ maxHeight: '240px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                  {filteredToys.length === 0 ? (
+                                    <div style={{ padding: '20px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>
+                                      No toys match "{campaignProductSearch}"
+                                    </div>
+                                  ) : (
+                                    filteredToys.map((p) => {
+                                      const checked = campaignForm.targetProductIds.includes(p.id);
+                                      const numVal = parseFloat(campaignForm.discountValue) || 0;
+                                      const previewPrice = campaignForm.discountType === 'percentage'
+                                        ? Math.max(1, Math.round(p.price * (1 - numVal / 100)))
+                                        : Math.max(1, p.price - numVal);
+
+                                      const conflict = detectedCampaignConflicts.find((c) => c.conflictingProductIds.includes(p.id));
+
+                                      return (
+                                        <label
+                                          key={p.id}
+                                          style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '10px',
+                                            padding: '8px 12px',
+                                            background: checked ? '#ecfdf5' : '#ffffff',
+                                            border: checked ? '1.5px solid #10b981' : conflict ? '1px solid #fde68a' : '1px solid #e5e7eb',
+                                            borderRadius: '8px',
+                                            cursor: 'pointer',
+                                            transition: 'all 0.15s ease',
+                                          }}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={(e) => {
+                                              const next = e.target.checked
+                                                ? [...campaignForm.targetProductIds, p.id]
+                                                : campaignForm.targetProductIds.filter((id) => id !== p.id);
+                                              setCampaignForm({ ...campaignForm, targetProductIds: next });
+                                            }}
+                                          />
+                                          <img
+                                            src={(p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
+                                            alt=""
+                                            style={{ width: '36px', height: '36px', borderRadius: '6px', objectFit: 'cover' }}
+                                          />
+                                          <div style={{ flex: 1, minWidth: 0, fontSize: '13px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                              <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {p.name}
+                                              </strong>
+                                              {p.category && (
+                                                <span style={{ fontSize: '10px', background: '#f1f5f9', color: '#475569', padding: '1px 6px', borderRadius: '4px' }}>
+                                                  {p.category}
+                                                </span>
+                                              )}
+                                              {conflict && (
+                                                <span className="conflict-product-warning-badge" title={`Overlaps with ${conflict.campaignName}`}>
+                                                  <AlertCircle size={10} /> In: {conflict.campaignName}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <span style={{ fontSize: '11px', color: '#6b7280' }}>
+                                              Regular: {da(p.price)}
+                                              {checked && numVal > 0 && (
+                                                <span style={{ color: '#059669', fontWeight: 700, marginLeft: '6px' }}>
+                                                  → Sale: {da(previewPrice)}
+                                                </span>
+                                              )}
+                                            </span>
+                                          </div>
+                                        </label>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -7522,6 +7757,61 @@ export default function App() {
                     {campaignForm.startAt && campaignForm.endAt && new Date(campaignForm.endAt).getTime() <= new Date(campaignForm.startAt).getTime() && (
                       <div className="error-msg" style={{ margin: '10px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <AlertCircle size={16} /> End date & time must be strictly after the start date & time.
+                      </div>
+                    )}
+
+                    {/* CONFLICT DETECTION WARNING & RESOLUTION */}
+                    {detectedCampaignConflicts.length > 0 && (
+                      <div style={{
+                        margin: '16px 0',
+                        padding: '14px 16px',
+                        background: '#fffbeb',
+                        border: '1.5px solid #f59e0b',
+                        borderRadius: '10px',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#92400e', fontWeight: 700, fontSize: '14px', marginBottom: '6px' }}>
+                          <AlertTriangle size={18} />
+                          <span>Campaign Schedule & Product Overlap Detected</span>
+                        </div>
+                        <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#78350f', lineHeight: 1.5 }}>
+                          {detectedCampaignConflicts.reduce((sum, c) => sum + c.conflictingProductIds.length, 0)} product(s) in this campaign are already included in another active or scheduled campaign during overlapping dates:
+                        </p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px' }}>
+                          {detectedCampaignConflicts.map((c) => (
+                            <div key={c.campaignId} style={{ fontSize: '12px', background: '#fef3c7', padding: '6px 10px', borderRadius: '6px', color: '#78350f' }}>
+                              <strong>"{c.campaignName}"</strong> ({formatInIST(c.startAt)} – {formatInIST(c.endAt)}):
+                              <span style={{ marginLeft: '6px', color: '#92400e' }}>
+                                {c.conflictingProductNames.slice(0, 3).join(', ')}{c.conflictingProductNames.length > 3 ? ` +${c.conflictingProductNames.length - 3} more` : ''}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center', paddingTop: '8px', borderTop: '1px dashed #fcd34d' }}>
+                          {campaignForm.targetScope === 'products' && (
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              style={{ padding: '6px 12px', fontSize: '11px', background: '#ffffff', borderColor: '#d97706', color: '#92400e' }}
+                              onClick={() => {
+                                const allConflictingIds = new Set(detectedCampaignConflicts.flatMap((c) => c.conflictingProductIds));
+                                setCampaignForm({
+                                  ...campaignForm,
+                                  targetProductIds: campaignForm.targetProductIds.filter((id) => !allConflictingIds.has(id)),
+                                });
+                              }}
+                            >
+                              Remove Overlapping Products ({detectedCampaignConflicts.reduce((sum, c) => sum + c.conflictingProductIds.length, 0)})
+                            </button>
+                          )}
+                          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#78350f', cursor: 'pointer', margin: 0, fontWeight: 600 }}>
+                            <input
+                              type="checkbox"
+                              checked={campaignForm.allowConflictOverride}
+                              onChange={(e) => setCampaignForm({ ...campaignForm, allowConflictOverride: e.target.checked })}
+                            />
+                            <span>Allow Best Discount (Anti-Stacking): Apply single highest discount to customer</span>
+                          </label>
+                        </div>
                       </div>
                     )}
 

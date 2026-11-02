@@ -202,8 +202,130 @@ export interface DiscountCampaign {
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
+  autoIncludeNewProducts?: boolean;     // For targetScope === 'all', automatically include new products
+  allowConflictOverride?: boolean;      // Owner acknowledged non-stacking overlap
   totalOrdersCount?: number;            // Orders placed under this campaign
   totalRevenue?: number;                // Sales revenue generated
+}
+
+export interface CampaignConflict {
+  conflictingCampaignId: string;
+  conflictingCampaignName: string;
+  campaignId?: string;
+  campaignName?: string;
+  conflictingCampaignStatus: CampaignStatus;
+  startAt: string;
+  endAt: string;
+  conflictingProductIds: string[];
+  conflictingProductNames: string[];
+}
+
+/**
+ * Returns any products that this campaign targets based on its targetScope,
+ * targetCategories, targetProductIds, and all products in the catalogue.
+ */
+export function getCampaignTargetProductIds(
+  campaign: {
+    targetScope: CampaignTargetScope;
+    targetCategories?: string[];
+    targetProductIds?: string[];
+    autoIncludeNewProducts?: boolean;
+  },
+  products: Product[]
+): string[] {
+  const eligibleProducts = products.filter((p) => p.available !== false);
+  if (campaign.targetScope === 'all') {
+    return eligibleProducts.map((p) => p.id);
+  }
+  if (campaign.targetScope === 'categories') {
+    const cats = new Set(campaign.targetCategories || []);
+    return eligibleProducts
+      .filter((p) => cats.has(p.category || 'General toys') || cats.has(p.category || 'Other'))
+      .map((p) => p.id);
+  }
+  if (campaign.targetScope === 'products') {
+    const ids = new Set(campaign.targetProductIds || []);
+    return eligibleProducts.filter((p) => ids.has(p.id)).map((p) => p.id);
+  }
+  return [];
+}
+
+/**
+ * Detects whether candidate campaign dates overlap with an existing campaign's dates.
+ */
+export function doCampaignDatesOverlap(
+  start1: string | number,
+  end1: string | number,
+  start2: string | number,
+  end2: string | number
+): boolean {
+  const s1 = new Date(start1).getTime();
+  const e1 = new Date(end1).getTime();
+  const s2 = new Date(start2).getTime();
+  const e2 = new Date(end2).getTime();
+
+  if (isNaN(s1) || isNaN(e1) || isNaN(s2) || isNaN(e2)) return false;
+  return s1 < e2 && e1 > s2;
+}
+
+/**
+ * Detects conflicts between a candidate campaign and all other existing campaigns.
+ * Only compares against Active or Scheduled campaigns (excluding cancelled, expired, drafts, and self).
+ */
+export function detectCampaignConflicts(
+  candidate: {
+    id?: string;
+    targetScope: CampaignTargetScope;
+    targetCategories?: string[];
+    targetProductIds?: string[];
+    startAt: string;
+    endAt: string;
+  },
+  existingCampaigns: DiscountCampaign[],
+  products: Product[],
+  nowMs: number = Date.now()
+): CampaignConflict[] {
+  const candidateProductIds = new Set(getCampaignTargetProductIds(candidate, products));
+  if (candidateProductIds.size === 0) return [];
+
+  const conflicts: CampaignConflict[] = [];
+
+  for (const other of existingCampaigns) {
+    if (other.deleted || other.cancelled || other.isDraft) continue;
+    if (candidate.id && other.id === candidate.id) continue;
+
+    const status = computeCampaignStatus(other, nowMs);
+    if (status !== 'Active' && status !== 'Scheduled') continue;
+
+    // Check timeframe overlap
+    if (!doCampaignDatesOverlap(candidate.startAt, candidate.endAt, other.startAt, other.endAt)) {
+      continue;
+    }
+
+    // Check product overlap
+    const otherProductIds = getCampaignTargetProductIds(other, products);
+    const overlappingIds = otherProductIds.filter((id) => candidateProductIds.has(id));
+
+    if (overlappingIds.length > 0) {
+      const conflictingProductNames = overlappingIds
+        .map((id) => products.find((p) => p.id === id)?.name || id)
+        .slice(0, 10);
+
+      conflicts.push({
+        conflictingCampaignId: other.id,
+        conflictingCampaignName: other.name,
+        campaignId: other.id,
+        campaignName: other.name,
+        conflictingCampaignStatus: status,
+        startAt: other.startAt,
+        endAt: other.endAt,
+        conflictingProductIds: overlappingIds,
+        conflictingProductNames,
+      });
+    }
+  }
+
+  return conflicts;
 }
 
 export interface FestivalBannerPreset {

@@ -3259,5 +3259,108 @@ footer > button:hover {
   color: #3b4535;
 }
 
+/* Customer Multi-Campaign Switcher Tabs */
+.customer-campaigns-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 14px;
+  margin-bottom: 12px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.customer-campaign-pill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.customer-campaign-pill:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.customer-campaign-pill.active {
+  background: #1e293b;
+  color: #ffffff;
+  border-color: #1e293b;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+}
+
+.customer-campaign-pill .pill-discount-tag {
+  font-size: 11px;
+  font-weight: 800;
+  background: #f59e0b;
+  color: #78350f;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.customer-campaign-pill.active .pill-discount-tag {
+  background: #f59e0b;
+  color: #78350f;
+}
+
+/* Searchable Product Picker in Owner Campaign Form */
+.product-picker-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+
+.product-picker-search-bar input {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  font-size: 13px !important;
+  flex: 1;
+  background: transparent !important;
+}
+
+.product-picker-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #e2e8f0;
+}
+
+.conflict-product-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+}
+
+
 
 
