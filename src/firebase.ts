@@ -1560,6 +1560,78 @@ export function subscribeToCartItems(
   }
 }
 
+function normalizeActiveCartSnapshot(snapshot: any): CartItem[] {
+  const deduped = new Map<string, CartItem>();
+  snapshot.forEach((d: any) => {
+    const raw = d.data() as CartItem;
+    if (!raw || !raw.customerId || !raw.productId) return;
+    const qty = typeof raw.quantity === 'number' && isFinite(raw.quantity) ? Math.round(raw.quantity) : 1;
+    if (qty <= 0) return;
+
+    const itemId = String(raw.id || d.id);
+    const colourKey = String(raw.colour || '').trim().toLowerCase() || 'default';
+    const dedupeKey = itemId || `${raw.customerId}__${raw.productId}__${colourKey}`;
+
+    const normalized: CartItem = {
+      ...raw,
+      id: itemId,
+      quantity: qty,
+    };
+
+    const existing = deduped.get(dedupeKey);
+    if (!existing) {
+      deduped.set(dedupeKey, normalized);
+    } else {
+      const existingTime = new Date(existing.updatedAt || existing.addedAt || 0).getTime();
+      const incomingTime = new Date(normalized.updatedAt || normalized.addedAt || 0).getTime();
+      if (incomingTime >= existingTime) {
+        deduped.set(dedupeKey, normalized);
+      }
+    }
+  });
+  return Array.from(deduped.values()).sort(
+    (a, b) => new Date(b.addedAt || 0).getTime() - new Date(a.addedAt || 0).getTime()
+  );
+}
+
+export async function fetchAllCartItemsFromCloud(): Promise<CartItem[]> {
+  const path = 'cartItems';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'cartItems'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'cartItems'));
+    }
+    return normalizeActiveCartSnapshot(snapshot);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAllCartItems(
+  callback: (items: CartItem[]) => void
+): () => void {
+  const path = 'cartItems';
+  try {
+    return onSnapshot(
+      collection(db, 'cartItems'),
+      (snapshot) => {
+        callback(normalizeActiveCartSnapshot(snapshot));
+      },
+      (error) => {
+        console.warn('All cart items subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
 // ----------------- POPULAR SEARCHES (OWNER-MANAGED, LIVE ON CUSTOMER SIDE) -----------------
 function normalizePopularSearch(data: any, docId: string): PopularSearchItem {
   return {

@@ -6395,5 +6395,18 @@ footer > button:hover {
   }
 }
 
+.analytics-kpi-card.analytics-kpi-clickable {
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+}
 
+.analytics-kpi-card.analytics-kpi-clickable:hover {
+  transform: translateY(-2px);
+  border-color: #c5d1ab;
+  box-shadow: 0 10px 24px rgba(41, 57, 43, 0.08);
+}
 
+.analytics-kpi-card.analytics-kpi-clickable:focus-visible {
+  outline: 2px solid #718d43;
+  outline-offset: 2px;
+}

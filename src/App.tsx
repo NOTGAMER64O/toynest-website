@@ -294,6 +294,8 @@ import {
   deleteCartItemFromCloud,
   fetchCartItemsFromCloud,
   subscribeToCartItems,
+  fetchAllCartItemsFromCloud,
+  subscribeToAllCartItems,
   searchProductsFromCloud,
   fetchPopularSearchesFromCloud,
   subscribeToPopularSearches,
@@ -848,6 +850,7 @@ export default function App() {
   >('products');
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
   const [analyticsCustomers, setAnalyticsCustomers] = useState<AnalyticsCustomer[]>([]);
+  const [allCartItems, setAllCartItems] = useState<CartItem[]>([]);
   const [analyticsLoading, setAnalyticsLoading] = useState<boolean>(false);
   const [popularSearches, setPopularSearches] = useState<PopularSearchItem[]>(() => getStoredPopularSearches());
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
@@ -1715,13 +1718,15 @@ export default function App() {
     if (page !== 'owner' || ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
     setAnalyticsLoading(true);
     try {
-      const [events, customers, cloudOrders] = await Promise.all([
+      const [events, customers, cloudOrders, cloudCartItems] = await Promise.all([
         fetchAnalyticsEventsFromCloud(),
         fetchAnalyticsCustomersFromCloud(),
         fetchAllOrdersFromCloud(),
+        fetchAllCartItemsFromCloud(),
       ]);
       setAnalyticsEvents(events);
       setAnalyticsCustomers(customers);
+      setAllCartItems(cloudCartItems);
       if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
         setOwnerOrders(cloudOrders);
         saveStoredOrders(cloudOrders);
@@ -2098,6 +2103,7 @@ export default function App() {
 
       let unsubAnalyticsEvents = () => {};
       let unsubAnalyticsCustomers = () => {};
+      let unsubAllCartItems = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -2107,6 +2113,11 @@ export default function App() {
         unsubAnalyticsCustomers = subscribeToAnalyticsCustomers((customers) => {
           setAnalyticsCustomers(customers);
         });
+        unsubAllCartItems = subscribeToAllCartItems((liveCarts) => {
+          setAllCartItems(liveCarts);
+        });
+      } else {
+        setAllCartItems([]);
       }
 
       return () => {
@@ -2114,7 +2125,10 @@ export default function App() {
         unsubSettings();
         unsubAnalyticsEvents();
         unsubAnalyticsCustomers();
+        unsubAllCartItems();
       };
+    } else {
+      setAllCartItems([]);
     }
   }, [page, ownerPin]);
 
@@ -2451,9 +2465,11 @@ export default function App() {
     showCartToast(`Moved "${savedItem.productName}" back to active cart`);
 
     try {
+      const itemToSaveInCloud =
+        existingIndex >= 0 ? nextCart[existingIndex] : newCartItem;
       await Promise.all([
         deleteSavedItemFromCloud(savedItem.id),
-        saveCartItemToCloud(newCartItem),
+        saveCartItemToCloud(itemToSaveInCloud),
       ]);
     } catch (err) {
       console.warn('Could not sync move to cart to cloud:', err);
@@ -7654,6 +7670,7 @@ export default function App() {
                 orders={ownerOrders}
                 analyticsEvents={analyticsEvents}
                 analyticsCustomers={analyticsCustomers}
+                activeCartItems={allCartItems}
                 loading={analyticsLoading}
                 onRefresh={loadAnalyticsData}
                 onViewFullOrder={handleViewFullOrderFromAnalytics}

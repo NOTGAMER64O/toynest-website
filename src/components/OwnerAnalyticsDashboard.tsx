@@ -23,6 +23,7 @@ import {
 import {
   type AnalyticsCustomer,
   type AnalyticsEvent,
+  type CartItem,
   type Order,
   type Product,
   getISTDateKey,
@@ -33,6 +34,7 @@ interface OwnerAnalyticsDashboardProps {
   orders: Order[];
   analyticsEvents: AnalyticsEvent[];
   analyticsCustomers: AnalyticsCustomer[];
+  activeCartItems: CartItem[];
   loading: boolean;
   onRefresh: () => Promise<void>;
   onViewFullOrder?: (order: Order) => void;
@@ -208,6 +210,7 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
   orders,
   analyticsEvents,
   analyticsCustomers,
+  activeCartItems,
   loading,
   onRefresh,
   onViewFullOrder,
@@ -223,15 +226,18 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
   const [salesMetric, setSalesMetric] = useState<SalesMetric>('revenue');
   const [hoveredBucketIdx, setHoveredBucketIdx] = useState<number | null>(null);
   const [selectedBucketKey, setSelectedBucketKey] = useState<string | null>(null);
+  const [isLiveCartModalOpen, setIsLiveCartModalOpen] = useState<boolean>(false);
+  const [liveCartViewTab, setLiveCartViewTab] = useState<'products' | 'customers'>('products');
   const [productTab, setProductTab] = useState<ProductViewTab>('rankings');
 
   useEffect(() => {
-    if (!selectedBucketKey) return;
+    if (!selectedBucketKey && !isLiveCartModalOpen) return;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setSelectedBucketKey(null);
+        setIsLiveCartModalOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -239,7 +245,7 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       document.body.style.overflow = prevOverflow;
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [selectedBucketKey]);
+  }, [selectedBucketKey, isLiveCartModalOpen]);
 
   const { startDateKey, endDateKey, rangeLabel } = useMemo(() => {
     if (datePreset === 'today') {
@@ -395,6 +401,162 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
     nonCancelledRangeOrders,
     products,
   ]);
+
+  // ----------------- 1B. LIVE ACTIVE CUSTOMER CARTS (REAL-TIME FIRESTORE) -----------------
+  const liveCartSummary = useMemo(() => {
+    const dedupedItems = new Map<string, CartItem>();
+    for (const raw of activeCartItems) {
+      if (!raw || !raw.customerId || !raw.productId) continue;
+      const qty =
+        typeof raw.quantity === 'number' && isFinite(raw.quantity)
+          ? Math.round(raw.quantity)
+          : 1;
+      if (qty <= 0) continue;
+
+      const colourKey = String(raw.colour || '').trim().toLowerCase() || 'default';
+      const dedupeKey = raw.id || `${raw.customerId}__${raw.productId}__${colourKey}`;
+      if (!dedupedItems.has(dedupeKey)) {
+        dedupedItems.set(dedupeKey, { ...raw, quantity: qty });
+      }
+    }
+
+    const customerNameMap = new Map<string, string>();
+    for (const c of analyticsCustomers) {
+      if (c?.customerId && c?.displayName?.trim()) {
+        customerNameMap.set(c.customerId, c.displayName.trim());
+      }
+    }
+    for (const o of orders) {
+      if (o?.customerId && o?.name?.trim()) {
+        customerNameMap.set(o.customerId, o.name.trim());
+      }
+    }
+
+    interface LiveProductCartEntry {
+      customerId: string;
+      customerLabel: string;
+      quantity: number;
+      colour?: string;
+      updatedAt: string;
+    }
+
+    interface LiveProductInCartRow {
+      productId: string;
+      productName: string;
+      productImageUrl: string;
+      category: string;
+      unitPrice: number;
+      totalQuantity: number;
+      customerIds: Set<string>;
+      entries: LiveProductCartEntry[];
+    }
+
+    interface LiveCustomerCartRow {
+      customerId: string;
+      customerLabel: string;
+      totalQuantity: number;
+      distinctProductIds: Set<string>;
+      items: Array<CartItem & { resolvedImage: string; resolvedName: string }>;
+      lastUpdatedAt: string;
+    }
+
+    const prodMap = new Map<string, LiveProductInCartRow>();
+    const custMap = new Map<string, LiveCustomerCartRow>();
+    let totalQuantity = 0;
+
+    for (const item of dedupedItems.values()) {
+      const qty = item.quantity || 1;
+      totalQuantity += qty;
+
+      const catalogProd = products.find((p) => p.id === item.productId);
+      const resolvedName = catalogProd?.name || item.productName || 'Product';
+      const resolvedImage =
+        (catalogProd?.imageUrls && catalogProd.imageUrls[0]) ||
+        catalogProd?.imageUrl ||
+        item.productImageUrl ||
+        '/toys/toy-40ba4ba9-1.jpg';
+      const resolvedCategory = catalogProd?.category || item.category || 'Other';
+      const unitPrice = typeof catalogProd?.price === 'number' ? catalogProd.price : item.price || 0;
+      const customerLabel =
+        customerNameMap.get(item.customerId) ||
+        `Guest (${item.customerId.slice(-6).toUpperCase()})`;
+      const itemTime = item.updatedAt || item.addedAt || '';
+
+      // Aggregate per product across all customers
+      const existingProd = prodMap.get(item.productId) || {
+        productId: item.productId,
+        productName: resolvedName,
+        productImageUrl: resolvedImage,
+        category: resolvedCategory,
+        unitPrice,
+        totalQuantity: 0,
+        customerIds: new Set<string>(),
+        entries: [],
+      };
+      existingProd.totalQuantity += qty;
+      existingProd.customerIds.add(item.customerId);
+      existingProd.entries.push({
+        customerId: item.customerId,
+        customerLabel,
+        quantity: qty,
+        colour: item.colour,
+        updatedAt: itemTime,
+      });
+      prodMap.set(item.productId, existingProd);
+
+      // Track each customer's cart separately
+      const existingCust = custMap.get(item.customerId) || {
+        customerId: item.customerId,
+        customerLabel,
+        totalQuantity: 0,
+        distinctProductIds: new Set<string>(),
+        items: [],
+        lastUpdatedAt: itemTime,
+      };
+      existingCust.totalQuantity += qty;
+      existingCust.distinctProductIds.add(item.productId);
+      existingCust.items.push({
+        ...item,
+        resolvedName,
+        resolvedImage,
+      });
+      if (itemTime > existingCust.lastUpdatedAt) {
+        existingCust.lastUpdatedAt = itemTime;
+      }
+      custMap.set(item.customerId, existingCust);
+    }
+
+    const productsInCarts = Array.from(prodMap.values())
+      .map((p) => ({
+        ...p,
+        customerCount: p.customerIds.size,
+      }))
+      .sort(
+        (a, b) =>
+          b.totalQuantity - a.totalQuantity ||
+          b.customerCount - a.customerCount ||
+          a.productName.localeCompare(b.productName)
+      );
+
+    const customerCarts = Array.from(custMap.values())
+      .map((c) => ({
+        ...c,
+        distinctCount: c.distinctProductIds.size,
+      }))
+      .sort(
+        (a, b) =>
+          b.totalQuantity - a.totalQuantity ||
+          new Date(b.lastUpdatedAt || 0).getTime() - new Date(a.lastUpdatedAt || 0).getTime()
+      );
+
+    return {
+      totalQuantity,
+      distinctProductsCount: prodMap.size,
+      activeCustomersCount: custMap.size,
+      productsInCarts,
+      customerCarts,
+    };
+  }, [activeCartItems, products, analyticsCustomers, orders]);
 
   // ----------------- 2. SALES ANALYTICS (DAILY / WEEKLY / MONTHLY & CHART) -----------------
   const salesSummary = useMemo(() => {
@@ -1129,14 +1291,32 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
           </small>
         </article>
 
-        <article className="analytics-kpi-card">
+        <article
+          className="analytics-kpi-card analytics-kpi-clickable"
+          role="button"
+          tabIndex={0}
+          onClick={() => setIsLiveCartModalOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setIsLiveCartModalOpen(true);
+            }
+          }}
+          title="Tap to inspect products currently in customer carts"
+        >
           <div className="analytics-kpi-head">
             <span>Products added to cart</span>
             <ShoppingCart size={18} />
           </div>
-          <strong className="analytics-kpi-val">{overview.totalAddedToCart.toLocaleString('en-IN')}</strong>
+          <strong className="analytics-kpi-val">
+            {liveCartSummary.totalQuantity.toLocaleString('en-IN')}
+          </strong>
           <small className="analytics-kpi-sub">
-            {overview.distinctCartProducts} distinct toys carted
+            {liveCartSummary.distinctProductsCount} distinct{' '}
+            {liveCartSummary.distinctProductsCount === 1 ? 'product' : 'products'} ·{' '}
+            {liveCartSummary.activeCustomersCount}{' '}
+            {liveCartSummary.activeCustomersCount === 1 ? 'cart' : 'carts'}
+            {liveCartSummary.totalQuantity > 0 ? ' · View items' : ''}
           </small>
         </article>
       </div>
@@ -1876,6 +2056,186 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
                       </article>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* LIVE CUSTOMER CARTS BREAKDOWN POPUP / BOTTOM SHEET */}
+      {isLiveCartModalOpen && (
+        <div
+          className="analytics-orders-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="analytics-live-cart-sheet-title"
+          onClick={() => setIsLiveCartModalOpen(false)}
+        >
+          <div
+            className="analytics-orders-sheet"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="analytics-sheet-drag-handle" aria-hidden="true" />
+
+            <div className="analytics-sheet-header">
+              <div className="analytics-sheet-title-wrap">
+                <span className="eyebrow">REAL-TIME ACTIVE CARTS</span>
+                <h3 id="analytics-live-cart-sheet-title">Products Currently in Carts</h3>
+                <p>
+                  {liveCartSummary.totalQuantity}{' '}
+                  {liveCartSummary.totalQuantity === 1 ? 'unit' : 'units'} across{' '}
+                  {liveCartSummary.distinctProductsCount}{' '}
+                  {liveCartSummary.distinctProductsCount === 1 ? 'distinct product' : 'distinct products'}
+                </p>
+              </div>
+
+              <div className="analytics-sheet-header-right">
+                <button
+                  type="button"
+                  className="analytics-sheet-close-btn"
+                  onClick={() => setIsLiveCartModalOpen(false)}
+                  aria-label="Close live carts breakdown"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="analytics-sheet-revenue-banner">
+              <div>
+                <span>Total active cart quantity</span>
+                <strong>{liveCartSummary.totalQuantity.toLocaleString('en-IN')}</strong>
+              </div>
+              <span className="analytics-sheet-count-pill">
+                <ShoppingCart size={14} />
+                {liveCartSummary.activeCustomersCount}{' '}
+                {liveCartSummary.activeCustomersCount === 1 ? 'customer cart' : 'customer carts'}
+              </span>
+            </div>
+
+            {liveCartSummary.totalQuantity > 0 && (
+              <div style={{ padding: '12px 22px 0' }}>
+                <div className="analytics-segmented" role="tablist" aria-label="Live cart view">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={liveCartViewTab === 'products'}
+                    className={liveCartViewTab === 'products' ? 'active' : ''}
+                    onClick={() => setLiveCartViewTab('products')}
+                  >
+                    By Product ({liveCartSummary.distinctProductsCount})
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={liveCartViewTab === 'customers'}
+                    className={liveCartViewTab === 'customers' ? 'active' : ''}
+                    onClick={() => setLiveCartViewTab('customers')}
+                  >
+                    By Customer Cart ({liveCartSummary.activeCustomersCount})
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="analytics-sheet-body">
+              {liveCartSummary.totalQuantity === 0 ? (
+                <div className="analytics-sheet-empty">
+                  <div className="analytics-sheet-empty-icon">🛒</div>
+                  <strong>No products in customer carts right now.</strong>
+                  <p>Live active carts update here automatically as shoppers add or remove toys.</p>
+                </div>
+              ) : liveCartViewTab === 'products' ? (
+                <div className="analytics-sheet-orders-list">
+                  {liveCartSummary.productsInCarts.map((prod) => (
+                    <article key={prod.productId} className="analytics-sheet-order-card">
+                      <div className="analytics-sheet-product-row">
+                        <img
+                          src={prod.productImageUrl}
+                          alt={prod.productName}
+                          className="analytics-sheet-prod-img"
+                          loading="lazy"
+                        />
+                        <div className="analytics-sheet-prod-details">
+                          <strong>{prod.productName}</strong>
+                          <div className="analytics-sheet-prod-sub">
+                            <span>{prod.category}</span>
+                            <span>{formatCurrency(prod.unitPrice)} each</span>
+                            <span>
+                              In {prod.customerCount}{' '}
+                              {prod.customerCount === 1 ? 'customer cart' : 'customer carts'}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="analytics-sheet-order-amount">
+                          <span>Qty in Carts</span>
+                          <strong>{prod.totalQuantity}</strong>
+                        </div>
+                      </div>
+
+                      <div className="analytics-sheet-order-footer">
+                        <div className="analytics-sheet-badges">
+                          {prod.entries.map((entry, idx) => (
+                            <span
+                              key={`${entry.customerId}-${entry.colour || 'default'}-${idx}`}
+                              className="analytics-status-pill order-progress"
+                            >
+                              {entry.customerLabel}: ×{entry.quantity}
+                              {entry.colour ? ` (${entry.colour})` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="analytics-sheet-orders-list">
+                  {liveCartSummary.customerCarts.map((cust) => (
+                    <article key={cust.customerId} className="analytics-sheet-order-card">
+                      <div className="analytics-sheet-order-top">
+                        <div className="analytics-sheet-customer-info">
+                          <strong>{cust.customerLabel}</strong>
+                          <span>
+                            ID: {cust.customerId.slice(0, 14)} · {cust.distinctCount}{' '}
+                            {cust.distinctCount === 1 ? 'distinct product' : 'distinct products'}
+                          </span>
+                        </div>
+                        <div className="analytics-sheet-order-meta-right">
+                          <span className="analytics-sheet-order-id">
+                            Total Qty: {cust.totalQuantity}
+                          </span>
+                          {cust.lastUpdatedAt && (
+                            <time dateTime={cust.lastUpdatedAt}>
+                              Updated {formatFullDateTimeIST(cust.lastUpdatedAt)}
+                            </time>
+                          )}
+                        </div>
+                      </div>
+
+                      {cust.items.map((item) => (
+                        <div key={item.id} className="analytics-sheet-product-row">
+                          <img
+                            src={item.resolvedImage}
+                            alt={item.resolvedName}
+                            className="analytics-sheet-prod-img"
+                            loading="lazy"
+                          />
+                          <div className="analytics-sheet-prod-details">
+                            <strong>{item.resolvedName}</strong>
+                            <div className="analytics-sheet-prod-sub">
+                              <span>Qty: {item.quantity}</span>
+                              {item.colour && <span>Colour: {item.colour}</span>}
+                            </div>
+                          </div>
+                          <div className="analytics-sheet-order-amount">
+                            <span>Subtotal</span>
+                            <strong>{formatCurrency((item.price || 0) * (item.quantity || 1))}</strong>
+                          </div>
+                        </div>
+                      ))}
+                    </article>
+                  ))}
                 </div>
               )}
             </div>

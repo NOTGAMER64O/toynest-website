@@ -763,6 +763,7 @@ export interface CartItem {
   isScheduledOffer?: boolean;
   scheduledOfferId?: string;
   addedAt: string;
+  updatedAt?: string;
 }
 
 export interface SavedForLaterItem {

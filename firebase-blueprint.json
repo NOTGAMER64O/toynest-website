@@ -200,6 +200,25 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "customerId", "firstSeenAt", "lastSeenAt", "visitCount", "createdAt"]
+    },
+    "CartItem": {
+      "title": "Cart Item",
+      "description": "An active item currently inside a customer shopping cart",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "productImageUrl": { "type": "string", "maxLength": 1000 },
+        "category": { "type": "string", "maxLength": 100 },
+        "price": { "type": "number" },
+        "colour": { "type": "string", "maxLength": 100 },
+        "quantity": { "type": "number" },
+        "addedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "customerId", "productId", "productName", "price", "quantity", "addedAt"]
     }
   },
   "firestore": {
@@ -242,6 +261,10 @@
     "/analyticsCustomers/{customerId}": {
       "schema": { "$ref": "#/entities/AnalyticsCustomer" },
       "description": "Unique customer activity summaries for analytics"
+    },
+    "/cartItems/{cartItemId}": {
+      "schema": { "$ref": "#/entities/CartItem" },
+      "description": "Active shopping cart items per customer for cross-device sync and owner analytics"
     }
   }
 }
