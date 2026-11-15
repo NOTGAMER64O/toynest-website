@@ -37,6 +37,7 @@ import {
   BookmarkCheck,
   ShoppingCart,
   Maximize2,
+  BarChart3,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -218,6 +219,8 @@ import {
   type CartItem,
   type SavedForLaterItem,
   type PopularSearchItem,
+  type AnalyticsEvent,
+  type AnalyticsCustomer,
   DEFAULT_RESCUE_DEALS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
@@ -297,11 +300,20 @@ import {
   savePopularSearchToCloud,
   deletePopularSearchFromCloud,
   reorderPopularSearchesInCloud,
+  trackWebsiteVisit,
+  trackProductView,
+  trackAddToCartEvent,
+  syncAnalyticsCustomerOrderProfile,
+  fetchAnalyticsEventsFromCloud,
+  fetchAnalyticsCustomersFromCloud,
+  subscribeToAnalyticsEvents,
+  subscribeToAnalyticsCustomers,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
 import { OwnerPopularSearchesManager } from './components/OwnerPopularSearchesManager';
 import { FullScreenImageGallery } from './components/FullScreenImageGallery';
+import { OwnerAnalyticsDashboard } from './components/OwnerAnalyticsDashboard';
 
 function getStoredColours(): string[] {
   try {
@@ -832,8 +844,11 @@ export default function App() {
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
+  const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
+  const [analyticsCustomers, setAnalyticsCustomers] = useState<AnalyticsCustomer[]>([]);
+  const [analyticsLoading, setAnalyticsLoading] = useState<boolean>(false);
   const [popularSearches, setPopularSearches] = useState<PopularSearchItem[]>(() => getStoredPopularSearches());
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
   const [dealSaving, setDealSaving] = useState<boolean>(false);
@@ -998,6 +1013,7 @@ export default function App() {
   const [suggestionSuccess, setSuggestionSuccess] = useState<string>('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<'Pending' | 'Completed' | 'Cancelled'>('Pending');
   const [orderSearchQuery, setOrderSearchQuery] = useState<string>('');
+  const [highlightedOwnerOrderId, setHighlightedOwnerOrderId] = useState<string | null>(null);
 
   const filteredOwnerOrders = useMemo(() => {
     const q = orderSearchQuery.trim().toLowerCase();
@@ -1695,6 +1711,55 @@ export default function App() {
     }
   };
 
+  const loadAnalyticsData = async () => {
+    if (page !== 'owner' || ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    setAnalyticsLoading(true);
+    try {
+      const [events, customers, cloudOrders] = await Promise.all([
+        fetchAnalyticsEventsFromCloud(),
+        fetchAnalyticsCustomersFromCloud(),
+        fetchAllOrdersFromCloud(),
+      ]);
+      setAnalyticsEvents(events);
+      setAnalyticsCustomers(customers);
+      if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
+        setOwnerOrders(cloudOrders);
+        saveStoredOrders(cloudOrders);
+      }
+    } catch (err) {
+      console.warn('Could not load analytics data from cloud:', err);
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  const handleViewFullOrderFromAnalytics = (order: Order) => {
+    if (page !== 'owner' || ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const status = (order.status || 'New').trim();
+    const targetFilter: 'Pending' | 'Completed' | 'Cancelled' =
+      ['Completed', 'Delivered', 'Collected'].includes(status)
+        ? 'Completed'
+        : status === 'Cancelled'
+        ? 'Cancelled'
+        : 'Pending';
+
+    setOrderStatusFilter(targetFilter);
+    setOrderSearchQuery(order.orderNumber || order.id);
+    setHighlightedOwnerOrderId(order.id);
+    setOwnerTab('orders');
+
+    setTimeout(() => {
+      const el = document.getElementById(`owner-order-card-${order.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 90);
+
+    setTimeout(() => {
+      setHighlightedOwnerOrderId((curr) => (curr === order.id ? null : curr));
+    }, 4200);
+  };
+
   useEffect(() => {
     loadPaymentQr();
     loadShopModes();
@@ -1994,6 +2059,23 @@ export default function App() {
     };
   }, [customerId]);
 
+  // Automatic, deduplicated customer-side analytics tracking (visits & product views)
+  useEffect(() => {
+    if (!customerId || page === 'owner' || page === 'ownerLogin') return;
+    void trackWebsiteVisit(customerId);
+  }, [customerId, page]);
+
+  useEffect(() => {
+    if (!customerId || page === 'owner' || page === 'ownerLogin') return;
+    const viewedProduct =
+      page === 'productDetail' && selectedProductForDetail
+        ? selectedProductForDetail
+        : galleryProduct;
+    if (viewedProduct) {
+      void trackProductView(viewedProduct, customerId);
+    }
+  }, [customerId, page, selectedProductForDetail, galleryProduct]);
+
   // Real-time Firestore sync when owner dashboard is active
   useEffect(() => {
     if (page === 'owner') {
@@ -2013,12 +2095,28 @@ export default function App() {
           saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
         }
       });
+
+      let unsubAnalyticsEvents = () => {};
+      let unsubAnalyticsCustomers = () => {};
+      if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
+        setAnalyticsLoading(true);
+        unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
+          setAnalyticsEvents(events);
+          setAnalyticsLoading(false);
+        });
+        unsubAnalyticsCustomers = subscribeToAnalyticsCustomers((customers) => {
+          setAnalyticsCustomers(customers);
+        });
+      }
+
       return () => {
         unsubOrders();
         unsubSettings();
+        unsubAnalyticsEvents();
+        unsubAnalyticsCustomers();
       };
     }
-  }, [page]);
+  }, [page, ownerPin]);
 
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
@@ -2206,6 +2304,14 @@ export default function App() {
     setCartItems(updated);
     saveStoredCart(customerId, updated);
     showCartToast(`Added "${prod.name}" to cart`);
+
+    if (page !== 'owner' && page !== 'ownerLogin') {
+      void trackAddToCartEvent(
+        prod,
+        isRescueDeal ? 1 : Math.min(5, Math.max(1, qty)),
+        customerId
+      );
+    }
 
     try {
       await saveCartItemToCloud(targetItem);
@@ -2437,6 +2543,7 @@ export default function App() {
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
       if (ownerTab === 'popularSearches') await loadPopularSearches();
+      if (ownerTab === 'analytics') await loadAnalyticsData();
       setSuccessMessage('Dashboard refreshed with the latest data.');
     } finally {
       setIsRefreshing(false);
@@ -3570,6 +3677,12 @@ export default function App() {
       const updatedList = computeLocalQueuePositions([orderData, ...allExisting]);
       saveStoredOrders(updatedList);
 
+      void syncAnalyticsCustomerOrderProfile(
+        customerId,
+        checkoutForm.name.trim(),
+        checkoutMode || 'Child'
+      );
+
       setHasStatusUpdateNotification(true);
       setHasOwnerOrderNotification(true);
       setSuccessMessage('');
@@ -4335,6 +4448,18 @@ export default function App() {
                   }}
                 >
                   <MessageSquare size={15} /> Suggestions ({ownerSuggestions.length})
+                </button>
+                <button
+                  type="button"
+                  className={`owner-quick-btn ${ownerTab === 'analytics' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('analytics');
+                    void loadAnalyticsData();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <BarChart3 size={15} /> Analytics Dashboard
                 </button>
               </div>
             </div>
@@ -6199,6 +6324,16 @@ export default function App() {
               >
                 Suggestions ({ownerSuggestions.length})
               </button>
+              <button
+                className={ownerTab === 'analytics' ? 'active' : ''}
+                onClick={() => {
+                  setOwnerTab('analytics');
+                  void loadAnalyticsData();
+                }}
+              >
+                <BarChart3 size={15} style={{ display: 'inline', verticalAlign: '-2px', marginRight: '5px' }} />
+                Analytics
+              </button>
               {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
@@ -7135,7 +7270,8 @@ export default function App() {
                   ) : (
                     filteredOwnerOrders.map((o) => (
                         <article
-                          className={`order-card ${getOrderStatusClass(o.status)}`}
+                          id={`owner-order-card-${o.id}`}
+                          className={`order-card ${getOrderStatusClass(o.status)} ${highlightedOwnerOrderId === o.id ? 'owner-order-highlighted' : ''}`}
                           data-status={o.status}
                           key={o.id}
                         >
@@ -7509,6 +7645,20 @@ export default function App() {
                   )}
                 </div>
               </div>
+            )}
+
+            {/* OWNER ANALYTICS DASHBOARD TAB */}
+            {ownerTab === 'analytics' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+              <OwnerAnalyticsDashboard
+                products={products}
+                orders={ownerOrders}
+                analyticsEvents={analyticsEvents}
+                analyticsCustomers={analyticsCustomers}
+                loading={analyticsLoading}
+                onRefresh={loadAnalyticsData}
+                onViewFullOrder={handleViewFullOrderFromAnalytics}
+                formatCurrency={da}
+              />
             )}
 
             {/* EDIT POPULAR SEARCHES TAB */}

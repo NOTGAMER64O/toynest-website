@@ -131,5 +131,48 @@ service cloud.firestore {
         && request.resource.data.order is number;
       allow delete: if isValidId(searchId);
     }
+
+    // Analytics Events Collection:
+    // Stores deduplicated visits, product views, and cart additions
+    match /analyticsEvents/{eventId} {
+      allow read: if true;
+      allow create, update: if isValidId(eventId)
+        && request.resource.data.id is string
+        && request.resource.data.id.size() <= 128
+        && request.resource.data.type in ['visit', 'product_view', 'add_to_cart']
+        && request.resource.data.dateKey is string
+        && request.resource.data.dateKey.size() == 10
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && request.resource.data.sessionId is string
+        && request.resource.data.sessionId.size() <= 128
+        && request.resource.data.count is number
+        && request.resource.data.count >= 1
+        && request.resource.data.count <= 100000
+        && (!('productId' in request.resource.data) || (request.resource.data.productId is string && request.resource.data.productId.size() <= 128))
+        && (!('productName' in request.resource.data) || (request.resource.data.productName is string && request.resource.data.productName.size() <= 200))
+        && (!('category' in request.resource.data) || (request.resource.data.category is string && request.resource.data.category.size() <= 100))
+        && (!('quantity' in request.resource.data) || (request.resource.data.quantity is number && request.resource.data.quantity >= 0 && request.resource.data.quantity <= 100000));
+    }
+
+    // Analytics Customers Collection:
+    // Tracks unique customer visits, product views, cart additions, and retention
+    match /analyticsCustomers/{customerId} {
+      allow read: if true;
+      allow create, update: if isValidId(customerId)
+        && request.resource.data.id is string
+        && request.resource.data.id.size() <= 128
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && request.resource.data.firstSeenAt is string
+        && request.resource.data.firstSeenAt.size() <= 64
+        && request.resource.data.lastSeenAt is string
+        && request.resource.data.lastSeenAt.size() <= 64
+        && request.resource.data.visitCount is number
+        && request.resource.data.visitCount >= 0
+        && (!('productViewCount' in request.resource.data) || (request.resource.data.productViewCount is number && request.resource.data.productViewCount >= 0))
+        && (!('cartAddCount' in request.resource.data) || (request.resource.data.cartAddCount is number && request.resource.data.cartAddCount >= 0))
+        && (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100));
+    }
   }
 }

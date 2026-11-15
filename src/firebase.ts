@@ -17,6 +17,7 @@ import {
   deleteDoc,
   runTransaction,
   writeBatch,
+  increment,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -30,12 +31,15 @@ import {
   type CartItem,
   type SavedForLaterItem,
   type PopularSearchItem,
+  type AnalyticsEvent,
+  type AnalyticsCustomer,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
   markRescueDealDeletedLocally,
   computeOfferStatus,
   computeCampaignStatus,
+  getISTDateKey,
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -1675,3 +1679,370 @@ export async function reorderPopularSearchesInCloud(orderedItems: PopularSearchI
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
+
+/* =========================================================================
+   OWNER ANALYTICS TRACKING & REAL-TIME AGGREGATION
+   ========================================================================= */
+
+let memorySessionId = '';
+const trackedVisitSessionKeys = new Set<string>();
+const trackedProductViewKeys = new Set<string>();
+const trackedCartEventIds = new Set<string>();
+const lastCartTrackTimeByProduct = new Map<string, number>();
+
+function sanitizeAnalyticsId(raw: string): string {
+  const cleaned = String(raw || 'anon')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_');
+  return cleaned.slice(0, 128) || 'anon';
+}
+
+export function getOrCreateAnalyticsSessionId(): string {
+  if (memorySessionId) return memorySessionId;
+  try {
+    const existing = sessionStorage.getItem('playnix_analytics_session_id');
+    if (existing && /^[a-zA-Z0-9_-]{4,64}$/.test(existing)) {
+      memorySessionId = existing;
+      return existing;
+    }
+    const generated = `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem('playnix_analytics_session_id', generated);
+    memorySessionId = generated;
+    return generated;
+  } catch {
+    memorySessionId = `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    return memorySessionId;
+  }
+}
+
+async function ensureAnalyticsCustomerDoc(
+  customerId: string,
+  delta: {
+    visit?: number;
+    view?: number;
+    cart?: number;
+    displayName?: string;
+    mode?: 'Child' | 'Adult' | 'Visitor';
+  }
+): Promise<void> {
+  const safeCustomerId = sanitizeAnalyticsId(customerId);
+  const custRef = doc(db, 'analyticsCustomers', safeCustomerId);
+  const nowIso = new Date().toISOString();
+
+  try {
+    const existingSnap = await getDoc(custRef);
+    if (!existingSnap.exists()) {
+      const initialDoc: AnalyticsCustomer = {
+        id: safeCustomerId,
+        customerId: String(customerId || safeCustomerId).slice(0, 128),
+        displayName: delta.displayName ? delta.displayName.trim().slice(0, 100) : undefined,
+        mode: delta.mode || 'Visitor',
+        firstSeenAt: nowIso,
+        lastSeenAt: nowIso,
+        visitCount: delta.visit ?? 1,
+        productViewCount: delta.view ?? 0,
+        cartAddCount: delta.cart ?? 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await setDoc(custRef, sanitizeForFirestore(initialDoc));
+      return;
+    }
+
+    const updates: Record<string, any> = {
+      lastSeenAt: nowIso,
+      updatedAt: nowIso,
+    };
+    if (delta.visit && delta.visit > 0) updates.visitCount = increment(delta.visit);
+    if (delta.view && delta.view > 0) updates.productViewCount = increment(delta.view);
+    if (delta.cart && delta.cart > 0) updates.cartAddCount = increment(delta.cart);
+    if (delta.displayName && delta.displayName.trim()) {
+      updates.displayName = delta.displayName.trim().slice(0, 100);
+    }
+    if (delta.mode && delta.mode !== 'Visitor') {
+      updates.mode = delta.mode;
+    }
+
+    await updateDoc(custRef, sanitizeForFirestore(updates));
+  } catch (err) {
+    console.warn('Analytics customer profile sync warning:', err);
+  }
+}
+
+export async function trackWebsiteVisit(customerId: string): Promise<void> {
+  if (!customerId) return;
+  const dateKey = getISTDateKey();
+  const sessionId = sanitizeAnalyticsId(getOrCreateAnalyticsSessionId());
+  const safeCustomerId = sanitizeAnalyticsId(customerId);
+  const dedupKey = `${dateKey}_${sessionId}_${safeCustomerId}`;
+
+  if (trackedVisitSessionKeys.has(dedupKey)) return;
+  try {
+    if (sessionStorage.getItem(`playnix_visit_logged_${dateKey}_${safeCustomerId}`)) {
+      trackedVisitSessionKeys.add(dedupKey);
+      return;
+    }
+    sessionStorage.setItem(`playnix_visit_logged_${dateKey}_${safeCustomerId}`, '1');
+  } catch {}
+  trackedVisitSessionKeys.add(dedupKey);
+
+  const eventId = sanitizeAnalyticsId(`visit_${dateKey}_${safeCustomerId}`);
+  const eventRef = doc(db, 'analyticsEvents', eventId);
+  const nowIso = new Date().toISOString();
+
+  try {
+    const existing = await getDoc(eventRef);
+    if (!existing.exists()) {
+      const payload: AnalyticsEvent = {
+        id: eventId,
+        type: 'visit',
+        dateKey,
+        customerId: String(customerId).slice(0, 128),
+        sessionId,
+        count: 1,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await setDoc(eventRef, sanitizeForFirestore(payload));
+    } else {
+      await updateDoc(eventRef, {
+        updatedAt: nowIso,
+      });
+    }
+  } catch (err) {
+    console.warn('Analytics website visit tracking warning:', err);
+  }
+
+  // Increment customer visit count once per browser session
+  try {
+    const sessionVisitKey = `playnix_cust_visit_inc_${dateKey}`;
+    if (!sessionStorage.getItem(sessionVisitKey)) {
+      sessionStorage.setItem(sessionVisitKey, '1');
+      await ensureAnalyticsCustomerDoc(customerId, { visit: 1 });
+    }
+  } catch {
+    await ensureAnalyticsCustomerDoc(customerId, { visit: 1 });
+  }
+}
+
+export async function trackProductView(
+  product: { id: string; name: string; category?: string },
+  customerId: string
+): Promise<void> {
+  if (!product || !product.id || !customerId) return;
+  const dateKey = getISTDateKey();
+  const sessionId = sanitizeAnalyticsId(getOrCreateAnalyticsSessionId());
+  const safeProdId = sanitizeAnalyticsId(product.id);
+  const dedupKey = `view_${dateKey}_${sessionId}_${safeProdId}`;
+
+  if (trackedProductViewKeys.has(dedupKey)) return;
+  try {
+    if (sessionStorage.getItem(`playnix_pview_${dedupKey}`)) {
+      trackedProductViewKeys.add(dedupKey);
+      return;
+    }
+    sessionStorage.setItem(`playnix_pview_${dedupKey}`, '1');
+  } catch {}
+  trackedProductViewKeys.add(dedupKey);
+
+  const eventId = sanitizeAnalyticsId(dedupKey);
+  const eventRef = doc(db, 'analyticsEvents', eventId);
+  const nowIso = new Date().toISOString();
+
+  try {
+    const payload: AnalyticsEvent = {
+      id: eventId,
+      type: 'product_view',
+      dateKey,
+      customerId: String(customerId).slice(0, 128),
+      sessionId,
+      productId: String(product.id).slice(0, 128),
+      productName: String(product.name || '').trim().slice(0, 200),
+      category: String(product.category || 'Other').trim().slice(0, 100),
+      count: 1,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    await setDoc(eventRef, sanitizeForFirestore(payload), { merge: true });
+    await ensureAnalyticsCustomerDoc(customerId, { view: 1 });
+  } catch (err) {
+    console.warn('Analytics product view tracking warning:', err);
+  }
+}
+
+export async function trackAddToCartEvent(
+  product: { id: string; name: string; category?: string },
+  quantity: number,
+  customerId: string
+): Promise<void> {
+  if (!product || !product.id || !customerId) return;
+  const safeQty = Math.max(1, Math.min(20, Math.round(quantity || 1)));
+  const nowMs = Date.now();
+  const lastAt = lastCartTrackTimeByProduct.get(product.id) || 0;
+  if (nowMs - lastAt < 1200) return;
+  lastCartTrackTimeByProduct.set(product.id, nowMs);
+
+  const dateKey = getISTDateKey(nowMs);
+  const sessionId = sanitizeAnalyticsId(getOrCreateAnalyticsSessionId());
+  const safeProdId = sanitizeAnalyticsId(product.id);
+  const eventId = sanitizeAnalyticsId(`cart_${dateKey}_${sessionId}_${safeProdId}`);
+  const eventRef = doc(db, 'analyticsEvents', eventId);
+  const nowIso = new Date(nowMs).toISOString();
+
+  try {
+    if (trackedCartEventIds.has(eventId)) {
+      await updateDoc(eventRef, {
+        count: increment(1),
+        quantity: increment(safeQty),
+        updatedAt: nowIso,
+      });
+    } else {
+      const existing = await getDoc(eventRef);
+      if (existing.exists()) {
+        await updateDoc(eventRef, {
+          count: increment(1),
+          quantity: increment(safeQty),
+          updatedAt: nowIso,
+        });
+      } else {
+        const payload: AnalyticsEvent = {
+          id: eventId,
+          type: 'add_to_cart',
+          dateKey,
+          customerId: String(customerId).slice(0, 128),
+          sessionId,
+          productId: String(product.id).slice(0, 128),
+          productName: String(product.name || '').trim().slice(0, 200),
+          category: String(product.category || 'Other').trim().slice(0, 100),
+          count: 1,
+          quantity: safeQty,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        await setDoc(eventRef, sanitizeForFirestore(payload));
+      }
+      trackedCartEventIds.add(eventId);
+    }
+
+    await ensureAnalyticsCustomerDoc(customerId, { cart: safeQty });
+  } catch (err) {
+    console.warn('Analytics add-to-cart tracking warning:', err);
+  }
+}
+
+export async function syncAnalyticsCustomerOrderProfile(
+  customerId: string,
+  displayName: string,
+  mode: 'Child' | 'Adult'
+): Promise<void> {
+  if (!customerId) return;
+  await ensureAnalyticsCustomerDoc(customerId, {
+    displayName,
+    mode,
+  });
+}
+
+export async function fetchAnalyticsEventsFromCloud(): Promise<AnalyticsEvent[]> {
+  const path = 'analyticsEvents';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'analyticsEvents'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'analyticsEvents'));
+    }
+    const list: AnalyticsEvent[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data() as AnalyticsEvent;
+      if (data && data.type && data.dateKey) {
+        list.push({ ...data, id: data.id || d.id });
+      }
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAnalyticsEvents(
+  callback: (events: AnalyticsEvent[]) => void
+): () => void {
+  const path = 'analyticsEvents';
+  try {
+    return onSnapshot(
+      collection(db, 'analyticsEvents'),
+      (snapshot) => {
+        const list: AnalyticsEvent[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data() as AnalyticsEvent;
+          if (data && data.type && data.dateKey) {
+            list.push({ ...data, id: data.id || d.id });
+          }
+        });
+        callback(list);
+      },
+      (error) => {
+        console.warn('Analytics events subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function fetchAnalyticsCustomersFromCloud(): Promise<AnalyticsCustomer[]> {
+  const path = 'analyticsCustomers';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'analyticsCustomers'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'analyticsCustomers'));
+    }
+    const list: AnalyticsCustomer[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data() as AnalyticsCustomer;
+      if (data && data.customerId) {
+        list.push({ ...data, id: data.id || d.id });
+      }
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAnalyticsCustomers(
+  callback: (customers: AnalyticsCustomer[]) => void
+): () => void {
+  const path = 'analyticsCustomers';
+  try {
+    return onSnapshot(
+      collection(db, 'analyticsCustomers'),
+      (snapshot) => {
+        const list: AnalyticsCustomer[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data() as AnalyticsCustomer;
+          if (data && data.customerId) {
+            list.push({ ...data, id: data.id || d.id });
+          }
+        });
+        callback(list);
+      },
+      (error) => {
+        console.warn('Analytics customers subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+

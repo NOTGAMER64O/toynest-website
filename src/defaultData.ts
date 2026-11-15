@@ -849,3 +849,61 @@ export function saveStoredPopularSearches(items: PopularSearchItem[]): void {
     localStorage.setItem('playnix_popular_searches', JSON.stringify(items));
   } catch {}
 }
+
+/* =========================================================================
+   OWNER ANALYTICS TYPES & IST DATE HELPERS
+   ========================================================================= */
+
+export type AnalyticsEventType = 'visit' | 'product_view' | 'add_to_cart';
+
+export interface AnalyticsEvent {
+  id: string;
+  type: AnalyticsEventType;
+  dateKey: string; // YYYY-MM-DD in Asia/Kolkata
+  customerId: string;
+  sessionId: string;
+  productId?: string;
+  productName?: string;
+  category?: string;
+  count: number;
+  quantity?: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface AnalyticsCustomer {
+  id: string;
+  customerId: string;
+  displayName?: string;
+  mode?: 'Child' | 'Adult' | 'Visitor';
+  firstSeenAt: string;
+  lastSeenAt: string;
+  visitCount: number;
+  productViewCount: number;
+  cartAddCount: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/**
+ * Returns YYYY-MM-DD formatted in Asia/Kolkata timezone.
+ */
+export function getISTDateKey(input: string | number | Date = Date.now()): string {
+  try {
+    const d = input instanceof Date ? input : new Date(input);
+    if (isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(d);
+    const y = parts.find((p) => p.type === 'year')?.value || '2026';
+    const m = parts.find((p) => p.type === 'month')?.value || '01';
+    const day = parts.find((p) => p.type === 'day')?.value || '01';
+    return `${y}-${m}-${day}`;
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+

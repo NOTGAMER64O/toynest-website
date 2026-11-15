@@ -161,6 +161,45 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "term", "order", "createdAt"]
+    },
+    "AnalyticsEvent": {
+      "title": "Analytics Event",
+      "description": "Deduplicated customer storefront event (visit, product_view, add_to_cart)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["visit", "product_view", "add_to_cart"] },
+        "dateKey": { "type": "string", "maxLength": 16 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 100 },
+        "count": { "type": "number" },
+        "quantity": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "type", "dateKey", "customerId", "sessionId", "count", "createdAt"]
+    },
+    "AnalyticsCustomer": {
+      "title": "Analytics Customer",
+      "description": "Unique customer activity profile tracking visits, views, cart additions, and retention",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "mode": { "type": "string", "enum": ["Child", "Adult", "Visitor"] },
+        "firstSeenAt": { "type": "string", "maxLength": 64 },
+        "lastSeenAt": { "type": "string", "maxLength": 64 },
+        "visitCount": { "type": "number" },
+        "productViewCount": { "type": "number" },
+        "cartAddCount": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "customerId", "firstSeenAt", "lastSeenAt", "visitCount", "createdAt"]
     }
   },
   "firestore": {
@@ -195,6 +234,14 @@
     "/popularSearches/{searchId}": {
       "schema": { "$ref": "#/entities/PopularSearch" },
       "description": "Owner-managed popular search terms for customers"
+    },
+    "/analyticsEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/AnalyticsEvent" },
+      "description": "Deduplicated customer analytics events for visits, product views, and cart additions"
+    },
+    "/analyticsCustomers/{customerId}": {
+      "schema": { "$ref": "#/entities/AnalyticsCustomer" },
+      "description": "Unique customer activity summaries for analytics"
     }
   }
 }
