@@ -2070,7 +2070,7 @@ export default function App() {
       }
 
       const authCustId = `user_${user.uid}`;
-      const effectiveName = user.displayName || guestProvidedName || '';
+      const effectiveName = user.displayName || guestProvidedName || getStoredGuestName(guestCustomerId) || '';
       setAuthCustomer({ uid: user.uid, displayName: effectiveName });
       setCustomerAuthError('');
 
@@ -2111,18 +2111,21 @@ export default function App() {
   }, [guestCustomerId]);
 
   const handleCustomerSignIn = async () => {
+    if (customerAuthLoading) return;
     setCustomerAuthLoading(true);
     setCustomerAuthError('');
     try {
       const res = await signInCustomerWithGoogle();
-      if (!res.success && res.error) {
-        setCustomerAuthError(res.error);
-      } else if (res.success && res.user) {
+      if (!res.success) {
+        setCustomerAuthError(res.error || 'Could not complete Google Sign-In. Please try again or continue as a guest.');
+      } else if (res.user) {
         const label = res.user.displayName
           ? `Signed in as ${res.user.displayName}`
           : 'Signed in! Your cart is linked to your account.';
         showCartToast(label);
       }
+    } catch (err: any) {
+      setCustomerAuthError(err?.message || 'Could not complete Google Sign-In. Please try again or continue as a guest.');
     } finally {
       setCustomerAuthLoading(false);
     }

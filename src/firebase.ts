@@ -752,13 +752,16 @@ function formatFirebaseAuthError(err: any, options: { isOwner?: boolean } = {}):
     rawMessage.includes('requests-from-referer') ||
     rawMessage.includes('API_KEY_HTTP_REFERRER_BLOCKED')
   ) {
-    return `Sign-in is blocked for ${currentOrigin} by your Firebase API Key's HTTP referrer restrictions in Google Cloud Console. Add ${currentOrigin}/* to the Web API key's allowed websites, or continue as a guest.`;
+    return `Sign-in is blocked by your Firebase API Key's HTTP referrer restrictions in Google Cloud Console. Allow both ${currentOrigin}/* and https://famous-hook-j3kqt.firebaseapp.com/* under Website restrictions, or continue as a guest.`;
   }
   if (code === 'auth/unauthorized-domain') {
     return `Domain "${currentHost}" is not in Firebase Authentication Authorized Domains. Add it in Firebase Console → Authentication → Settings → Authorized domains.`;
   }
   if (code === 'auth/network-request-failed') {
     return 'Network error while connecting to Google Sign-In. Please check your internet connection and try again.';
+  }
+  if (code === 'auth/internal-error') {
+    return 'Google Sign-In could not complete (Firebase auth handler blocked or misconfigured). Check Authorized Domains and API key HTTP referrer restrictions, or continue as a guest.';
   }
   return rawMessage || 'Could not sign in right now.';
 }
