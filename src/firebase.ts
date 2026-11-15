@@ -446,6 +446,56 @@ export function subscribeToProducts(callback: (products: Product[]) => void): ()
   }
 }
 
+export function filterAndRankProducts(products: Product[], rawQuery: string): Product[] {
+  const q = rawQuery.trim().toLowerCase();
+  const availableProducts = products.filter((p) => p && p.available !== false);
+  if (!q) return availableProducts;
+
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const scored: Array<{ product: Product; score: number }> = [];
+
+  for (const product of availableProducts) {
+    const nameLower = (product.name || '').toLowerCase();
+    const categoryLower = (product.category || '').toLowerCase();
+    const descLower = (product.description || '').toLowerCase();
+    const combined = `${nameLower} ${categoryLower} ${descLower}`;
+
+    const allTokensMatch = tokens.every((token) => combined.includes(token));
+    if (!allTokensMatch) continue;
+
+    let score = 0;
+    if (nameLower === q) score += 120;
+    else if (nameLower.startsWith(q)) score += 75;
+    else if (nameLower.includes(q)) score += 50;
+
+    if (categoryLower === q) score += 45;
+    else if (categoryLower.includes(q)) score += 30;
+
+    if (descLower.includes(q)) score += 20;
+
+    for (const token of tokens) {
+      if (nameLower.startsWith(token)) score += 12;
+      else if (nameLower.includes(token)) score += 8;
+      if (categoryLower.includes(token)) score += 6;
+      if (descLower.includes(token)) score += 3;
+    }
+
+    scored.push({ product, score });
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (a.product.name || '').localeCompare(b.product.name || '');
+  });
+
+  return scored.map((entry) => entry.product);
+}
+
+export async function searchProductsFromCloud(rawQuery: string): Promise<Product[]> {
+  const allProducts = await fetchProductsFromCloud();
+  return filterAndRankProducts(allProducts, rawQuery);
+}
+
 export async function updateProductAvailabilityInCloud(productId: string, available: boolean): Promise<void> {
   const path = `products/${productId}`;
   const isAvailable = Boolean(available);

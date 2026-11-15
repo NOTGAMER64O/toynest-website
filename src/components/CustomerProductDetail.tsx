@@ -1,0 +1,238 @@
+import React, { useState, useEffect } from 'react';
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  ShoppingBag,
+  ShoppingCart,
+  Sparkles,
+} from 'lucide-react';
+import {
+  type Product,
+  type ScheduledOffer,
+  type DiscountCampaign,
+  calculateProductDiscount,
+  formatTimeRemaining,
+} from '../defaultData';
+
+interface CustomerProductDetailProps {
+  product: Product;
+  activeOffer?: ScheduledOffer;
+  activeDiscountCampaigns: DiscountCampaign[];
+  currentTime: number;
+  onBack: () => void;
+  onBuyNow: (product: Product, activeOffer?: ScheduledOffer) => void;
+  onAddToCart: (product: Product, activeOffer?: ScheduledOffer) => void;
+  formatCurrency: (val: number) => string;
+}
+
+export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
+  product,
+  activeOffer,
+  activeDiscountCampaigns,
+  currentTime,
+  onBack,
+  onBuyNow,
+  onAddToCart,
+  formatCurrency,
+}) => {
+  const [imageIndex, setImageIndex] = useState<number>(0);
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+
+  useEffect(() => {
+    setImageIndex(0);
+  }, [product.id]);
+
+  const urls =
+    product.imageUrls && product.imageUrls.length > 0
+      ? product.imageUrls
+      : product.imageUrl
+      ? [product.imageUrl]
+      : [];
+
+  const navigatePhoto = (delta: number) => {
+    if (urls.length > 1) {
+      setImageIndex((prev) => (prev + delta + urls.length) % urls.length);
+    }
+  };
+
+  const campaignDiscount = calculateProductDiscount(product, activeDiscountCampaigns);
+  const matchedCampaign = campaignDiscount.campaignId
+    ? activeDiscountCampaigns.find((c) => c.id === campaignDiscount.campaignId)
+    : undefined;
+
+  const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
+  const effectivePrice = activeOffer
+    ? activeOffer.discountedPrice
+    : campaignDiscount.isDiscounted
+    ? campaignDiscount.discountedPrice
+    : product.price;
+  const originalPrice = product.price;
+  const savingsAmount = Math.max(0, originalPrice - effectivePrice);
+  const discountPct =
+    originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
+
+  return (
+    <section className="form-page product-detail-page" aria-label={`${product.name} details`}>
+      <button className="back-link" type="button" onClick={onBack}>
+        <ArrowLeft size={16} /> Back to shop
+      </button>
+
+      <div className="product-detail-card">
+        {/* Left: Product Image Showcase */}
+        <div className="product-detail-media">
+          <div
+            className="product-detail-viewer"
+            onTouchStart={(e) => setTouchStartX(e.touches[0]?.clientX ?? null)}
+            onTouchEnd={(e) => {
+              if (touchStartX !== null && e.changedTouches[0]) {
+                const diff = e.changedTouches[0].clientX - touchStartX;
+                if (Math.abs(diff) > 45) {
+                  navigatePhoto(diff < 0 ? 1 : -1);
+                }
+              }
+              setTouchStartX(null);
+            }}
+          >
+            {urls.length > 0 ? (
+              <img
+                src={urls[imageIndex] || urls[0]}
+                alt={`${product.name}, photo ${imageIndex + 1}`}
+                decoding="async"
+                fetchPriority="high"
+              />
+            ) : (
+              <div className="gallery-placeholder">🧸</div>
+            )}
+
+            {activeOffer ? (
+              <span className="catalog-card-offer-badge">
+                <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
+              </span>
+            ) : campaignDiscount.isDiscounted ? (
+              <span className="catalog-festival-badge">
+                <Sparkles size={10} /> {campaignDiscount.discountLabel}
+              </span>
+            ) : null}
+
+            {urls.length > 1 && (
+              <>
+                <button
+                  className="gallery-arrow gallery-prev"
+                  type="button"
+                  aria-label="Previous photo"
+                  onClick={() => navigatePhoto(-1)}
+                >
+                  <ChevronLeft size={22} />
+                </button>
+                <button
+                  className="gallery-arrow gallery-next"
+                  type="button"
+                  aria-label="Next photo"
+                  onClick={() => navigatePhoto(1)}
+                >
+                  <ChevronRight size={22} />
+                </button>
+              </>
+            )}
+          </div>
+
+          {urls.length > 1 && (
+            <div className="product-detail-thumbs" aria-label="Product photo thumbnails">
+              {urls.map((url, idx) => (
+                <button
+                  key={`${url}-${idx}`}
+                  type="button"
+                  className={`product-detail-thumb-btn ${idx === imageIndex ? 'active' : ''}`}
+                  onClick={() => setImageIndex(idx)}
+                  aria-label={`View photo ${idx + 1}`}
+                >
+                  <img src={url} alt="" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Right: Product Info & Actions */}
+        <div className="product-detail-info">
+          <div className="product-detail-meta-row">
+            <span className="product-category">{product.category || 'Other'}</span>
+            {urls.length > 1 && (
+              <span className="gallery-counter">
+                PHOTO {imageIndex + 1} OF {urls.length}
+              </span>
+            )}
+          </div>
+
+          <h1 className="product-detail-title">{product.name}</h1>
+
+          {activeOffer ? (
+            <div className="catalog-offer-timer-strip" style={{ width: 'fit-content', marginBottom: '12px' }}>
+              <Clock size={12} /> {activeOffer.title} · Ends in{' '}
+              {formatTimeRemaining(activeOffer.endAt, currentTime).formatted}
+            </div>
+          ) : campaignDiscount.isDiscounted && matchedCampaign ? (
+            <div
+              className="catalog-offer-timer-strip"
+              style={{
+                width: 'fit-content',
+                marginBottom: '12px',
+                color: '#b45309',
+                background: '#fef3c7',
+              }}
+            >
+              <Clock size={12} /> {matchedCampaign.name}:{' '}
+              {formatTimeRemaining(matchedCampaign.endAt, currentTime).formatted}
+            </div>
+          ) : null}
+
+          <div className="product-detail-price-box">
+            {hasDiscount ? (
+              <div className="product-detail-discount-wrap">
+                <div className="product-detail-price-line">
+                  <strong className="product-detail-price discounted">
+                    {formatCurrency(effectivePrice)}
+                  </strong>
+                  <span className="product-detail-original-price">
+                    {formatCurrency(originalPrice)}
+                  </span>
+                </div>
+                <span className="product-detail-savings-pill">
+                  Save {formatCurrency(savingsAmount)} ({discountPct}% OFF)
+                </span>
+              </div>
+            ) : (
+              <strong className="product-detail-price">{formatCurrency(product.price)}</strong>
+            )}
+          </div>
+
+          <div className="product-detail-description">
+            <h3>About this toy</h3>
+            <p>{product.description || 'A fun new friend for playtime.'}</p>
+          </div>
+
+          <div className="product-detail-actions">
+            <button
+              type="button"
+              className="primary-btn product-detail-buy-btn"
+              onClick={() => onBuyNow(product, activeOffer)}
+            >
+              <ShoppingBag size={17} />
+              {hasDiscount ? 'Grab Deal' : 'Buy now'}
+            </button>
+            <button
+              type="button"
+              className="secondary-btn product-detail-cart-btn"
+              onClick={() => onAddToCart(product, activeOffer)}
+            >
+              <ShoppingCart size={17} />
+              Add to cart
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};

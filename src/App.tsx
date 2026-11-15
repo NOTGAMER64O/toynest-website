@@ -287,7 +287,10 @@ import {
   deleteCartItemFromCloud,
   fetchCartItemsFromCloud,
   subscribeToCartItems,
+  searchProductsFromCloud,
 } from './firebase';
+import { CustomerSearchBar } from './components/CustomerSearchBar';
+import { CustomerProductDetail } from './components/CustomerProductDetail';
 
 function getStoredColours(): string[] {
   try {
@@ -773,8 +776,11 @@ async function guaranteeSafeImagePayload(imageUrls: string[]): Promise<string[]>
 }
 
 export default function App() {
-  const [page, setPage] = useState<'home' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
+  const [page, setPage] = useState<'home' | 'productDetail' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
   const [products, setProducts] = useState<Product[]>(() => getStoredProducts());
+  const [selectedProductForDetail, setSelectedProductForDetail] = useState<Product | null>(null);
+  const [searchCloudSyncing, setSearchCloudSyncing] = useState<boolean>(false);
+  const [lastSearchCloudSyncAt, setLastSearchCloudSyncAt] = useState<number>(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
@@ -1093,6 +1099,27 @@ export default function App() {
       }
     } catch {}
     setProducts(getStoredProducts());
+  };
+
+  const ensureCloudProductsForSearch = async () => {
+    const now = Date.now();
+    if (searchCloudSyncing || now - lastSearchCloudSyncAt < 30000) return;
+    setSearchCloudSyncing(true);
+    try {
+      const cloudProds = await searchProductsFromCloud('');
+      if (Array.isArray(cloudProds) && cloudProds.length > 0) {
+        setProducts((prev) => {
+          const drafts = prev.filter((p) => p.available === false);
+          const cloudIds = new Set(cloudProds.map((p) => p.id));
+          return [...cloudProds, ...drafts.filter((d) => !cloudIds.has(d.id))];
+        });
+      }
+      setLastSearchCloudSyncAt(Date.now());
+    } catch (err) {
+      console.warn('Search Firebase sync notice:', err);
+    } finally {
+      setSearchCloudSyncing(false);
+    }
   };
 
   const loadOwnerProducts = async () => {
@@ -4136,6 +4163,21 @@ export default function App() {
         {/* HOME VIEW: Normal */}
         {page === 'home' && (adultPublished || childPublished) && (
           <>
+            <CustomerSearchBar
+              products={products}
+              activeOffersByProductId={activeOffersByProductId}
+              activeDiscountCampaigns={activeDiscountCampaigns}
+              isSyncingCloud={searchCloudSyncing}
+              onEnsureCloudProducts={() => void ensureCloudProductsForSearch()}
+              onSelectProduct={(prod) => {
+                setSelectedProductForDetail(prod);
+                setErrorMessage('');
+                setPage('productDetail');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              formatCurrency={da}
+            />
+
             <section className="hero">
               <div className="hero-copy">
                 <span className="eyebrow">LITTLE THINGS, BIG SMILES</span>
@@ -4788,6 +4830,48 @@ export default function App() {
               )}
             </section>
           </>
+        )}
+
+        {/* PRODUCT DETAIL VIEW (opened from Search results) */}
+        {page === 'productDetail' && selectedProductForDetail && (
+          <CustomerProductDetail
+            product={products.find((p) => p.id === selectedProductForDetail.id) || selectedProductForDetail}
+            activeOffer={activeOffersByProductId.get(selectedProductForDetail.id)}
+            activeDiscountCampaigns={activeDiscountCampaigns}
+            currentTime={currentTime}
+            onBack={() => {
+              setPage('home');
+              setErrorMessage('');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onBuyNow={(prod, activeOffer) => {
+              if (activeOffer) {
+                setSelectedOfferForBuy(activeOffer);
+              } else {
+                setSelectedOfferForBuy(null);
+              }
+              setSelectedProductForBuy(prod);
+              setSelectedDealForBuy(null);
+              setOrderQuantity(1);
+              setCheckoutMode(null);
+              setCheckoutForm({
+                name: '',
+                studentClass: '',
+                section: '',
+                phone: '',
+                address: '',
+                note: '',
+                colour: '',
+              });
+              setErrorMessage('');
+              setPage('buy');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onAddToCart={(prod, activeOffer) => {
+              void handleAddToCart(prod, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
+            }}
+            formatCurrency={da}
+          />
         )}
 
         {/* SUGGESTIONS VIEW */}
