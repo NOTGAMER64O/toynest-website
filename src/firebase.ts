@@ -54,6 +54,7 @@ export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export enum OperationType {
   CREATE = 'create',
@@ -725,6 +726,43 @@ export function subscribeToColours(callback: (colours: string[]) => void): () =>
   }
 }
 
+function formatFirebaseAuthError(err: any, options: { isOwner?: boolean } = {}): string {
+  const code = String(err?.code || '');
+  const rawMessage = String(err?.message || '');
+  const currentOrigin =
+    typeof window !== 'undefined' ? window.location.origin : 'this domain';
+  const currentHost =
+    typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return options.isOwner
+      ? 'Google sign-in popup was cancelled.'
+      : 'Sign-in popup was cancelled.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Sign-in popup was blocked by your browser. Please allow popups and try again.';
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return options.isOwner
+      ? 'Google Sign-in is not yet enabled in the Firebase Console. You can still log in using your Owner PIN.'
+      : 'Google Sign-In is not yet enabled in Firebase Authentication.';
+  }
+  if (
+    code === 'auth/requests-from-referer-are-blocked' ||
+    rawMessage.includes('requests-from-referer') ||
+    rawMessage.includes('API_KEY_HTTP_REFERRER_BLOCKED')
+  ) {
+    return `Sign-in is blocked for ${currentOrigin} by your Firebase API Key's HTTP referrer restrictions in Google Cloud Console. Add ${currentOrigin}/* to the Web API key's allowed websites, or continue as a guest.`;
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return `Domain "${currentHost}" is not in Firebase Authentication Authorized Domains. Add it in Firebase Console → Authentication → Settings → Authorized domains.`;
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Network error while connecting to Google Sign-In. Please check your internet connection and try again.';
+  }
+  return rawMessage || 'Could not sign in right now.';
+}
+
 // ----------------- ADMIN AUTHENTICATION -----------------
 export async function signInAdminWithGoogle(): Promise<{ success: boolean; email?: string | null; error?: string }> {
   try {
@@ -738,16 +776,7 @@ export async function signInAdminWithGoogle(): Promise<{ success: boolean; email
     }
     return { success: true, email: cred.user.email };
   } catch (err: any) {
-    if (err.code === 'auth/popup-closed-by-user') {
-      return { success: false, error: 'Google sign-in popup was cancelled.' };
-    }
-    if (err.code === 'auth/operation-not-allowed') {
-      return {
-        success: false,
-        error: 'Google Sign-in is not yet enabled in the Firebase Console. You can still log in using your Owner PIN.',
-      };
-    }
-    return { success: false, error: err.message || 'Could not sign in with Google.' };
+    return { success: false, error: formatFirebaseAuthError(err, { isOwner: true }) };
   }
 }
 
@@ -777,22 +806,7 @@ export async function signInCustomerWithGoogle(): Promise<{
       user: { uid, displayName },
     };
   } catch (err: any) {
-    if (err.code === 'auth/popup-closed-by-user') {
-      return { success: false, error: 'Sign-in popup was cancelled.' };
-    }
-    if (err.code === 'auth/popup-blocked') {
-      return {
-        success: false,
-        error: 'Sign-in popup was blocked by your browser. Please allow popups and try again.',
-      };
-    }
-    if (err.code === 'auth/operation-not-allowed') {
-      return {
-        success: false,
-        error: 'Google Sign-In is not yet enabled in Firebase Authentication.',
-      };
-    }
-    return { success: false, error: err.message || 'Could not sign in right now.' };
+    return { success: false, error: formatFirebaseAuthError(err, { isOwner: false }) };
   }
 }
 

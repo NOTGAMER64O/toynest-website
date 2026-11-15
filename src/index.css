@@ -6583,3 +6583,820 @@ footer > button:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================================
+   PLAYNIX COMPLETE WEBSITE ANIMATION UPGRADE
+   ========================================================================= */
+
+/* 1. Animated Hero Section – Rotating Toy Showcase */
+.hero-showcase-stage {
+  position: relative;
+  z-index: 1;
+  width: min(270px, 74vw);
+  height: min(270px, 74vw);
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.hero-showcase-slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.hero-showcase-slide.is-entering {
+  animation: heroSlideEnter 500ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.hero-showcase-slide.is-exiting {
+  animation: heroSlideExit 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes heroSlideEnter {
+  0% {
+    opacity: 0;
+    transform: scale(0.9) translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes heroSlideExit {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.04) translateY(-6px);
+  }
+}
+
+.hero-toy-float-wrap {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  animation: heroToyFloat 4.2s ease-in-out infinite;
+}
+
+.hero-art.is-motion-paused .hero-toy-float-wrap {
+  animation-play-state: paused;
+}
+
+@keyframes heroToyFloat {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-9px) rotate(1.2deg);
+  }
+}
+
+.hero-teddy-emoji {
+  animation: none !important;
+  filter: drop-shadow(0 15px 12px rgba(96, 108, 62, 0.2));
+}
+
+.hero-product-frame {
+  width: min(215px, 60vw);
+  height: min(215px, 60vw);
+  padding: 10px;
+  border-radius: 26px;
+  background: rgba(255, 254, 250, 0.92);
+  border: 1.5px solid #e1e6cf;
+  box-shadow: 0 18px 36px rgba(41, 57, 43, 0.14);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 220ms ease;
+}
+
+.hero-product-frame.is-clickable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.hero-product-frame.is-clickable:hover {
+  transform: scale(1.03);
+  box-shadow: 0 22px 42px rgba(41, 57, 43, 0.2);
+}
+
+.hero-product-frame.is-clickable:active {
+  transform: scale(0.98);
+}
+
+.hero-product-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 18px;
+  user-select: none;
+}
+
+.hero-caption {
+  transition: opacity 260ms ease;
+}
+
+.hero-caption span {
+  display: inline-block;
+  max-width: min(260px, 80vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .hero-showcase-stage {
+    width: 215px;
+    height: 215px;
+  }
+
+  .hero-product-frame {
+    width: 170px;
+    height: 170px;
+    padding: 8px;
+    border-radius: 22px;
+  }
+}
+
+/* 2. Product Cards Scroll-Entry Reveal, Hover & Tap Animations */
+.product-card-reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 420ms cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms),
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms),
+    box-shadow 220ms ease;
+}
+
+.product-card-reveal.is-revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.product-card-reveal.is-revealed:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 16px 34px rgba(41, 57, 43, 0.11);
+}
+
+.product-card-reveal.is-revealed:active {
+  transform: translateY(-1px) scale(0.988);
+}
+
+.product-card .product-image img {
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.product-card:hover .product-image img {
+  transform: scale(1.035);
+}
+
+.product-media-wrap {
+  position: relative;
+}
+
+/* 3. Search Bar & Suggestions Animations */
+.catalog-search-bar {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    background-color 180ms ease;
+}
+
+.catalog-search-bar.is-focused {
+  transform: scale(1.008);
+}
+
+.catalog-search-dropdown {
+  transform-origin: top center;
+  animation: searchDropdownEnter 210ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes searchDropdownEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.catalog-live-suggestions {
+  animation: searchSectionFade 200ms ease both;
+}
+
+.catalog-live-suggestion-pill,
+.catalog-popular-chip {
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.catalog-live-suggestion-pill:active,
+.catalog-popular-chip:active {
+  transform: scale(0.96);
+}
+
+.catalog-search-result-row {
+  animation: searchRowFadeIn 200ms ease both;
+  transition: background-color 140ms ease, padding-left 160ms ease;
+}
+
+.catalog-search-result-row:hover {
+  padding-left: 20px;
+}
+
+@keyframes searchSectionFade {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes searchRowFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 4. Add to Cart Animations (Header bounce, badge pop, button state & toast) */
+.cart-nav-btn.is-cart-bouncing .cart-nav-icon,
+.cart-floating-trigger.is-cart-bouncing .cart-nav-icon {
+  animation: cartIconBounce 560ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.cart-badge-pop {
+  animation: cartBadgePop 420ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes cartIconBounce {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+  30% {
+    transform: scale(1.24) rotate(-10deg) translateY(-2px);
+  }
+  65% {
+    transform: scale(0.95) rotate(6deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes cartBadgePop {
+  0% {
+    transform: scale(0.65);
+  }
+  55% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.product-add-cart-btn,
+.product-detail-cart-btn {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease;
+}
+
+.product-add-cart-btn:active,
+.product-detail-cart-btn:active {
+  transform: scale(0.94);
+}
+
+.product-add-cart-btn.is-just-added,
+.product-detail-cart-btn.is-just-added {
+  background: #e2edc7;
+  border-color: #718d43;
+  color: #273824;
+  animation: addedCartPop 360ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes addedCartPop {
+  0% {
+    transform: scale(0.92);
+  }
+  55% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.cart-toast-banner {
+  background: #273824;
+  border: 1px solid rgba(255, 254, 250, 0.14);
+}
+
+.cart-toast-check {
+  color: #dbe7b7;
+  flex-shrink: 0;
+  animation: toastCheckPop 360ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes toastCheckPop {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* 5. Wishlist Heart-Pop Animation */
+.wishlist-heart-btn {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  z-index: 4;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid #e2e5d5;
+  background: rgba(255, 254, 250, 0.94);
+  color: #5b6554;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(34, 46, 26, 0.12);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease;
+}
+
+.wishlist-heart-btn:hover {
+  transform: scale(1.08);
+  background: #ffffff;
+  color: #e11d48;
+  border-color: #fecdd3;
+}
+
+.wishlist-heart-btn:active {
+  transform: scale(0.92);
+}
+
+.wishlist-heart-btn.detail-wishlist-btn {
+  position: static;
+  width: 36px;
+  height: 36px;
+  box-shadow: 0 2px 8px rgba(34, 46, 26, 0.08);
+}
+
+.wishlist-heart-btn svg {
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    fill 200ms ease,
+    color 200ms ease;
+}
+
+.wishlist-heart-btn.is-wishlisted {
+  background: #fff1f2;
+  border-color: #fda4af;
+  color: #e11d48;
+}
+
+.wishlist-heart-btn.is-wishlisted svg {
+  fill: #e11d48;
+  color: #e11d48;
+}
+
+.wishlist-heart-btn.anim-heart-pop {
+  animation: heartButtonPop 460ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.wishlist-heart-btn.anim-heart-pop::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid #fb7185;
+  opacity: 0;
+  pointer-events: none;
+  animation: heartHaloBurst 460ms ease-out;
+}
+
+.wishlist-heart-btn.anim-heart-unpop {
+  animation: heartButtonUnpop 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes heartButtonPop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.32);
+  }
+  70% {
+    transform: scale(0.94);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes heartButtonUnpop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(0.8);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes heartHaloBurst {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+
+/* 6. Category Dropdown & Grid Transition Animations */
+.category-dropdown-wrap {
+  position: relative;
+  min-width: 210px;
+  max-width: 100%;
+  z-index: 20;
+}
+
+.category-dropdown-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  border: 1px solid #e2e4d8;
+  border-radius: 9px;
+  background: #fffefa;
+  color: #30382d;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.category-dropdown-trigger:hover {
+  border-color: #c5ceb4;
+}
+
+.category-dropdown-wrap.is-open .category-dropdown-trigger {
+  border-color: #718d43;
+  box-shadow: 0 0 0 3px #e8efd9;
+  background: #ffffff;
+}
+
+.category-dropdown-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.category-dropdown-chevron {
+  flex-shrink: 0;
+  color: #596450;
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.category-dropdown-chevron.is-rotated {
+  transform: rotate(180deg);
+}
+
+.category-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: #fffefa;
+  border: 1.5px solid #dfe2d4;
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(34, 46, 26, 0.14);
+  max-height: 260px;
+  overflow-y: auto;
+  transform-origin: top center;
+  animation: categoryMenuReveal 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes categoryMenuReveal {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+.category-dropdown-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #30382d;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, padding-left 140ms ease;
+}
+
+.category-dropdown-option.is-highlighted,
+.category-dropdown-option:hover {
+  background: #f1f2e8;
+}
+
+.category-dropdown-option.is-selected {
+  background: #e2edc7;
+  color: #273824;
+  font-weight: 800;
+}
+
+.category-dropdown-check {
+  color: #273824;
+  flex-shrink: 0;
+}
+
+.category-transition-grid {
+  animation: categoryGridSwitch 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes categoryGridSwitch {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 760px) {
+  .category-dropdown-wrap {
+    width: 100%;
+  }
+}
+
+/* 7. Order Success Celebration & Lightweight CSS Confetti */
+.order-success-celebration {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 22px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #f1f6e4 0%, #e4eed0 100%);
+  border: 1.5px solid #c5d99f;
+  box-shadow: 0 12px 30px rgba(41, 57, 43, 0.09);
+  animation: orderBannerEnter 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes orderBannerEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.order-confetti-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.order-confetti-piece {
+  position: absolute;
+  top: -12px;
+  width: 8px;
+  height: 12px;
+  border-radius: 3px;
+  opacity: 0;
+  animation-name: confettiDrop;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  animation-fill-mode: forwards;
+}
+
+@keyframes confettiDrop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -10px, 0) rotate(0deg);
+  }
+  14% {
+    opacity: 0.95;
+  }
+  80% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--confetti-drift, 16px), 170px, 0)
+      rotate(var(--confetti-rotate, 240deg));
+  }
+}
+
+.order-success-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.order-success-check-wrap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.order-success-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid #718d43;
+  opacity: 0;
+  animation: orderCheckRing 900ms cubic-bezier(0.22, 1, 0.36, 1) 150ms forwards;
+}
+
+@keyframes orderCheckRing {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1.42);
+    opacity: 0;
+  }
+}
+
+.order-success-check-circle {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #273824;
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 16px rgba(39, 56, 36, 0.25);
+  animation: orderCheckPop 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes orderCheckPop {
+  0% {
+    transform: scale(0.4) rotate(-18deg);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+.order-success-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.order-success-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #556b2f;
+  margin-bottom: 3px;
+}
+
+.order-success-copy h2 {
+  margin: 0 0 3px;
+  font-family: Manrope, sans-serif;
+  font-size: clamp(16px, 2.4vw, 20px);
+  font-weight: 800;
+  color: #202d1e;
+}
+
+.order-success-copy p {
+  margin: 0;
+  font-size: 13px;
+  color: #455240;
+}
+
+.order-success-dismiss {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid #cad9ae;
+  background: rgba(255, 254, 250, 0.85);
+  color: #364532;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+
+.order-success-dismiss:hover {
+  background: #ffffff;
+  transform: scale(1.06);
+}
+
+/* 8. Respect prefers-reduced-motion globally */
+@media (prefers-reduced-motion: reduce) {
+  .hero-toy-float-wrap,
+  .toy-emoji,
+  .hero-showcase-slide.is-entering,
+  .hero-showcase-slide.is-exiting,
+  .catalog-search-dropdown,
+  .catalog-live-suggestions,
+  .catalog-search-result-row,
+  .cart-nav-btn.is-cart-bouncing .cart-nav-icon,
+  .cart-floating-trigger.is-cart-bouncing .cart-nav-icon,
+  .cart-badge-pop,
+  .product-add-cart-btn.is-just-added,
+  .product-detail-cart-btn.is-just-added,
+  .cart-toast-check,
+  .wishlist-heart-btn.anim-heart-pop,
+  .wishlist-heart-btn.anim-heart-pop::after,
+  .wishlist-heart-btn.anim-heart-unpop,
+  .category-dropdown-menu,
+  .category-transition-grid,
+  .order-success-celebration,
+  .order-confetti-piece,
+  .order-success-ring,
+  .order-success-check-circle {
+    animation: none !important;
+  }
+
+  .product-card-reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: box-shadow 150ms ease !important;
+  }
+
+  .product-card-reveal.is-revealed:hover,
+  .product-card-reveal.is-revealed:active,
+  .product-card:hover .product-image img,
+  .catalog-search-bar.is-focused,
+  .hero-product-frame.is-clickable:hover {
+    transform: none !important;
+  }
+}
+
+.cart-auth-error {
+  margin: 0;
+  padding: 8px 18px;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  color: #b91c1c;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+

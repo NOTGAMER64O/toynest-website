@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft,
+  Check,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Heart,
   Maximize2,
   ShoppingBag,
   ShoppingCart,
@@ -26,6 +28,8 @@ interface CustomerProductDetailProps {
   onBack: () => void;
   onBuyNow: (product: Product, activeOffer?: ScheduledOffer) => void;
   onAddToCart: (product: Product, activeOffer?: ScheduledOffer) => void;
+  isWishlisted?: boolean;
+  onToggleWishlist?: (product: Product, activeOffer?: ScheduledOffer) => void;
   formatCurrency: (val: number) => string;
 }
 
@@ -37,11 +41,15 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
   onBack,
   onBuyNow,
   onAddToCart,
+  isWishlisted = false,
+  onToggleWishlist,
   formatCurrency,
 }) => {
   const [imageIndex, setImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [isFullScreenOpen, setIsFullScreenOpen] = useState<boolean>(false);
+  const [justAdded, setJustAdded] = useState<boolean>(false);
+  const [heartAnimState, setHeartAnimState] = useState<'idle' | 'added' | 'removed'>('idle');
   const didSwipeRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -202,11 +210,35 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
         <div className="product-detail-info">
           <div className="product-detail-meta-row">
             <span className="product-category">{product.category || 'Other'}</span>
-            {urls.length > 1 && (
-              <span className="gallery-counter">
-                PHOTO {imageIndex + 1} OF {urls.length}
-              </span>
-            )}
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+              {urls.length > 1 && (
+                <span className="gallery-counter">
+                  PHOTO {imageIndex + 1} OF {urls.length}
+                </span>
+              )}
+              {onToggleWishlist && (
+                <button
+                  type="button"
+                  className={`wishlist-heart-btn detail-wishlist-btn ${isWishlisted ? 'is-wishlisted' : ''} ${
+                    heartAnimState === 'added'
+                      ? 'anim-heart-pop'
+                      : heartAnimState === 'removed'
+                      ? 'anim-heart-unpop'
+                      : ''
+                  }`}
+                  aria-label={isWishlisted ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}
+                  aria-pressed={isWishlisted}
+                  title={isWishlisted ? 'Saved in wishlist' : 'Save to wishlist'}
+                  onClick={() => {
+                    setHeartAnimState(isWishlisted ? 'removed' : 'added');
+                    window.setTimeout(() => setHeartAnimState('idle'), 500);
+                    onToggleWishlist(product, activeOffer);
+                  }}
+                >
+                  <Heart size={16} />
+                </button>
+              )}
+            </div>
           </div>
 
           <h1 className="product-detail-title">{product.name}</h1>
@@ -267,11 +299,15 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
             </button>
             <button
               type="button"
-              className="secondary-btn product-detail-cart-btn"
-              onClick={() => onAddToCart(product, activeOffer)}
+              className={`secondary-btn product-detail-cart-btn ${justAdded ? 'is-just-added' : ''}`}
+              onClick={() => {
+                onAddToCart(product, activeOffer);
+                setJustAdded(true);
+                window.setTimeout(() => setJustAdded(false), 1100);
+              }}
             >
-              <ShoppingCart size={17} />
-              Add to cart
+              {justAdded ? <Check size={17} /> : <ShoppingCart size={17} />}
+              {justAdded ? 'Added!' : 'Add to cart'}
             </button>
           </div>
         </div>

@@ -41,6 +41,7 @@ import {
   UserCheck,
   LogIn,
   LogOut,
+  Heart,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -330,6 +331,12 @@ import { CustomerProductDetail } from './components/CustomerProductDetail';
 import { OwnerPopularSearchesManager } from './components/OwnerPopularSearchesManager';
 import { FullScreenImageGallery } from './components/FullScreenImageGallery';
 import { OwnerAnalyticsDashboard } from './components/OwnerAnalyticsDashboard';
+import { HeroToyShowcase } from './components/HeroToyShowcase';
+import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown';
+import {
+  OrderSuccessCelebration,
+  type OrderCelebrationData,
+} from './components/OrderSuccessCelebration';
 
 function getStoredColours(): string[] {
   try {
@@ -1097,6 +1104,13 @@ export default function App() {
   const [savedItems, setSavedItems] = useState<SavedForLaterItem[]>(() => getStoredSavedItems(getCustomerKey()));
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
   const [cartToastMessage, setCartToastMessage] = useState<string>('');
+  const [cartAnimKey, setCartAnimKey] = useState<number>(0);
+  const [isCartBouncing, setIsCartBouncing] = useState<boolean>(false);
+  const [justAddedProductId, setJustAddedProductId] = useState<string | null>(null);
+  const [heartAnimMap, setHeartAnimMap] = useState<Record<string, 'added' | 'removed'>>({});
+  const [orderSuccessCelebration, setOrderSuccessCelebration] = useState<OrderCelebrationData | null>(null);
+  const cartBounceTimerRef = useRef<number | null>(null);
+  const justAddedTimerRef = useRef<number | null>(null);
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [myOrdersLoading, setMyOrdersLoading] = useState<boolean>(false);
   const [myOrdersError, setMyOrdersError] = useState<string>('');
@@ -2070,9 +2084,6 @@ export default function App() {
       const localGuestCart = getStoredCart(guestCustomerId);
       const localGuestSaved = getStoredSavedItems(guestCustomerId);
 
-      // Immediately switch active ID & pre-populate local state cleanly
-      setCustomerId(authCustId);
-
       void linkGuestCartToAuthenticatedAccount({
         guestId: guestCustomerId,
         authCustomerId: authCustId,
@@ -2087,9 +2098,12 @@ export default function App() {
           saveStoredSavedItems(authCustId, mergedSavedItems);
           setCartItems(mergedCartItems);
           setSavedItems(mergedSavedItems);
+          setCustomerId(authCustId);
         })
         .catch((err) => {
           console.warn('Could not link guest cart to authenticated account:', err);
+          setCustomerId(authCustId);
+          setCustomerAuthError('Signed in, but could not sync guest cart with the cloud. Your items remain saved locally.');
         });
     });
 
@@ -2422,14 +2436,81 @@ export default function App() {
     };
   }, [isOwnerMenuOpen, isSideMenuOpen]);
 
-  // Ensure owner menu panel is closed if owner exits dashboard
+  // Ensure owner menu panel is closed if owner exits dashboard, and clear celebration after leaving orders
   useEffect(() => {
     if (page !== 'owner') {
       setIsOwnerMenuOpen(false);
     }
+    if (page !== 'myOrders') {
+      setOrderSuccessCelebration(null);
+    }
   }, [page]);
 
+  // Lightweight scroll-entry reveal for product cards (respects prefers-reduced-motion)
+  useEffect(() => {
+    if (page !== 'home') return;
+    const cards = Array.from(document.querySelectorAll<HTMLElement>('.product-card-reveal'));
+    if (cards.length === 0) return;
+
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (reduceMotion || typeof IntersectionObserver === 'undefined') {
+      cards.forEach((el) => el.classList.add('is-revealed'));
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-revealed');
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.08, rootMargin: '0px 0px -24px 0px' }
+    );
+
+    cards.forEach((card) => {
+      const rect = card.getBoundingClientRect();
+      if (rect.top < window.innerHeight * 0.95) {
+        card.classList.add('is-revealed');
+      } else {
+        observer.observe(card);
+      }
+    });
+
+    return () => observer.disconnect();
+  }, [page, selectedCategory, products.length, adultPublished, childPublished]);
+
   // ----------------- SHOPPING CART & SAVED FOR LATER HANDLERS -----------------
+  const triggerCartBounce = (productId?: string) => {
+    setCartAnimKey((prev) => prev + 1);
+    setIsCartBouncing(false);
+    window.requestAnimationFrame(() => {
+      setIsCartBouncing(true);
+    });
+    if (cartBounceTimerRef.current !== null) {
+      window.clearTimeout(cartBounceTimerRef.current);
+    }
+    cartBounceTimerRef.current = window.setTimeout(() => {
+      setIsCartBouncing(false);
+    }, 650);
+
+    if (productId) {
+      setJustAddedProductId(productId);
+      if (justAddedTimerRef.current !== null) {
+        window.clearTimeout(justAddedTimerRef.current);
+      }
+      justAddedTimerRef.current = window.setTimeout(() => {
+        setJustAddedProductId((curr) => (curr === productId ? null : curr));
+      }, 1100);
+    }
+  };
+
   const showCartToast = (msg: string) => {
     setCartToastMessage(msg);
     setTimeout(() => {
@@ -2496,6 +2577,7 @@ export default function App() {
 
     setCartItems(updated);
     saveStoredCart(customerId, updated);
+    triggerCartBounce(prod.id);
     showCartToast(`Added "${prod.name}" to cart`);
 
     if (page !== 'owner' && page !== 'ownerLogin') {
@@ -2655,6 +2737,7 @@ export default function App() {
 
     setCartItems(nextCart);
     saveStoredCart(customerId, nextCart);
+    triggerCartBounce(savedItem.productId);
     showCartToast(`Moved "${savedItem.productName}" back to active cart`);
 
     try {
@@ -2678,6 +2761,72 @@ export default function App() {
       await deleteSavedItemFromCloud(savedItemId);
     } catch (err) {
       console.warn('Could not delete saved item from cloud:', err);
+    }
+  };
+
+  const handleToggleWishlist = async (prod: Product, activeOffer?: ScheduledOffer) => {
+    const matchingSaved = savedItems.filter((s) => s.productId === prod.id);
+    const isCurrentlyWishlisted = matchingSaved.length > 0;
+
+    setHeartAnimMap((prev) => ({
+      ...prev,
+      [prod.id]: isCurrentlyWishlisted ? 'removed' : 'added',
+    }));
+    window.setTimeout(() => {
+      setHeartAnimMap((prev) => {
+        const copy = { ...prev };
+        delete copy[prod.id];
+        return copy;
+      });
+    }, 520);
+
+    if (isCurrentlyWishlisted) {
+      const removeIds = new Set(matchingSaved.map((s) => s.id));
+      const nextSaved = savedItems.filter((s) => !removeIds.has(s.id));
+      setSavedItems(nextSaved);
+      saveStoredSavedItems(customerId, nextSaved);
+      showCartToast(`Removed "${prod.name}" from wishlist`);
+      try {
+        await Promise.all(matchingSaved.map((s) => deleteSavedItemFromCloud(s.id)));
+      } catch (err) {
+        console.warn('Could not remove wishlist item from cloud:', err);
+      }
+      return;
+    }
+
+    const savedId = buildCartDocId('saved', customerId, prod.id, '');
+    const resolvedCustomerName =
+      (authCustomer ? authCustomer.displayName : guestProvidedName)?.trim() || undefined;
+    const isGuestSession = !authCustomer;
+    const newSavedItem: SavedForLaterItem = {
+      id: savedId,
+      customerId,
+      customerName: resolvedCustomerName,
+      isGuest: isGuestSession,
+      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
+      productId: prod.id,
+      productName: prod.name,
+      productImageUrl:
+        (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
+      category: prod.category,
+      price: activeOffer ? activeOffer.discountedPrice : prod.price,
+      colour: '',
+      quantity: 1,
+      isRescueDeal: false,
+      isScheduledOffer: Boolean(activeOffer),
+      scheduledOfferId: activeOffer?.id,
+      savedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const nextSaved = [newSavedItem, ...savedItems.filter((s) => s.id !== savedId)];
+    setSavedItems(nextSaved);
+    saveStoredSavedItems(customerId, nextSaved);
+    showCartToast(`Saved "${prod.name}" to your wishlist`);
+    try {
+      await saveSavedItemToCloud(newSavedItem);
+    } catch (err) {
+      console.warn('Could not save wishlist item to cloud:', err);
     }
   };
 
@@ -3815,6 +3964,7 @@ export default function App() {
     };
 
     try {
+      let confirmedOrderNumber = orderNumber;
       if (selectedDealForBuy) {
         // ATOMIC TRANSACTION:
         // Reads the deal in Firestore, checks that claimed === false,
@@ -3874,6 +4024,7 @@ export default function App() {
         } catch {}
 
         const finalOrder = createdOrder || orderData;
+        confirmedOrderNumber = finalOrder.orderNumber || orderNumber;
         await saveOrderToCloud(finalOrder);
 
         // Record metrics for the festival campaign
@@ -3896,6 +4047,12 @@ export default function App() {
       setHasStatusUpdateNotification(true);
       setHasOwnerOrderNotification(true);
       setSuccessMessage('');
+      setOrderSuccessCelebration({
+        orderNumber: confirmedOrderNumber,
+        productName: orderItemName,
+        totalPrice,
+        quantity: validatedQuantity,
+      });
       setPage('myOrders');
       await loadMyOrders();
       setCheckoutForm({ name: '', studentClass: '', section: '', phone: '', address: '', note: '', colour: '' });
@@ -4209,15 +4366,17 @@ export default function App() {
                 )}
               </button>
               <button
-                className="owner-link cart-nav-btn"
+                className={`owner-link cart-nav-btn ${isCartBouncing ? 'is-cart-bouncing' : ''}`}
                 type="button"
                 style={{ position: 'relative' }}
                 onClick={() => setIsCartOpen(true)}
                 title="View Shopping Cart & Saved for Later"
               >
-                <ShoppingCart size={16} /> Cart
+                <ShoppingCart size={16} className="cart-nav-icon" /> Cart
                 {cartItems.length > 0 && (
-                  <span className="cart-badge-count">{cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}</span>
+                  <span key={`nav-badge-${cartAnimKey}`} className="cart-badge-count cart-badge-pop">
+                    {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
+                  </span>
                 )}
                 {savedItems.length > 0 && cartItems.length === 0 && (
                   <span className="saved-badge-indicator" title={`${savedItems.length} items saved for later`}>🔖</span>
@@ -4336,7 +4495,7 @@ export default function App() {
                 </div>
               )}
               {customerAuthError && (
-                <p className="side-menu-auth-error">{customerAuthError}</p>
+                <p className="side-menu-auth-error" role="alert">{customerAuthError}</p>
               )}
             </div>
 
@@ -4371,7 +4530,7 @@ export default function App() {
                   <ShoppingCart size={19} /> Shopping Cart
                 </span>
                 {(cartItems.length > 0 || savedItems.length > 0) && (
-                  <span className="cart-badge-count" style={{ marginLeft: 'auto' }}>
+                  <span key={`side-badge-${cartAnimKey}`} className="cart-badge-count cart-badge-pop" style={{ marginLeft: 'auto' }}>
                     {cartItems.length > 0 ? cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0) : `🔖 ${savedItems.length}`}
                   </span>
                 )}
@@ -4779,17 +4938,16 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="hero-art">
-                <div className="sun-shape"></div>
-                <div className="toy-emoji">🧸</div>
-                <div className="floating-card card-one">
-                  🚀 <span>Ready for fun?</span>
-                </div>
-                <div className="floating-card card-two">
-                  ⭐ <span>Pick your favourite</span>
-                </div>
-                <div className="hero-caption">PLAY MORE. SMILE MORE.</div>
-              </div>
+              <HeroToyShowcase
+                products={products}
+                isHomeVisible={page === 'home'}
+                onSelectProduct={(prod) => {
+                  setSelectedProductForDetail(prod);
+                  setErrorMessage('');
+                  setPage('productDetail');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+              />
             </section>
 
             {/* FESTIVAL-WIDE DISCOUNT CAMPAIGN SHOWCASE: Dedicated promotional section */}
@@ -5246,27 +5404,22 @@ export default function App() {
                 formatCurrency={da}
               />
 
-              <div className="category-filter">
-                <label htmlFor="customer-category">Category</label>
-                <select
-                  id="customer-category"
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                >
-                  <option>All categories</option>
-                  {Array.from(
+              <AnimatedCategoryDropdown
+                id="customer-category"
+                label="Category"
+                value={selectedCategory}
+                options={[
+                  'All categories',
+                  ...Array.from(
                     new Set(
                       products
                         .filter((p) => p.available !== false)
                         .map((p) => p.category || 'Other')
                     )
-                  )
-                    .sort()
-                    .map((cat) => (
-                      <option key={cat}>{cat}</option>
-                    ))}
-                </select>
-              </div>
+                  ).sort(),
+                ]}
+                onChange={(cat) => setSelectedCategory(cat)}
+              />
 
               {products.filter((p) => p.available !== false).length === 0 ? (
                 <div className="empty-state">
@@ -5278,7 +5431,7 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                <div className="product-grid">
+                <div className="product-grid category-transition-grid" key={`cat-grid-${selectedCategory}`}>
                   {products
                     .filter(
                       (p) =>
@@ -5302,44 +5455,81 @@ export default function App() {
                       const savingsAmount = originalPrice - effectivePrice;
                       const discountPct =
                         originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
+                      const isWishlisted = savedItems.some((s) => s.productId === p.id);
+                      const heartAnim = heartAnimMap[p.id];
+                      const isJustAdded = justAddedProductId === p.id;
 
                       return (
-                        <article className="product-card" key={p.id}>
-                          <button
-                            type="button"
-                            className="product-image product-image-button"
-                            aria-label={`View photos and details for ${p.name}`}
-                            onClick={() => {
-                              setGalleryProduct(p);
-                              setGalleryImageIndex(0);
-                            }}
-                          >
-                            {firstImg ? (
-                              <img
-                                src={firstImg}
-                                alt={p.name}
-                                loading={isAboveFold ? 'eager' : 'lazy'}
-                                decoding={isAboveFold ? 'sync' : 'async'}
-                                fetchPriority={isAboveFold ? 'high' : 'low'}
-                                width={320}
-                                height={220}
-                              />
-                            ) : (
-                              <div className="placeholder-toy">🧸</div>
-                            )}
-                            {activeOffer ? (
-                              <span className="catalog-card-offer-badge">
-                                <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
+                        <article
+                          className="product-card product-card-reveal"
+                          key={p.id}
+                          style={
+                            {
+                              '--reveal-delay': `${Math.min(idx % 6, 5) * 45}ms`,
+                            } as React.CSSProperties
+                          }
+                        >
+                          <div className="product-media-wrap">
+                            <button
+                              type="button"
+                              className="product-image product-image-button"
+                              aria-label={`View photos and details for ${p.name}`}
+                              onClick={() => {
+                                setGalleryProduct(p);
+                                setGalleryImageIndex(0);
+                              }}
+                            >
+                              {firstImg ? (
+                                <img
+                                  src={firstImg}
+                                  alt={p.name}
+                                  loading={isAboveFold ? 'eager' : 'lazy'}
+                                  decoding={isAboveFold ? 'sync' : 'async'}
+                                  fetchPriority={isAboveFold ? 'high' : 'low'}
+                                  width={320}
+                                  height={220}
+                                />
+                              ) : (
+                                <div className="placeholder-toy">🧸</div>
+                              )}
+                              {activeOffer ? (
+                                <span className="catalog-card-offer-badge">
+                                  <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
+                                </span>
+                              ) : campaignDiscount.isDiscounted ? (
+                                <span className="catalog-festival-badge">
+                                  <Sparkles size={10} /> {campaignDiscount.discountLabel}
+                                </span>
+                              ) : null}
+                              <span className="product-badge">
+                                {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
                               </span>
-                            ) : campaignDiscount.isDiscounted ? (
-                              <span className="catalog-festival-badge">
-                                <Sparkles size={10} /> {campaignDiscount.discountLabel}
-                              </span>
-                            ) : null}
-                            <span className="product-badge">
-                              {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
-                            </span>
-                          </button>
+                            </button>
+
+                            <button
+                              type="button"
+                              className={`wishlist-heart-btn ${isWishlisted ? 'is-wishlisted' : ''} ${
+                                heartAnim === 'added'
+                                  ? 'anim-heart-pop'
+                                  : heartAnim === 'removed'
+                                  ? 'anim-heart-unpop'
+                                  : ''
+                              }`}
+                              aria-label={
+                                isWishlisted
+                                  ? `Remove ${p.name} from wishlist`
+                                  : `Add ${p.name} to wishlist`
+                              }
+                              aria-pressed={isWishlisted}
+                              title={isWishlisted ? 'Remove from wishlist' : 'Save to wishlist'}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleToggleWishlist(p, activeOffer);
+                              }}
+                            >
+                              <Heart size={16} />
+                            </button>
+                          </div>
 
                           <div className="product-info">
                             <span className="product-category">{p.category || 'Other'}</span>
@@ -5375,7 +5565,7 @@ export default function App() {
                               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                                 <button
                                   type="button"
-                                  className="secondary-btn"
+                                  className={`secondary-btn product-add-cart-btn ${isJustAdded ? 'is-just-added' : ''}`}
                                   style={{ padding: '8px 11px', borderRadius: '10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   title="Add to cart"
                                   aria-label={`Add ${p.name} to cart`}
@@ -5383,7 +5573,7 @@ export default function App() {
                                     void handleAddToCart(p, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
                                   }}
                                 >
-                                  <ShoppingCart size={15} />
+                                  {isJustAdded ? <Check size={15} /> : <ShoppingCart size={15} />}
                                 </button>
                                 <button
                                   className="buy-btn"
@@ -5462,6 +5652,10 @@ export default function App() {
             }}
             onAddToCart={(prod, activeOffer) => {
               void handleAddToCart(prod, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
+            }}
+            isWishlisted={savedItems.some((s) => s.productId === selectedProductForDetail.id)}
+            onToggleWishlist={(prod, activeOffer) => {
+              void handleToggleWishlist(prod, activeOffer);
             }}
             formatCurrency={da}
           />
@@ -6086,6 +6280,14 @@ export default function App() {
                 {myOrdersLoading ? 'Refreshing…' : 'Refresh orders'}
               </button>
             </div>
+
+            {orderSuccessCelebration && (
+              <OrderSuccessCelebration
+                celebration={orderSuccessCelebration}
+                formatCurrency={da}
+                onDismiss={() => setOrderSuccessCelebration(null)}
+              />
+            )}
 
             {myOrdersError && <p className="error-msg">{myOrdersError}</p>}
 
@@ -9795,6 +9997,12 @@ export default function App() {
               )}
             </div>
 
+            {customerAuthError && (
+              <p className="cart-auth-error" role="alert">
+                {customerAuthError}
+              </p>
+            )}
+
             {/* Drawer Body */}
             <div className="cart-drawer-body">
               {/* ---------------- 1. ACTIVE SHOPPING CART SECTION ---------------- */}
@@ -10112,15 +10320,15 @@ export default function App() {
       {page !== 'owner' && !isCartOpen && (
         <button
           type="button"
-          className="cart-floating-trigger"
+          className={`cart-floating-trigger ${isCartBouncing ? 'is-cart-bouncing' : ''}`}
           onClick={() => setIsCartOpen(true)}
           title="Open Shopping Cart & Saved for Later"
           aria-label="Open Shopping Cart"
         >
-          <ShoppingCart size={18} />
+          <ShoppingCart size={18} className="cart-nav-icon" />
           <span>Cart</span>
           {cartItems.length > 0 ? (
-            <span className="cart-floating-badge">
+            <span key={`float-badge-${cartAnimKey}`} className="cart-floating-badge cart-badge-pop">
               {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
             </span>
           ) : savedItems.length > 0 ? (
@@ -10132,7 +10340,7 @@ export default function App() {
       {/* CART TOAST NOTIFICATION BANNER */}
       {cartToastMessage && (
         <div className="cart-toast-banner" role="status">
-          <BookmarkCheck size={16} style={{ color: '#38bdf8' }} />
+          <Check size={16} className="cart-toast-check" />
           <span>{cartToastMessage}</span>
         </div>
       )}
