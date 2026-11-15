@@ -38,6 +38,9 @@ import {
   ShoppingCart,
   Maximize2,
   BarChart3,
+  UserCheck,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -243,6 +246,10 @@ import {
   getCampaignTargetProductIds,
   formatInIST,
   formatTimeRemaining,
+  getGuestShortCode,
+  formatGuestCustomerLabel,
+  getStoredGuestName,
+  saveStoredGuestName,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -296,6 +303,13 @@ import {
   subscribeToCartItems,
   fetchAllCartItemsFromCloud,
   subscribeToAllCartItems,
+  buildCartDocId,
+  signInCustomerWithGoogle,
+  signOutCustomer,
+  subscribeToCustomerAuth,
+  linkGuestCartToAuthenticatedAccount,
+  syncCustomerNameWithCartInCloud,
+  type CustomerAuthUser,
   searchProductsFromCloud,
   fetchPopularSearchesFromCloud,
   subscribeToPopularSearches,
@@ -1069,6 +1083,15 @@ export default function App() {
     [editingProductId, products]
   );
   const [successMessage, setSuccessMessage] = useState<string>('');
+  const guestCustomerId = useMemo(() => getCustomerKey(), []);
+  const [authCustomer, setAuthCustomer] = useState<CustomerAuthUser | null>(null);
+  const [customerAuthLoading, setCustomerAuthLoading] = useState<boolean>(false);
+  const [customerAuthError, setCustomerAuthError] = useState<string>('');
+  const [guestProvidedName, setGuestProvidedName] = useState<string>(() =>
+    getStoredGuestName(getCustomerKey())
+  );
+  const lastSyncedGuestNameRef = useRef<string>('');
+  const linkingCartKeyRef = useRef<string>('');
   const [customerId, setCustomerId] = useState<string>(() => getCustomerKey());
   const [cartItems, setCartItems] = useState<CartItem[]>(() => getStoredCart(getCustomerKey()));
   const [savedItems, setSavedItems] = useState<SavedForLaterItem[]>(() => getStoredSavedItems(getCustomerKey()));
@@ -2020,6 +2043,148 @@ export default function App() {
     };
   }, [customerId]);
 
+  // Subscribe to Firebase Customer Auth & seamlessly link guest cart without duplicating items
+  useEffect(() => {
+    const unsubAuth = subscribeToCustomerAuth((user) => {
+      if (!user) {
+        linkingCartKeyRef.current = '';
+        setAuthCustomer(null);
+        setCustomerId(guestCustomerId);
+        setCartItems(getStoredCart(guestCustomerId));
+        setSavedItems(getStoredSavedItems(guestCustomerId));
+        return;
+      }
+
+      const authCustId = `user_${user.uid}`;
+      const effectiveName = user.displayName || guestProvidedName || '';
+      setAuthCustomer({ uid: user.uid, displayName: effectiveName });
+      setCustomerAuthError('');
+
+      const linkKey = `${guestCustomerId}__${authCustId}`;
+      if (linkingCartKeyRef.current === linkKey) {
+        setCustomerId(authCustId);
+        return;
+      }
+      linkingCartKeyRef.current = linkKey;
+
+      const localGuestCart = getStoredCart(guestCustomerId);
+      const localGuestSaved = getStoredSavedItems(guestCustomerId);
+
+      // Immediately switch active ID & pre-populate local state cleanly
+      setCustomerId(authCustId);
+
+      void linkGuestCartToAuthenticatedAccount({
+        guestId: guestCustomerId,
+        authCustomerId: authCustId,
+        registeredName: effectiveName,
+        localGuestCart,
+        localGuestSaved,
+      })
+        .then(({ mergedCartItems, mergedSavedItems }) => {
+          saveStoredCart(guestCustomerId, []);
+          saveStoredSavedItems(guestCustomerId, []);
+          saveStoredCart(authCustId, mergedCartItems);
+          saveStoredSavedItems(authCustId, mergedSavedItems);
+          setCartItems(mergedCartItems);
+          setSavedItems(mergedSavedItems);
+        })
+        .catch((err) => {
+          console.warn('Could not link guest cart to authenticated account:', err);
+        });
+    });
+
+    return () => unsubAuth();
+  }, [guestCustomerId]);
+
+  const handleCustomerSignIn = async () => {
+    setCustomerAuthLoading(true);
+    setCustomerAuthError('');
+    try {
+      const res = await signInCustomerWithGoogle();
+      if (!res.success && res.error) {
+        setCustomerAuthError(res.error);
+      } else if (res.success && res.user) {
+        const label = res.user.displayName
+          ? `Signed in as ${res.user.displayName}`
+          : 'Signed in! Your cart is linked to your account.';
+        showCartToast(label);
+      }
+    } finally {
+      setCustomerAuthLoading(false);
+    }
+  };
+
+  const handleCustomerSignOut = async () => {
+    setCustomerAuthLoading(true);
+    setCustomerAuthError('');
+    try {
+      await signOutCustomer();
+      linkingCartKeyRef.current = '';
+      setAuthCustomer(null);
+      setCustomerId(guestCustomerId);
+      setCartItems(getStoredCart(guestCustomerId));
+      setSavedItems(getStoredSavedItems(guestCustomerId));
+      showCartToast(`Signed out (${formatGuestCustomerLabel(guestCustomerId)})`);
+    } finally {
+      setCustomerAuthLoading(false);
+    }
+  };
+
+  const associateCheckoutNameWithGuestCart = (rawName: string) => {
+    const cleanName = rawName.trim().slice(0, 100);
+    if (cleanName.length < 2) return;
+    if (cleanName === lastSyncedGuestNameRef.current) return;
+    lastSyncedGuestNameRef.current = cleanName;
+
+    if (!authCustomer) {
+      setGuestProvidedName(cleanName);
+      saveStoredGuestName(guestCustomerId, cleanName);
+    }
+
+    const activeGuestCode = !authCustomer ? getGuestShortCode(customerId) : undefined;
+    setCartItems((prev) => {
+      const next = prev.map((it) =>
+        it.customerId === customerId
+          ? {
+              ...it,
+              customerName: cleanName,
+              isGuest: !authCustomer,
+              guestCode: activeGuestCode,
+            }
+          : it
+      );
+      saveStoredCart(customerId, next);
+      return next;
+    });
+
+    void syncCustomerNameWithCartInCloud(customerId, cleanName, {
+      isAuthenticated: Boolean(authCustomer),
+      mode: checkoutMode || 'Visitor',
+    }).catch((err) => {
+      console.warn('Could not sync checkout name with cart:', err);
+    });
+  };
+
+  // Debounced association when guest enters their name on the checkout page
+  useEffect(() => {
+    if (page !== 'buy') return;
+    const clean = checkoutForm.name.trim();
+    if (clean.length < 2 || clean === lastSyncedGuestNameRef.current) return;
+    const timer = window.setTimeout(() => {
+      associateCheckoutNameWithGuestCart(clean);
+    }, 850);
+    return () => window.clearTimeout(timer);
+  }, [page, checkoutForm.name, customerId, authCustomer]);
+
+  // Pre-fill checkout name if customer is logged in or already provided their name
+  useEffect(() => {
+    if (page !== 'buy') return;
+    const knownName = authCustomer?.displayName || guestProvidedName || '';
+    if (knownName && !checkoutForm.name.trim()) {
+      setCheckoutForm((prev) => (prev.name.trim() ? prev : { ...prev, name: knownName }));
+    }
+  }, [page, authCustomer, guestProvidedName]);
+
   // Real-time Firestore sync for customer Cart & Saved for Later items
   useEffect(() => {
     if (!customerId) return;
@@ -2288,17 +2453,31 @@ export default function App() {
     let updated: CartItem[];
     let targetItem: CartItem;
 
+    const resolvedCustomerName =
+      (authCustomer ? authCustomer.displayName : guestProvidedName)?.trim() || undefined;
+    const isGuestSession = !authCustomer;
+    const activeGuestCode = isGuestSession ? getGuestShortCode(customerId) : undefined;
+
     if (existingIndex >= 0) {
       const current = cartItems[existingIndex];
       const newQty = isRescueDeal ? 1 : Math.min(5, (current.quantity || 1) + qty);
-      targetItem = { ...current, quantity: newQty };
+      targetItem = {
+        ...current,
+        quantity: newQty,
+        customerName: resolvedCustomerName || current.customerName,
+        isGuest: isGuestSession,
+        guestCode: activeGuestCode,
+      };
       updated = [...cartItems];
       updated[existingIndex] = targetItem;
     } else {
-      const itemId = `cart_${customerId}_${prod.id}_${cleanColour ? cleanColour.replace(/[^a-zA-Z0-9]/g, '_') : 'default'}`;
+      const itemId = buildCartDocId('cart', customerId, prod.id, cleanColour);
       targetItem = {
         id: itemId,
         customerId,
+        customerName: resolvedCustomerName,
+        isGuest: isGuestSession,
+        guestCode: activeGuestCode,
         productId: prod.id,
         productName: prod.name,
         productImageUrl: (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
@@ -2373,11 +2552,18 @@ export default function App() {
     saveStoredCart(customerId, nextCart);
 
     // 2. Add to saved for later
-    const cleanColour = cartItem.colour ? cartItem.colour.replace(/[^a-zA-Z0-9]/g, '_') : 'default';
-    const savedId = `saved_${customerId}_${cartItem.productId}_${cleanColour}`;
+    const savedId = buildCartDocId('saved', customerId, cartItem.productId, cartItem.colour);
+    const resolvedCustomerName =
+      (authCustomer ? authCustomer.displayName : guestProvidedName)?.trim() ||
+      cartItem.customerName ||
+      undefined;
+    const isGuestSession = !authCustomer;
     const newSavedItem: SavedForLaterItem = {
       id: savedId,
       customerId,
+      customerName: resolvedCustomerName,
+      isGuest: isGuestSession,
+      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
       productId: cartItem.productId,
       productName: cartItem.productName,
       productImageUrl: cartItem.productImageUrl,
@@ -2429,11 +2615,18 @@ export default function App() {
     saveStoredSavedItems(customerId, nextSaved);
 
     // 2. Add to active cart
-    const cleanColour = savedItem.colour ? savedItem.colour.replace(/[^a-zA-Z0-9]/g, '_') : 'default';
-    const cartId = `cart_${customerId}_${savedItem.productId}_${cleanColour}`;
+    const cartId = buildCartDocId('cart', customerId, savedItem.productId, savedItem.colour);
+    const resolvedCustomerName =
+      (authCustomer ? authCustomer.displayName : guestProvidedName)?.trim() ||
+      savedItem.customerName ||
+      undefined;
+    const isGuestSession = !authCustomer;
     const newCartItem: CartItem = {
       id: cartId,
       customerId,
+      customerName: resolvedCustomerName,
+      isGuest: isGuestSession,
+      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
       productId: savedItem.productId,
       productName: savedItem.productName,
       productImageUrl: (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || savedItem.productImageUrl,
@@ -2499,7 +2692,7 @@ export default function App() {
     setSelectedOfferForBuy(null);
     setOrderQuantity(cartItem.quantity || 1);
     setCheckoutForm({
-      name: '',
+      name: authCustomer?.displayName || guestProvidedName || '',
       studentClass: '',
       section: '',
       phone: '',
@@ -3698,6 +3891,7 @@ export default function App() {
         checkoutForm.name.trim(),
         checkoutMode || 'Child'
       );
+      associateCheckoutNameWithGuestCart(checkoutForm.name.trim());
 
       setHasStatusUpdateNotification(true);
       setHasOwnerOrderNotification(true);
@@ -4094,6 +4288,56 @@ export default function App() {
               >
                 <X size={21} />
               </button>
+            </div>
+
+            <div className="side-menu-account-box">
+              {authCustomer ? (
+                <div className="side-menu-account-signed">
+                  <div className="side-menu-account-meta">
+                    <UserCheck size={16} />
+                    <div>
+                      <strong>{authCustomer.displayName || 'Registered Customer'}</strong>
+                      <span>Logged-in account · Cart synced</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="side-menu-auth-btn secondary"
+                    disabled={customerAuthLoading}
+                    onClick={() => void handleCustomerSignOut()}
+                  >
+                    <LogOut size={14} /> Sign out
+                  </button>
+                </div>
+              ) : (
+                <div className="side-menu-account-guest">
+                  <div className="side-menu-account-meta">
+                    <ShoppingBag size={16} />
+                    <div>
+                      <strong>
+                        {guestProvidedName || formatGuestCustomerLabel(guestCustomerId)}
+                      </strong>
+                      <span>
+                        {guestProvidedName
+                          ? `${formatGuestCustomerLabel(guestCustomerId)}`
+                          : 'Browsing as guest'}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="side-menu-auth-btn primary"
+                    disabled={customerAuthLoading}
+                    onClick={() => void handleCustomerSignIn()}
+                  >
+                    <LogIn size={14} />
+                    {customerAuthLoading ? 'Signing in…' : 'Sign in / Link Cart'}
+                  </button>
+                </div>
+              )}
+              {customerAuthError && (
+                <p className="side-menu-auth-error">{customerAuthError}</p>
+              )}
             </div>
 
             <div className="side-menu-links">
@@ -5596,6 +5840,7 @@ export default function App() {
                     <input
                       value={checkoutForm.name}
                       onChange={(e) => setCheckoutForm({ ...checkoutForm, name: e.target.value })}
+                      onBlur={(e) => associateCheckoutNameWithGuestCart(e.target.value)}
                       placeholder="Enter your full name"
                       required
                       maxLength={80}
@@ -9504,6 +9749,50 @@ export default function App() {
               >
                 <X size={18} />
               </button>
+            </div>
+
+            {/* Customer Identity / Account Link Bar */}
+            <div className="cart-customer-identity-bar">
+              {authCustomer ? (
+                <>
+                  <div className="cart-identity-info">
+                    <UserCheck size={15} />
+                    <span>
+                      <strong>{authCustomer.displayName || 'Registered Customer'}</strong>
+                      {' · Account cart linked'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="cart-identity-action"
+                    disabled={customerAuthLoading}
+                    onClick={() => void handleCustomerSignOut()}
+                  >
+                    Sign out
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="cart-identity-info">
+                    <ShoppingBag size={15} />
+                    <span>
+                      <strong>
+                        {guestProvidedName
+                          ? `${guestProvidedName} (${formatGuestCustomerLabel(guestCustomerId)})`
+                          : formatGuestCustomerLabel(guestCustomerId)}
+                      </strong>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="cart-identity-action primary"
+                    disabled={customerAuthLoading}
+                    onClick={() => void handleCustomerSignIn()}
+                  >
+                    {customerAuthLoading ? 'Signing in…' : 'Sign in'}
+                  </button>
+                </>
+              )}
             </div>
 
             {/* Drawer Body */}

@@ -751,6 +751,9 @@ export function saveStoredMoneyAdjustmentHistory(list: MoneyAdjustmentItem[]): v
 export interface CartItem {
   id: string;
   customerId: string;
+  customerName?: string;
+  isGuest?: boolean;
+  guestCode?: string;
   productId: string;
   productName: string;
   productImageUrl: string;
@@ -769,6 +772,9 @@ export interface CartItem {
 export interface SavedForLaterItem {
   id: string;
   customerId: string;
+  customerName?: string;
+  isGuest?: boolean;
+  guestCode?: string;
   productId: string;
   productName: string;
   productImageUrl: string;
@@ -782,6 +788,57 @@ export interface SavedForLaterItem {
   scheduledOfferId?: string;
   savedAt: string;
   updatedAt?: string;
+}
+
+/**
+ * Computes a deterministic, collision-resistant 4-character uppercase code
+ * from a full persistent customerId (never guesses names).
+ */
+export function getGuestShortCode(customerId: string, length = 4): string {
+  const raw = String(customerId || 'guest').trim();
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const unsigned = hash >>> 0;
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // Unambiguous uppercase alphanumeric
+  let code = '';
+  let val = unsigned;
+  for (let i = 0; i < length; i++) {
+    code += alphabet[val % alphabet.length];
+    val = Math.floor(val / alphabet.length) ^ ((unsigned >>> ((i + 1) * 3)) & 0xff);
+  }
+  return code;
+}
+
+export function formatGuestCustomerLabel(customerId: string): string {
+  return `Guest Customer #${getGuestShortCode(customerId)}`;
+}
+
+export function isRegisteredCustomerId(customerId: string): boolean {
+  return typeof customerId === 'string' && customerId.startsWith('user_');
+}
+
+export function getStoredGuestName(guestId: string): string {
+  if (!guestId) return '';
+  try {
+    return (localStorage.getItem(`playnix_guest_name_${guestId}`) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function saveStoredGuestName(guestId: string, name: string): void {
+  if (!guestId) return;
+  try {
+    const clean = name.trim();
+    if (clean) {
+      localStorage.setItem(`playnix_guest_name_${guestId}`, clean);
+    } else {
+      localStorage.removeItem(`playnix_guest_name_${guestId}`);
+    }
+  } catch {}
 }
 
 export function getStoredCart(customerId: string): CartItem[] {
@@ -876,6 +933,10 @@ export interface AnalyticsCustomer {
   id: string;
   customerId: string;
   displayName?: string;
+  isAuthenticated?: boolean;
+  isGuest?: boolean;
+  guestCode?: string;
+  linkedFromGuestId?: string;
   mode?: 'Child' | 'Adult' | 'Visitor';
   firstSeenAt: string;
   lastSeenAt: string;

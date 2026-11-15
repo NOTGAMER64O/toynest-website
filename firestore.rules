@@ -115,8 +115,17 @@ service cloud.firestore {
       allow create: if isValidId(cartItemId)
         && request.resource.data.customerId is string
         && request.resource.data.customerId.size() <= 128
-        && request.resource.data.productId is string;
-      allow update, delete: if isValidId(cartItemId);
+        && request.resource.data.productId is string
+        && (!('customerName' in request.resource.data) || (request.resource.data.customerName is string && request.resource.data.customerName.size() <= 100))
+        && (!('guestCode' in request.resource.data) || (request.resource.data.guestCode is string && request.resource.data.guestCode.size() <= 16))
+        && (!('isGuest' in request.resource.data) || request.resource.data.isGuest is bool);
+      allow update: if isValidId(cartItemId)
+        && request.resource.data.customerId is string
+        && request.resource.data.customerId.size() <= 128
+        && (!('customerName' in request.resource.data) || (request.resource.data.customerName is string && request.resource.data.customerName.size() <= 100))
+        && (!('guestCode' in request.resource.data) || (request.resource.data.guestCode is string && request.resource.data.guestCode.size() <= 16))
+        && (!('isGuest' in request.resource.data) || request.resource.data.isGuest is bool);
+      allow delete: if isValidId(cartItemId);
     }
 
     // Popular Searches Collection:
@@ -172,7 +181,11 @@ service cloud.firestore {
         && request.resource.data.visitCount >= 0
         && (!('productViewCount' in request.resource.data) || (request.resource.data.productViewCount is number && request.resource.data.productViewCount >= 0))
         && (!('cartAddCount' in request.resource.data) || (request.resource.data.cartAddCount is number && request.resource.data.cartAddCount >= 0))
-        && (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100));
+        && (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100))
+        && (!('isAuthenticated' in request.resource.data) || request.resource.data.isAuthenticated is bool)
+        && (!('isGuest' in request.resource.data) || request.resource.data.isGuest is bool)
+        && (!('guestCode' in request.resource.data) || (request.resource.data.guestCode is string && request.resource.data.guestCode.size() <= 16))
+        && (!('linkedFromGuestId' in request.resource.data) || (request.resource.data.linkedFromGuestId is string && request.resource.data.linkedFromGuestId.size() <= 128));
     }
   }
 }

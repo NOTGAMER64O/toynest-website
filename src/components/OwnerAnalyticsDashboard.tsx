@@ -26,7 +26,9 @@ import {
   type CartItem,
   type Order,
   type Product,
+  getGuestShortCode,
   getISTDateKey,
+  isRegisteredCustomerId,
 } from '../defaultData';
 
 interface OwnerAnalyticsDashboardProps {
@@ -227,7 +229,8 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
   const [hoveredBucketIdx, setHoveredBucketIdx] = useState<number | null>(null);
   const [selectedBucketKey, setSelectedBucketKey] = useState<string | null>(null);
   const [isLiveCartModalOpen, setIsLiveCartModalOpen] = useState<boolean>(false);
-  const [liveCartViewTab, setLiveCartViewTab] = useState<'products' | 'customers'>('products');
+  const [liveCartViewTab, setLiveCartViewTab] = useState<'products' | 'customers'>('customers');
+  const [inlineCartViewTab, setInlineCartViewTab] = useState<'customers' | 'products'>('customers');
   const [productTab, setProductTab] = useState<ProductViewTab>('rankings');
 
   useEffect(() => {
@@ -420,21 +423,104 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       }
     }
 
-    const customerNameMap = new Map<string, string>();
+    const analyticsCustomerById = new Map<string, AnalyticsCustomer>();
     for (const c of analyticsCustomers) {
-      if (c?.customerId && c?.displayName?.trim()) {
-        customerNameMap.set(c.customerId, c.displayName.trim());
+      if (c?.customerId) {
+        analyticsCustomerById.set(c.customerId, c);
       }
     }
+
+    // Exact customerId -> explicitly provided order name (never guessed)
+    const orderNameByCustomerId = new Map<string, string>();
     for (const o of orders) {
       if (o?.customerId && o?.name?.trim()) {
-        customerNameMap.set(o.customerId, o.name.trim());
+        orderNameByCustomerId.set(o.customerId, o.name.trim());
       }
     }
+
+    // Build collision-free short guest codes for all active cart customer IDs
+    const uniqueActiveCustomerIds = new Set<string>();
+    for (const item of dedupedItems.values()) {
+      uniqueActiveCustomerIds.add(item.customerId);
+    }
+    const baseCodeBuckets = new Map<string, string[]>();
+    for (const cid of uniqueActiveCustomerIds) {
+      const code4 = getGuestShortCode(cid, 4);
+      const bucket = baseCodeBuckets.get(code4) || [];
+      bucket.push(cid);
+      baseCodeBuckets.set(code4, bucket);
+    }
+    const resolvedGuestCodes = new Map<string, string>();
+    for (const cid of uniqueActiveCustomerIds) {
+      const code4 = getGuestShortCode(cid, 4);
+      const bucket = baseCodeBuckets.get(code4) || [];
+      resolvedGuestCodes.set(cid, bucket.length > 1 ? getGuestShortCode(cid, 6) : code4);
+    }
+
+    const resolveCustomerIdentity = (cid: string, itemsForCustomer: CartItem[]) => {
+      const custDoc = analyticsCustomerById.get(cid);
+      const itemMarkedRegistered = itemsForCustomer.some((it) => it.isGuest === false);
+      const itemMarkedGuest = itemsForCustomer.some((it) => it.isGuest === true);
+      const isRegistered =
+        isRegisteredCustomerId(cid) ||
+        custDoc?.isAuthenticated === true ||
+        (itemMarkedRegistered && !itemMarkedGuest);
+
+      // Prefer latest explicit name from cart item, then analytics profile, then exact customerId order
+      let itemProvidedName = '';
+      for (const it of itemsForCustomer) {
+        if (it.customerName && it.customerName.trim()) {
+          itemProvidedName = it.customerName.trim();
+        }
+      }
+      const explicitName =
+        itemProvidedName ||
+        custDoc?.displayName?.trim() ||
+        orderNameByCustomerId.get(cid) ||
+        '';
+
+      const shortCode = resolvedGuestCodes.get(cid) || getGuestShortCode(cid, 4);
+      const guestTag = `Guest Customer #${shortCode}`;
+
+      if (isRegistered) {
+        return {
+          isRegistered: true,
+          hasExplicitName: Boolean(explicitName),
+          customerLabel: explicitName || `Registered Customer #${shortCode}`,
+          customerSubLabel: 'Registered Account',
+          badgeLabel: 'Registered',
+          badgeTone: 'registered' as const,
+          shortCode,
+        };
+      }
+
+      if (explicitName) {
+        return {
+          isRegistered: false,
+          hasExplicitName: true,
+          customerLabel: explicitName,
+          customerSubLabel: guestTag,
+          badgeLabel: 'Guest · Named',
+          badgeTone: 'guest-named' as const,
+          shortCode,
+        };
+      }
+
+      return {
+        isRegistered: false,
+        hasExplicitName: false,
+        customerLabel: guestTag,
+        customerSubLabel: `Guest ID #${shortCode}`,
+        badgeLabel: 'Guest',
+        badgeTone: 'guest' as const,
+        shortCode,
+      };
+    };
 
     interface LiveProductCartEntry {
       customerId: string;
       customerLabel: string;
+      isRegistered: boolean;
       quantity: number;
       colour?: string;
       updatedAt: string;
@@ -454,10 +540,31 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
     interface LiveCustomerCartRow {
       customerId: string;
       customerLabel: string;
+      customerSubLabel: string;
+      badgeLabel: string;
+      badgeTone: 'registered' | 'guest-named' | 'guest';
+      isRegistered: boolean;
       totalQuantity: number;
+      totalValue: number;
       distinctProductIds: Set<string>;
-      items: Array<CartItem & { resolvedImage: string; resolvedName: string }>;
+      items: Array<CartItem & { resolvedImage: string; resolvedName: string; resolvedPrice: number }>;
       lastUpdatedAt: string;
+    }
+
+    // Group items per unique customerId first so identity resolution has full context
+    const itemsByCustomer = new Map<string, CartItem[]>();
+    for (const item of dedupedItems.values()) {
+      const list = itemsByCustomer.get(item.customerId) || [];
+      list.push(item);
+      itemsByCustomer.set(item.customerId, list);
+    }
+
+    const identityByCustomerId = new Map<
+      string,
+      ReturnType<typeof resolveCustomerIdentity>
+    >();
+    for (const [cid, list] of itemsByCustomer.entries()) {
+      identityByCustomerId.set(cid, resolveCustomerIdentity(cid, list));
     }
 
     const prodMap = new Map<string, LiveProductInCartRow>();
@@ -477,9 +584,9 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
         '/toys/toy-40ba4ba9-1.jpg';
       const resolvedCategory = catalogProd?.category || item.category || 'Other';
       const unitPrice = typeof catalogProd?.price === 'number' ? catalogProd.price : item.price || 0;
-      const customerLabel =
-        customerNameMap.get(item.customerId) ||
-        `Guest (${item.customerId.slice(-6).toUpperCase()})`;
+      const identity =
+        identityByCustomerId.get(item.customerId) ||
+        resolveCustomerIdentity(item.customerId, [item]);
       const itemTime = item.updatedAt || item.addedAt || '';
 
       // Aggregate per product across all customers
@@ -497,28 +604,36 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       existingProd.customerIds.add(item.customerId);
       existingProd.entries.push({
         customerId: item.customerId,
-        customerLabel,
+        customerLabel: identity.customerLabel,
+        isRegistered: identity.isRegistered,
         quantity: qty,
         colour: item.colour,
         updatedAt: itemTime,
       });
       prodMap.set(item.productId, existingProd);
 
-      // Track each customer's cart separately
+      // Track each customer's cart separately by exact unique customerId
       const existingCust = custMap.get(item.customerId) || {
         customerId: item.customerId,
-        customerLabel,
+        customerLabel: identity.customerLabel,
+        customerSubLabel: identity.customerSubLabel,
+        badgeLabel: identity.badgeLabel,
+        badgeTone: identity.badgeTone,
+        isRegistered: identity.isRegistered,
         totalQuantity: 0,
+        totalValue: 0,
         distinctProductIds: new Set<string>(),
         items: [],
         lastUpdatedAt: itemTime,
       };
       existingCust.totalQuantity += qty;
+      existingCust.totalValue += unitPrice * qty;
       existingCust.distinctProductIds.add(item.productId);
       existingCust.items.push({
         ...item,
         resolvedName,
         resolvedImage,
+        resolvedPrice: unitPrice,
       });
       if (itemTime > existingCust.lastUpdatedAt) {
         existingCust.lastUpdatedAt = itemTime;
@@ -545,8 +660,8 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       }))
       .sort(
         (a, b) =>
-          b.totalQuantity - a.totalQuantity ||
-          new Date(b.lastUpdatedAt || 0).getTime() - new Date(a.lastUpdatedAt || 0).getTime()
+          new Date(b.lastUpdatedAt || 0).getTime() - new Date(a.lastUpdatedAt || 0).getTime() ||
+          b.totalQuantity - a.totalQuantity
       );
 
     return {
@@ -912,9 +1027,12 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       const dk = getISTDateKey(seenAt);
       const existing = custMap.get(cleanId);
       if (!existing) {
+        const defaultGuestLabel = isRegisteredCustomerId(cleanId)
+          ? `Registered Customer #${getGuestShortCode(cleanId, 4)}`
+          : `Guest Customer #${getGuestShortCode(cleanId, 4)}`;
         custMap.set(cleanId, {
           customerId: cleanId,
-          displayName: `Customer ${cleanId.slice(-6).toUpperCase()}`,
+          displayName: defaultGuestLabel,
           mode: 'Visitor',
           firstSeenAt: seenAt,
           firstSeenDateKey: dk,
@@ -1319,6 +1437,149 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
             {liveCartSummary.totalQuantity > 0 ? ' · View items' : ''}
           </small>
         </article>
+      </div>
+
+      {/* 1B. LIVE ACTIVE CUSTOMER CARTS PANEL (REAL-TIME CUSTOMER IDENTIFICATION) */}
+      <div className="analytics-section-card">
+        <div className="analytics-section-head">
+          <div>
+            <h3>
+              <ShoppingCart size={18} /> Live Active Customer Carts
+            </h3>
+            <p>
+              Real-time carts across logged-in shoppers and guest customers (
+              {liveCartSummary.totalQuantity} {liveCartSummary.totalQuantity === 1 ? 'unit' : 'units'} across{' '}
+              {liveCartSummary.activeCustomersCount}{' '}
+              {liveCartSummary.activeCustomersCount === 1 ? 'active cart' : 'active carts'}).
+            </p>
+          </div>
+
+          {liveCartSummary.totalQuantity > 0 && (
+            <div className="analytics-segmented" role="tablist" aria-label="Active carts breakdown view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={inlineCartViewTab === 'customers'}
+                className={inlineCartViewTab === 'customers' ? 'active' : ''}
+                onClick={() => setInlineCartViewTab('customers')}
+              >
+                By Customer ({liveCartSummary.activeCustomersCount})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={inlineCartViewTab === 'products'}
+                className={inlineCartViewTab === 'products' ? 'active' : ''}
+                onClick={() => setInlineCartViewTab('products')}
+              >
+                By Product ({liveCartSummary.distinctProductsCount})
+              </button>
+            </div>
+          )}
+        </div>
+
+        {liveCartSummary.totalQuantity === 0 ? (
+          <div className="analytics-empty-inline">
+            No products are currently in customer carts. This section updates automatically as shoppers add or remove toys.
+          </div>
+        ) : inlineCartViewTab === 'customers' ? (
+          <div className="analytics-live-carts-grid">
+            {liveCartSummary.customerCarts.map((cust) => (
+              <article key={cust.customerId} className="analytics-sheet-order-card">
+                <div className="analytics-sheet-order-top">
+                  <div className="analytics-sheet-customer-info">
+                    <div className="analytics-cust-title-row">
+                      <strong>{cust.customerLabel}</strong>
+                      <span className={`analytics-identity-pill ${cust.badgeTone}`}>
+                        {cust.badgeLabel}
+                      </span>
+                    </div>
+                    <span>
+                      {cust.customerSubLabel} · {cust.distinctCount}{' '}
+                      {cust.distinctCount === 1 ? 'product' : 'products'}
+                    </span>
+                  </div>
+                  <div className="analytics-sheet-order-meta-right">
+                    <span className="analytics-sheet-order-id">
+                      Qty: {cust.totalQuantity} · {formatCurrency(cust.totalValue)}
+                    </span>
+                    {cust.lastUpdatedAt && (
+                      <time dateTime={cust.lastUpdatedAt}>
+                        Updated {formatDateTimeShort(cust.lastUpdatedAt)}
+                      </time>
+                    )}
+                  </div>
+                </div>
+
+                {cust.items.map((item) => (
+                  <div key={item.id} className="analytics-sheet-product-row">
+                    <img
+                      src={item.resolvedImage}
+                      alt={item.resolvedName}
+                      className="analytics-sheet-prod-img"
+                      loading="lazy"
+                    />
+                    <div className="analytics-sheet-prod-details">
+                      <strong>{item.resolvedName}</strong>
+                      <div className="analytics-sheet-prod-sub">
+                        <span>Qty: {item.quantity}</span>
+                        {item.colour && <span>Colour: {item.colour}</span>}
+                      </div>
+                    </div>
+                    <div className="analytics-sheet-order-amount">
+                      <span>Subtotal</span>
+                      <strong>{formatCurrency((item.resolvedPrice || 0) * (item.quantity || 1))}</strong>
+                    </div>
+                  </div>
+                ))}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="analytics-live-carts-grid">
+            {liveCartSummary.productsInCarts.map((prod) => (
+              <article key={prod.productId} className="analytics-sheet-order-card">
+                <div className="analytics-sheet-product-row">
+                  <img
+                    src={prod.productImageUrl}
+                    alt={prod.productName}
+                    className="analytics-sheet-prod-img"
+                    loading="lazy"
+                  />
+                  <div className="analytics-sheet-prod-details">
+                    <strong>{prod.productName}</strong>
+                    <div className="analytics-sheet-prod-sub">
+                      <span>{prod.category}</span>
+                      <span>{formatCurrency(prod.unitPrice)} each</span>
+                      <span>
+                        In {prod.customerCount}{' '}
+                        {prod.customerCount === 1 ? 'customer cart' : 'customer carts'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="analytics-sheet-order-amount">
+                    <span>Qty in Carts</span>
+                    <strong>{prod.totalQuantity}</strong>
+                  </div>
+                </div>
+
+                <div className="analytics-sheet-order-footer">
+                  <div className="analytics-sheet-badges">
+                    {prod.entries.map((entry, idx) => (
+                      <span
+                        key={`${entry.customerId}-${entry.colour || 'default'}-${idx}`}
+                        className="analytics-status-pill order-progress"
+                      >
+                        {entry.customerLabel}: ×{entry.quantity}
+                        {entry.colour ? ` (${entry.colour})` : ''}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 2. SALES ANALYTICS & INTERACTIVE TREND CHARTS */}
@@ -2195,15 +2456,20 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
                     <article key={cust.customerId} className="analytics-sheet-order-card">
                       <div className="analytics-sheet-order-top">
                         <div className="analytics-sheet-customer-info">
-                          <strong>{cust.customerLabel}</strong>
+                          <div className="analytics-cust-title-row">
+                            <strong>{cust.customerLabel}</strong>
+                            <span className={`analytics-identity-pill ${cust.badgeTone}`}>
+                              {cust.badgeLabel}
+                            </span>
+                          </div>
                           <span>
-                            ID: {cust.customerId.slice(0, 14)} · {cust.distinctCount}{' '}
+                            {cust.customerSubLabel} · {cust.distinctCount}{' '}
                             {cust.distinctCount === 1 ? 'distinct product' : 'distinct products'}
                           </span>
                         </div>
                         <div className="analytics-sheet-order-meta-right">
                           <span className="analytics-sheet-order-id">
-                            Total Qty: {cust.totalQuantity}
+                            Total Qty: {cust.totalQuantity} · {formatCurrency(cust.totalValue)}
                           </span>
                           {cust.lastUpdatedAt && (
                             <time dateTime={cust.lastUpdatedAt}>
@@ -2230,7 +2496,7 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
                           </div>
                           <div className="analytics-sheet-order-amount">
                             <span>Subtotal</span>
-                            <strong>{formatCurrency((item.price || 0) * (item.quantity || 1))}</strong>
+                            <strong>{formatCurrency((item.resolvedPrice || 0) * (item.quantity || 1))}</strong>
                           </div>
                         </div>
                       ))}

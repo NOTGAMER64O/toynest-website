@@ -1,5 +1,11 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
 import {
   getFirestore,
   collection,
@@ -40,6 +46,8 @@ import {
   computeOfferStatus,
   computeCampaignStatus,
   getISTDateKey,
+  getGuestShortCode,
+  isRegisteredCustomerId,
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -747,6 +755,70 @@ export async function signOutAdmin(): Promise<void> {
   try {
     await signOut(auth);
   } catch {}
+}
+
+// ----------------- CUSTOMER AUTHENTICATION & ACCOUNT LINKING -----------------
+export interface CustomerAuthUser {
+  uid: string;
+  displayName: string;
+}
+
+export async function signInCustomerWithGoogle(): Promise<{
+  success: boolean;
+  user?: CustomerAuthUser;
+  error?: string;
+}> {
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    const uid = cred.user.uid;
+    const displayName = (cred.user.displayName || '').trim();
+    return {
+      success: true,
+      user: { uid, displayName },
+    };
+  } catch (err: any) {
+    if (err.code === 'auth/popup-closed-by-user') {
+      return { success: false, error: 'Sign-in popup was cancelled.' };
+    }
+    if (err.code === 'auth/popup-blocked') {
+      return {
+        success: false,
+        error: 'Sign-in popup was blocked by your browser. Please allow popups and try again.',
+      };
+    }
+    if (err.code === 'auth/operation-not-allowed') {
+      return {
+        success: false,
+        error: 'Google Sign-In is not yet enabled in Firebase Authentication.',
+      };
+    }
+    return { success: false, error: err.message || 'Could not sign in right now.' };
+  }
+}
+
+export async function signOutCustomer(): Promise<void> {
+  try {
+    await signOut(auth);
+  } catch {}
+}
+
+export function subscribeToCustomerAuth(
+  callback: (user: CustomerAuthUser | null) => void
+): () => void {
+  try {
+    return onAuthStateChanged(auth, (firebaseUser) => {
+      if (!firebaseUser || !firebaseUser.uid) {
+        callback(null);
+        return;
+      }
+      callback({
+        uid: firebaseUser.uid,
+        displayName: (firebaseUser.displayName || '').trim(),
+      });
+    });
+  } catch {
+    return () => {};
+  }
 }
 
 // ----------------- RESCUE DEALS OFFER SYSTEM -----------------
@@ -1490,14 +1562,38 @@ export function subscribeToSavedItems(
 
 // ----------------- ACTIVE CART FIRESTORE SYNC -----------------
 
+export function buildCartDocId(
+  prefix: 'cart' | 'saved',
+  customerId: string,
+  productId: string,
+  colour?: string
+): string {
+  const safePrefix = prefix === 'saved' ? 'saved' : 'cart';
+  const safeCustomer = String(customerId || 'guest').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeProduct = String(productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeColour = String(colour || '').trim()
+    ? String(colour).trim().replace(/[^a-zA-Z0-9_-]/g, '_')
+    : 'default';
+  const full = `${safePrefix}_${safeCustomer}_${safeProduct}_${safeColour}`;
+  if (full.length <= 128) return full;
+  const suffix = getGuestShortCode(full, 8);
+  return `${full.slice(0, 118)}_${suffix}`;
+}
+
 export async function saveCartItemToCloud(item: CartItem): Promise<void> {
   const path = `cartItems/${item.id}`;
   try {
     const docRef = doc(db, 'cartItems', item.id);
+    const isGuest =
+      typeof item.isGuest === 'boolean'
+        ? item.isGuest
+        : !isRegisteredCustomerId(item.customerId);
     await setDoc(
       docRef,
       sanitizeForFirestore({
         ...item,
+        isGuest,
+        guestCode: isGuest ? item.guestCode || getGuestShortCode(item.customerId) : undefined,
         updatedAt: new Date().toISOString(),
       }),
       { merge: true }
@@ -1795,11 +1891,20 @@ async function ensureAnalyticsCustomerDoc(
     cart?: number;
     displayName?: string;
     mode?: 'Child' | 'Adult' | 'Visitor';
+    isAuthenticated?: boolean;
+    isGuest?: boolean;
+    linkedFromGuestId?: string;
   }
 ): Promise<void> {
   const safeCustomerId = sanitizeAnalyticsId(customerId);
   const custRef = doc(db, 'analyticsCustomers', safeCustomerId);
   const nowIso = new Date().toISOString();
+  const isRegistered =
+    typeof delta.isAuthenticated === 'boolean'
+      ? delta.isAuthenticated
+      : isRegisteredCustomerId(customerId);
+  const isGuest = typeof delta.isGuest === 'boolean' ? delta.isGuest : !isRegistered;
+  const guestCode = isGuest ? getGuestShortCode(customerId) : undefined;
 
   try {
     const existingSnap = await getDoc(custRef);
@@ -1808,6 +1913,12 @@ async function ensureAnalyticsCustomerDoc(
         id: safeCustomerId,
         customerId: String(customerId || safeCustomerId).slice(0, 128),
         displayName: delta.displayName ? delta.displayName.trim().slice(0, 100) : undefined,
+        isAuthenticated: isRegistered,
+        isGuest,
+        guestCode,
+        linkedFromGuestId: delta.linkedFromGuestId
+          ? String(delta.linkedFromGuestId).slice(0, 128)
+          : undefined,
         mode: delta.mode || 'Visitor',
         firstSeenAt: nowIso,
         lastSeenAt: nowIso,
@@ -1824,12 +1935,18 @@ async function ensureAnalyticsCustomerDoc(
     const updates: Record<string, any> = {
       lastSeenAt: nowIso,
       updatedAt: nowIso,
+      isAuthenticated: isRegistered,
+      isGuest,
     };
+    if (guestCode) updates.guestCode = guestCode;
     if (delta.visit && delta.visit > 0) updates.visitCount = increment(delta.visit);
     if (delta.view && delta.view > 0) updates.productViewCount = increment(delta.view);
     if (delta.cart && delta.cart > 0) updates.cartAddCount = increment(delta.cart);
     if (delta.displayName && delta.displayName.trim()) {
       updates.displayName = delta.displayName.trim().slice(0, 100);
+    }
+    if (delta.linkedFromGuestId && delta.linkedFromGuestId.trim()) {
+      updates.linkedFromGuestId = delta.linkedFromGuestId.trim().slice(0, 128);
     }
     if (delta.mode && delta.mode !== 'Visitor') {
       updates.mode = delta.mode;
@@ -1838,6 +1955,317 @@ async function ensureAnalyticsCustomerDoc(
     await updateDoc(custRef, sanitizeForFirestore(updates));
   } catch (err) {
     console.warn('Analytics customer profile sync warning:', err);
+  }
+}
+
+/**
+ * Associates an explicitly entered customer name (e.g. entered during checkout
+ * or confirmed by an authenticated user) with their existing cart items, saved items,
+ * and analytics customer profile without ever inventing or guessing names.
+ */
+export async function syncCustomerNameWithCartInCloud(
+  customerId: string,
+  providedName: string,
+  options?: { isAuthenticated?: boolean; mode?: 'Child' | 'Adult' | 'Visitor' }
+): Promise<void> {
+  const cleanName = String(providedName || '').trim().slice(0, 100);
+  if (!customerId || !cleanName) return;
+
+  const isAuthenticated =
+    typeof options?.isAuthenticated === 'boolean'
+      ? options.isAuthenticated
+      : isRegisteredCustomerId(customerId);
+  const isGuest = !isAuthenticated;
+  const guestCode = isGuest ? getGuestShortCode(customerId) : undefined;
+  const nowIso = new Date().toISOString();
+
+  await ensureAnalyticsCustomerDoc(customerId, {
+    visit: 0,
+    displayName: cleanName,
+    isAuthenticated,
+    isGuest,
+    mode: options?.mode,
+  });
+
+  try {
+    const [cartSnap, savedSnap] = await Promise.all([
+      getDocs(query(collection(db, 'cartItems'), where('customerId', '==', customerId))),
+      getDocs(query(collection(db, 'savedItems'), where('customerId', '==', customerId))),
+    ]);
+
+    if (cartSnap.empty && savedSnap.empty) return;
+
+    const batch = writeBatch(db);
+    cartSnap.forEach((d) => {
+      batch.set(
+        d.ref,
+        sanitizeForFirestore({
+          customerName: cleanName,
+          isGuest,
+          guestCode,
+          updatedAt: nowIso,
+        }),
+        { merge: true }
+      );
+    });
+    savedSnap.forEach((d) => {
+      batch.set(
+        d.ref,
+        sanitizeForFirestore({
+          customerName: cleanName,
+          isGuest,
+          guestCode,
+          updatedAt: nowIso,
+        }),
+        { merge: true }
+      );
+    });
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `cartItems (name sync: ${customerId})`);
+  }
+}
+
+/**
+ * Links an existing guest cart & saved items to an authenticated customer account
+ * on sign-in/registration without duplicating items, and cleans up old guest cart
+ * documents so Owner Analytics shows one unified customer cart in real time.
+ */
+export async function linkGuestCartToAuthenticatedAccount(params: {
+  guestId: string;
+  authCustomerId: string;
+  registeredName: string;
+  localGuestCart?: CartItem[];
+  localGuestSaved?: SavedForLaterItem[];
+}): Promise<{ mergedCartItems: CartItem[]; mergedSavedItems: SavedForLaterItem[] }> {
+  const {
+    guestId,
+    authCustomerId,
+    registeredName,
+    localGuestCart = [],
+    localGuestSaved = [],
+  } = params;
+
+  const cleanRegisteredName = String(registeredName || '').trim().slice(0, 100);
+  const nowIso = new Date().toISOString();
+
+  if (!authCustomerId) {
+    return { mergedCartItems: [], mergedSavedItems: [] };
+  }
+
+  // Ensure authenticated customer analytics doc has their registered name immediately
+  await ensureAnalyticsCustomerDoc(authCustomerId, {
+    visit: 0,
+    displayName: cleanRegisteredName || undefined,
+    isAuthenticated: true,
+    isGuest: false,
+    linkedFromGuestId: guestId && guestId !== authCustomerId ? guestId : undefined,
+  });
+
+  try {
+    const [
+      guestCartSnap,
+      accountCartSnap,
+      guestSavedSnap,
+      accountSavedSnap,
+    ] = await Promise.all([
+      guestId && guestId !== authCustomerId
+        ? getDocs(query(collection(db, 'cartItems'), where('customerId', '==', guestId)))
+        : Promise.resolve(null),
+      getDocs(query(collection(db, 'cartItems'), where('customerId', '==', authCustomerId))),
+      guestId && guestId !== authCustomerId
+        ? getDocs(query(collection(db, 'savedItems'), where('customerId', '==', guestId)))
+        : Promise.resolve(null),
+      getDocs(query(collection(db, 'savedItems'), where('customerId', '==', authCustomerId))),
+    ]);
+
+    const itemMatchKey = (productId: string, colour?: string) =>
+      `${productId}__${String(colour || '').trim().toLowerCase() || 'default'}`;
+
+    // ---- 1. Merge Cart Items without duplication ----
+    const mergedCartMap = new Map<string, CartItem>();
+    const obsoleteDocRefs: Array<{ ref: any }> = [];
+
+    if (accountCartSnap) {
+      accountCartSnap.forEach((d) => {
+        const raw = d.data() as CartItem;
+        if (!raw || !raw.productId) return;
+        const key = itemMatchKey(raw.productId, raw.colour);
+        const canonicalId = buildCartDocId('cart', authCustomerId, raw.productId, raw.colour);
+        const normalized: CartItem = {
+          ...raw,
+          id: canonicalId,
+          customerId: authCustomerId,
+          customerName: cleanRegisteredName || raw.customerName || undefined,
+          isGuest: false,
+          guestCode: undefined,
+          quantity: Math.min(5, Math.max(1, Math.round(raw.quantity || 1))),
+          updatedAt: nowIso,
+        };
+        if (d.id !== canonicalId) {
+          obsoleteDocRefs.push({ ref: d.ref });
+        }
+        const prev = mergedCartMap.get(key);
+        if (!prev) {
+          mergedCartMap.set(key, normalized);
+        } else {
+          mergedCartMap.set(key, {
+            ...prev,
+            quantity: prev.isRescueDeal
+              ? 1
+              : Math.min(5, Math.max(prev.quantity, normalized.quantity)),
+          });
+        }
+      });
+    }
+
+    const guestCartItems: CartItem[] = [];
+    const seenGuestCartDocIds = new Set<string>();
+    if (guestCartSnap) {
+      guestCartSnap.forEach((d) => {
+        const raw = d.data() as CartItem;
+        if (raw && raw.productId) {
+          guestCartItems.push({ ...raw, id: d.id });
+          seenGuestCartDocIds.add(d.id);
+        }
+        obsoleteDocRefs.push({ ref: d.ref });
+      });
+    }
+    for (const localItem of localGuestCart) {
+      if (localItem && localItem.productId && !seenGuestCartDocIds.has(localItem.id)) {
+        guestCartItems.push(localItem);
+      }
+    }
+
+    for (const gItem of guestCartItems) {
+      const key = itemMatchKey(gItem.productId, gItem.colour);
+      const canonicalId = buildCartDocId('cart', authCustomerId, gItem.productId, gItem.colour);
+      const existing = mergedCartMap.get(key);
+      if (existing) {
+        const combinedQty = existing.isRescueDeal
+          ? 1
+          : Math.min(5, (existing.quantity || 1) + Math.max(1, Math.round(gItem.quantity || 1)));
+        mergedCartMap.set(key, {
+          ...existing,
+          customerName: cleanRegisteredName || existing.customerName || gItem.customerName || undefined,
+          isGuest: false,
+          guestCode: undefined,
+          quantity: combinedQty,
+          updatedAt: nowIso,
+        });
+      } else {
+        mergedCartMap.set(key, {
+          ...gItem,
+          id: canonicalId,
+          customerId: authCustomerId,
+          customerName: cleanRegisteredName || gItem.customerName || undefined,
+          isGuest: false,
+          guestCode: undefined,
+          quantity: gItem.isRescueDeal ? 1 : Math.min(5, Math.max(1, Math.round(gItem.quantity || 1))),
+          updatedAt: nowIso,
+        });
+      }
+    }
+
+    // ---- 2. Merge Saved for Later Items without duplication ----
+    const mergedSavedMap = new Map<string, SavedForLaterItem>();
+
+    if (accountSavedSnap) {
+      accountSavedSnap.forEach((d) => {
+        const raw = d.data() as SavedForLaterItem;
+        if (!raw || !raw.productId) return;
+        const key = itemMatchKey(raw.productId, raw.colour);
+        const canonicalId = buildCartDocId('saved', authCustomerId, raw.productId, raw.colour);
+        if (d.id !== canonicalId) {
+          obsoleteDocRefs.push({ ref: d.ref });
+        }
+        if (!mergedSavedMap.has(key)) {
+          mergedSavedMap.set(key, {
+            ...raw,
+            id: canonicalId,
+            customerId: authCustomerId,
+            customerName: cleanRegisteredName || raw.customerName || undefined,
+            isGuest: false,
+            guestCode: undefined,
+            updatedAt: nowIso,
+          });
+        }
+      });
+    }
+
+    const guestSavedItems: SavedForLaterItem[] = [];
+    const seenGuestSavedIds = new Set<string>();
+    if (guestSavedSnap) {
+      guestSavedSnap.forEach((d) => {
+        const raw = d.data() as SavedForLaterItem;
+        if (raw && raw.productId) {
+          guestSavedItems.push({ ...raw, id: d.id });
+          seenGuestSavedIds.add(d.id);
+        }
+        obsoleteDocRefs.push({ ref: d.ref });
+      });
+    }
+    for (const localSaved of localGuestSaved) {
+      if (localSaved && localSaved.productId && !seenGuestSavedIds.has(localSaved.id)) {
+        guestSavedItems.push(localSaved);
+      }
+    }
+
+    for (const gSaved of guestSavedItems) {
+      const key = itemMatchKey(gSaved.productId, gSaved.colour);
+      if (!mergedSavedMap.has(key)) {
+        const canonicalId = buildCartDocId('saved', authCustomerId, gSaved.productId, gSaved.colour);
+        mergedSavedMap.set(key, {
+          ...gSaved,
+          id: canonicalId,
+          customerId: authCustomerId,
+          customerName: cleanRegisteredName || gSaved.customerName || undefined,
+          isGuest: false,
+          guestCode: undefined,
+          updatedAt: nowIso,
+        });
+      }
+    }
+
+    // ---- 3. Commit batch writes & deletions cleanly ----
+    const batch = writeBatch(db);
+    for (const cartItem of mergedCartMap.values()) {
+      const payload = sanitizeForFirestore({
+        ...cartItem,
+        isGuest: false,
+        updatedAt: nowIso,
+      });
+      delete payload.guestCode;
+      batch.set(doc(db, 'cartItems', cartItem.id), payload);
+    }
+    for (const savedItem of mergedSavedMap.values()) {
+      const payload = sanitizeForFirestore({
+        ...savedItem,
+        isGuest: false,
+        updatedAt: nowIso,
+      });
+      delete payload.guestCode;
+      batch.set(doc(db, 'savedItems', savedItem.id), payload);
+    }
+    for (const obsolete of obsoleteDocRefs) {
+      batch.delete(obsolete.ref);
+    }
+
+    if (mergedCartMap.size > 0 || mergedSavedMap.size > 0 || obsoleteDocRefs.length > 0) {
+      await batch.commit();
+    }
+
+    const mergedCartItems = Array.from(mergedCartMap.values()).sort(
+      (a, b) => new Date(a.addedAt || 0).getTime() - new Date(b.addedAt || 0).getTime()
+    );
+    const mergedSavedItems = Array.from(mergedSavedMap.values()).sort(
+      (a, b) => new Date(b.savedAt || 0).getTime() - new Date(a.savedAt || 0).getTime()
+    );
+
+    return { mergedCartItems, mergedSavedItems };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `linkGuestCart (${guestId} -> ${authCustomerId})`);
+    return { mergedCartItems: [], mergedSavedItems: [] };
   }
 }
 
