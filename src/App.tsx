@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Menu,
   Boxes,
@@ -36,6 +36,7 @@ import {
   Bookmark,
   BookmarkCheck,
   ShoppingCart,
+  Maximize2,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -300,6 +301,7 @@ import {
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
 import { OwnerPopularSearchesManager } from './components/OwnerPopularSearchesManager';
+import { FullScreenImageGallery } from './components/FullScreenImageGallery';
 
 function getStoredColours(): string[] {
   try {
@@ -826,7 +828,9 @@ export default function App() {
   const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
+  const [isGalleryZoomOpen, setIsGalleryZoomOpen] = useState<boolean>(false);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
     'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
@@ -8846,7 +8850,14 @@ export default function App() {
 
       {/* Gallery Modal Dialog */}
       {galleryProduct && (
-        <div className="gallery-overlay" role="presentation" onClick={() => setGalleryProduct(null)}>
+        <div
+          className="gallery-overlay"
+          role="presentation"
+          onClick={() => {
+            setIsGalleryZoomOpen(false);
+            setGalleryProduct(null);
+          }}
+        >
           <section
             className="gallery-dialog"
             role="dialog"
@@ -8858,7 +8869,10 @@ export default function App() {
               className="gallery-close"
               type="button"
               aria-label="Close gallery"
-              onClick={() => setGalleryProduct(null)}
+              onClick={() => {
+                setIsGalleryZoomOpen(false);
+                setGalleryProduct(null);
+              }}
             >
               <X size={22} />
             </button>
@@ -8879,16 +8893,29 @@ export default function App() {
               return (
                 <>
                   <div
-                    className="gallery-viewer"
-                    onTouchStart={(e) => setTouchStartX(e.touches[0]?.clientX ?? null)}
+                    className={`gallery-viewer ${urls.length > 0 ? 'is-zoomable' : ''}`}
+                    onTouchStart={(e) => {
+                      galleryDidSwipeRef.current = false;
+                      setTouchStartX(e.touches[0]?.clientX ?? null);
+                    }}
                     onTouchEnd={(e) => {
                       if (touchStartX !== null && e.changedTouches[0]) {
                         const diff = e.changedTouches[0].clientX - touchStartX;
                         if (Math.abs(diff) > 45) {
+                          galleryDidSwipeRef.current = true;
                           navigatePhoto(diff < 0 ? 1 : -1);
                         }
                       }
                       setTouchStartX(null);
+                    }}
+                    onClick={() => {
+                      if (galleryDidSwipeRef.current) {
+                        galleryDidSwipeRef.current = false;
+                        return;
+                      }
+                      if (urls.length > 0) {
+                        setIsGalleryZoomOpen(true);
+                      }
                     }}
                   >
                     {urls.length ? (
@@ -8897,9 +8924,24 @@ export default function App() {
                         alt={`${galleryProduct.name}, photo ${galleryImageIndex + 1}`}
                         decoding="async"
                         fetchPriority="high"
+                        referrerPolicy="no-referrer"
                       />
                     ) : (
                       <div className="gallery-placeholder">🧸</div>
+                    )}
+                    {urls.length > 0 && (
+                      <button
+                        type="button"
+                        className="product-detail-zoom-btn"
+                        aria-label={`Open full-screen zoom for ${galleryProduct.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsGalleryZoomOpen(true);
+                        }}
+                      >
+                        <Maximize2 size={14} />
+                        <span>Zoom</span>
+                      </button>
                     )}
                     {urls.length > 1 && (
                       <>
@@ -8907,7 +8949,10 @@ export default function App() {
                           className="gallery-arrow gallery-prev"
                           type="button"
                           aria-label="Previous photo"
-                          onClick={() => navigatePhoto(-1)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigatePhoto(-1);
+                          }}
                         >
                           <ChevronLeft size={25} />
                         </button>
@@ -8915,7 +8960,10 @@ export default function App() {
                           className="gallery-arrow gallery-next"
                           type="button"
                           aria-label="Next photo"
-                          onClick={() => navigatePhoto(1)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigatePhoto(1);
+                          }}
                         >
                           <ChevronRight size={25} />
                         </button>
@@ -8937,6 +8985,7 @@ export default function App() {
                         onClick={() => {
                           setSelectedProductForBuy(galleryProduct);
                           setOrderQuantity(1);
+                          setIsGalleryZoomOpen(false);
                           setGalleryProduct(null);
                           setCheckoutMode(null);
                           setCheckoutForm({
@@ -8956,9 +9005,18 @@ export default function App() {
                       </button>
                     </div>
                     {urls.length > 1 && (
-                      <p className="gallery-swipe-hint">Swipe left or right to see more photos</p>
+                      <p className="gallery-swipe-hint">Tap photo to zoom · Swipe left or right to see more</p>
                     )}
                   </div>
+
+                  <FullScreenImageGallery
+                    isOpen={isGalleryZoomOpen}
+                    images={urls}
+                    initialIndex={galleryImageIndex}
+                    productName={galleryProduct.name}
+                    onClose={() => setIsGalleryZoomOpen(false)}
+                    onIndexChange={(idx) => setGalleryImageIndex(idx)}
+                  />
                 </>
               );
             })()}

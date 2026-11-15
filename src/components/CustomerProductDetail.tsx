@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Maximize2,
   ShoppingBag,
   ShoppingCart,
   Sparkles,
@@ -15,6 +16,7 @@ import {
   calculateProductDiscount,
   formatTimeRemaining,
 } from '../defaultData';
+import { FullScreenImageGallery } from './FullScreenImageGallery';
 
 interface CustomerProductDetailProps {
   product: Product;
@@ -39,9 +41,12 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
 }) => {
   const [imageIndex, setImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [isFullScreenOpen, setIsFullScreenOpen] = useState<boolean>(false);
+  const didSwipeRef = useRef<boolean>(false);
 
   useEffect(() => {
     setImageIndex(0);
+    setIsFullScreenOpen(false);
   }, [product.id]);
 
   const urls =
@@ -55,6 +60,11 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
     if (urls.length > 1) {
       setImageIndex((prev) => (prev + delta + urls.length) % urls.length);
     }
+  };
+
+  const openFullScreen = () => {
+    if (urls.length === 0) return;
+    setIsFullScreenOpen(true);
   };
 
   const campaignDiscount = calculateProductDiscount(product, activeDiscountCampaigns);
@@ -83,16 +93,27 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
         {/* Left: Product Image Showcase */}
         <div className="product-detail-media">
           <div
-            className="product-detail-viewer"
-            onTouchStart={(e) => setTouchStartX(e.touches[0]?.clientX ?? null)}
+            className={`product-detail-viewer ${urls.length > 0 ? 'is-zoomable' : ''}`}
+            onTouchStart={(e) => {
+              didSwipeRef.current = false;
+              setTouchStartX(e.touches[0]?.clientX ?? null);
+            }}
             onTouchEnd={(e) => {
               if (touchStartX !== null && e.changedTouches[0]) {
                 const diff = e.changedTouches[0].clientX - touchStartX;
                 if (Math.abs(diff) > 45) {
+                  didSwipeRef.current = true;
                   navigatePhoto(diff < 0 ? 1 : -1);
                 }
               }
               setTouchStartX(null);
+            }}
+            onClick={() => {
+              if (didSwipeRef.current) {
+                didSwipeRef.current = false;
+                return;
+              }
+              openFullScreen();
             }}
           >
             {urls.length > 0 ? (
@@ -101,6 +122,7 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
                 alt={`${product.name}, photo ${imageIndex + 1}`}
                 decoding="async"
                 fetchPriority="high"
+                referrerPolicy="no-referrer"
               />
             ) : (
               <div className="gallery-placeholder">🧸</div>
@@ -116,13 +138,31 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
               </span>
             ) : null}
 
+            {urls.length > 0 && (
+              <button
+                type="button"
+                className="product-detail-zoom-btn"
+                aria-label={`Open full-screen zoom for ${product.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openFullScreen();
+                }}
+              >
+                <Maximize2 size={14} />
+                <span>Zoom</span>
+              </button>
+            )}
+
             {urls.length > 1 && (
               <>
                 <button
                   className="gallery-arrow gallery-prev"
                   type="button"
                   aria-label="Previous photo"
-                  onClick={() => navigatePhoto(-1)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigatePhoto(-1);
+                  }}
                 >
                   <ChevronLeft size={22} />
                 </button>
@@ -130,7 +170,10 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
                   className="gallery-arrow gallery-next"
                   type="button"
                   aria-label="Next photo"
-                  onClick={() => navigatePhoto(1)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigatePhoto(1);
+                  }}
                 >
                   <ChevronRight size={22} />
                 </button>
@@ -148,7 +191,7 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
                   onClick={() => setImageIndex(idx)}
                   aria-label={`View photo ${idx + 1}`}
                 >
-                  <img src={url} alt="" />
+                  <img src={url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />
                 </button>
               ))}
             </div>
@@ -233,6 +276,15 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
           </div>
         </div>
       </div>
+
+      <FullScreenImageGallery
+        isOpen={isFullScreenOpen}
+        images={urls}
+        initialIndex={imageIndex}
+        productName={product.name}
+        onClose={() => setIsFullScreenOpen(false)}
+        onIndexChange={(idx) => setImageIndex(idx)}
+      />
     </section>
   );
 };
