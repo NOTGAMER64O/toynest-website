@@ -16,6 +16,7 @@ import {
   updateDoc,
   deleteDoc,
   runTransaction,
+  writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -28,6 +29,7 @@ import {
   type MoneyAdjustmentItem,
   type CartItem,
   type SavedForLaterItem,
+  type PopularSearchItem,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
@@ -1554,3 +1556,122 @@ export function subscribeToCartItems(
   }
 }
 
+// ----------------- POPULAR SEARCHES (OWNER-MANAGED, LIVE ON CUSTOMER SIDE) -----------------
+function normalizePopularSearch(data: any, docId: string): PopularSearchItem {
+  return {
+    id: String(data?.id || docId),
+    term: String(data?.term || '').trim(),
+    order: typeof data?.order === 'number' && isFinite(data.order) ? data.order : 0,
+    createdAt: data?.createdAt || new Date().toISOString(),
+    updatedAt: data?.updatedAt || data?.createdAt || new Date().toISOString(),
+  };
+}
+
+export async function fetchPopularSearchesFromCloud(): Promise<PopularSearchItem[]> {
+  const path = 'popularSearches';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'popularSearches'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'popularSearches'));
+    }
+    const items: PopularSearchItem[] = [];
+    snapshot.forEach((d) => {
+      const normalized = normalizePopularSearch(d.data(), d.id);
+      if (normalized.term) {
+        items.push(normalized);
+      }
+    });
+    return items.sort((a, b) => {
+      if (a.order !== b.order) return a.order - b.order;
+      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToPopularSearches(
+  callback: (items: PopularSearchItem[]) => void
+): () => void {
+  const path = 'popularSearches';
+  try {
+    return onSnapshot(
+      collection(db, 'popularSearches'),
+      (snapshot) => {
+        const items: PopularSearchItem[] = [];
+        snapshot.forEach((d) => {
+          const normalized = normalizePopularSearch(d.data(), d.id);
+          if (normalized.term) {
+            items.push(normalized);
+          }
+        });
+        items.sort((a, b) => {
+          if (a.order !== b.order) return a.order - b.order;
+          return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        });
+        callback(items);
+      },
+      (error) => {
+        console.warn('Popular searches subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function savePopularSearchToCloud(item: PopularSearchItem): Promise<void> {
+  const path = `popularSearches/${item.id}`;
+  try {
+    const cleanTerm = String(item.term || '').trim().slice(0, 100);
+    if (!cleanTerm) {
+      throw new Error('Popular search term cannot be empty.');
+    }
+    const payload = sanitizeForFirestore({
+      id: item.id,
+      term: cleanTerm,
+      order: typeof item.order === 'number' ? item.order : 0,
+      createdAt: item.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await setDoc(doc(db, 'popularSearches', item.id), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deletePopularSearchFromCloud(searchId: string): Promise<void> {
+  const path = `popularSearches/${searchId}`;
+  try {
+    await deleteDoc(doc(db, 'popularSearches', searchId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function reorderPopularSearchesInCloud(orderedItems: PopularSearchItem[]): Promise<void> {
+  const path = 'popularSearches (batch reorder)';
+  try {
+    const batch = writeBatch(db);
+    const nowIso = new Date().toISOString();
+    orderedItems.forEach((item, index) => {
+      const payload = sanitizeForFirestore({
+        id: item.id,
+        term: String(item.term || '').trim().slice(0, 100),
+        order: index,
+        createdAt: item.createdAt || nowIso,
+        updatedAt: nowIso,
+      });
+      batch.set(doc(db, 'popularSearches', item.id), payload);
+    });
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}

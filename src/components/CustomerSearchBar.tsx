@@ -1,15 +1,23 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Search, X, ChevronRight, Sparkles, Tag, ArrowUpRight } from 'lucide-react';
+import {
+  Search,
+  X,
+  ChevronRight,
+  TrendingUp,
+  Sparkles,
+} from 'lucide-react';
 import {
   type Product,
   type ScheduledOffer,
   type DiscountCampaign,
+  type PopularSearchItem,
   calculateProductDiscount,
 } from '../defaultData';
 import { filterAndRankProducts } from '../firebase';
 
 interface CustomerSearchBarProps {
   products: Product[];
+  popularSearches: PopularSearchItem[];
   activeOffersByProductId: Map<string, ScheduledOffer>;
   activeDiscountCampaigns: DiscountCampaign[];
   isSyncingCloud?: boolean;
@@ -42,7 +50,7 @@ function HighlightMatch({ text, query }: { text: string; query: string }) {
       {parts.map((part, idx) => {
         const isMatch = tokens.some((t) => part.toLowerCase() === t.toLowerCase());
         return isMatch ? (
-          <mark key={idx} className="search-match-highlight">
+          <mark key={idx} className="catalog-search-highlight">
             {part}
           </mark>
         ) : (
@@ -55,6 +63,7 @@ function HighlightMatch({ text, query }: { text: string; query: string }) {
 
 export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
   products,
+  popularSearches,
   activeOffersByProductId,
   activeDiscountCampaigns,
   isSyncingCloud = false,
@@ -73,102 +82,58 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     [products]
   );
 
+  // Sorted popular searches loaded dynamically from Firebase
+  const sortedPopularSearches = useMemo(
+    () =>
+      [...popularSearches]
+        .filter((item) => item && item.term && item.term.trim().length > 0)
+        .sort((a, b) => {
+          if (a.order !== b.order) return a.order - b.order;
+          return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+        }),
+    [popularSearches]
+  );
+
   // Instant case-insensitive search across name, category, and keywords/description
   const searchResults = useMemo(() => {
     if (!query.trim()) return [];
     return filterAndRankProducts(availableProducts, query);
   }, [availableProducts, query]);
 
-  // Dynamic category & keyword suggestions extracted from actual Firebase products
-  const suggestions = useMemo(() => {
-    const categoriesMap = new Map<string, number>();
-    const keywordScores = new Map<string, number>();
-    const stopWords = new Set([
-      'with',
-      'from',
-      'that',
-      'this',
-      'your',
-      'for',
-      'and',
-      'the',
-      'card',
-      'play',
-      'new',
-      'fun',
-      'other',
-    ]);
+  // Live search suggestions generated dynamically while typing (matching Firebase popular searches + live product categories/names)
+  const liveSuggestions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+
+    const seen = new Set<string>();
+    const list: Array<{ label: string; kind: 'popular' | 'category' | 'product' }> = [];
+
+    for (const pop of sortedPopularSearches) {
+      const lower = pop.term.trim().toLowerCase();
+      if (lower.includes(q) && lower !== q && !seen.has(lower)) {
+        seen.add(lower);
+        list.push({ label: pop.term.trim(), kind: 'popular' });
+      }
+    }
 
     for (const prod of availableProducts) {
       const cat = (prod.category || '').trim();
-      if (cat) {
-        categoriesMap.set(cat, (categoriesMap.get(cat) || 0) + 1);
-      }
-      const words = `${prod.name || ''} ${prod.description || ''}`
-        .replace(/[^a-zA-Z0-9\s-]/g, ' ')
-        .split(/\s+/)
-        .map((w) => w.trim())
-        .filter((w) => w.length >= 3 && !stopWords.has(w.toLowerCase()));
-
-      for (const word of words) {
-        const lower = word.toLowerCase();
-        if (!keywordScores.has(lower)) {
-          keywordScores.set(lower, 1);
-        } else {
-          keywordScores.set(lower, (keywordScores.get(lower) || 0) + 1);
-        }
+      if (cat && cat.toLowerCase().includes(q) && cat.toLowerCase() !== q && !seen.has(cat.toLowerCase())) {
+        seen.add(cat.toLowerCase());
+        list.push({ label: cat, kind: 'category' });
       }
     }
 
-    const categories = Array.from(categoriesMap.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([cat]) => cat)
-      .slice(0, 6);
-
-    const popularTerms: string[] = [];
-    const seenTerms = new Set(categories.map((c) => c.toLowerCase()));
-
-    // Add concise product name prefixes / distinctive names from actual products
-    for (const prod of availableProducts) {
+    for (const prod of searchResults.slice(0, 4)) {
       const cleanName = (prod.name || '').split('|')[0].trim();
-      const shortPhrase = cleanName.split(/\s+/).slice(0, 2).join(' ');
-      if (shortPhrase && !seenTerms.has(shortPhrase.toLowerCase())) {
-        popularTerms.push(shortPhrase);
-        seenTerms.add(shortPhrase.toLowerCase());
-      }
-      if (popularTerms.length >= 5) break;
-    }
-
-    // Add high-frequency keyword tokens if room remains
-    const topWords = Array.from(keywordScores.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([w]) => w.charAt(0).toUpperCase() + w.slice(1));
-
-    for (const word of topWords) {
-      if (!seenTerms.has(word.toLowerCase())) {
-        popularTerms.push(word);
-        seenTerms.add(word.toLowerCase());
-      }
-      if (popularTerms.length >= 8) break;
-    }
-
-    return { categories, popularTerms };
-  }, [availableProducts]);
-
-  // Autocomplete suggestion chips matching current partial input
-  const matchingSuggestionChips = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return [];
-    const pool = [...suggestions.categories, ...suggestions.popularTerms];
-    const unique = new Map<string, string>();
-    for (const item of pool) {
-      const lower = item.toLowerCase();
-      if (lower.includes(q) && lower !== q && !unique.has(lower)) {
-        unique.set(lower, item);
+      if (cleanName && cleanName.toLowerCase() !== q && !seen.has(cleanName.toLowerCase())) {
+        seen.add(cleanName.toLowerCase());
+        list.push({ label: cleanName, kind: 'product' });
       }
     }
-    return Array.from(unique.values()).slice(0, 4);
-  }, [query, suggestions]);
+
+    return list.slice(0, 5);
+  }, [query, sortedPopularSearches, availableProducts, searchResults]);
 
   useEffect(() => {
     setHighlightedIndex(-1);
@@ -188,7 +153,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     };
   }, []);
 
-  const handleSelectSuggestion = (term: string) => {
+  const handleApplyTerm = (term: string) => {
     setQuery(term);
     setIsOpen(true);
     inputRef.current?.focus();
@@ -235,247 +200,241 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
   const trimmedQuery = query.trim();
 
   return (
-    <section className="customer-search-section" aria-label="Search Playnix products">
-      <div className="customer-search-container" ref={containerRef}>
-        <div className={`customer-search-input-box ${isOpen ? 'is-focused' : ''}`}>
-          <Search size={18} className="customer-search-icon" aria-hidden="true" />
-          <input
-            ref={inputRef}
-            type="search"
-            className="customer-search-input"
-            placeholder="Search products..."
-            aria-label="Search products"
-            aria-expanded={isOpen}
-            aria-autocomplete="list"
-            value={query}
-            onFocus={() => {
+    <div className="catalog-search-wrap" ref={containerRef}>
+      <div className={`catalog-search-bar ${isOpen ? 'is-focused' : ''}`}>
+        <Search size={19} className="catalog-search-icon" aria-hidden="true" />
+        <input
+          ref={inputRef}
+          type="search"
+          className="catalog-search-input"
+          placeholder="Search toys, cars, models..."
+          aria-label="Search toys, cars, models"
+          aria-expanded={isOpen}
+          aria-autocomplete="list"
+          value={query}
+          onFocus={() => {
+            setIsOpen(true);
+            onEnsureCloudProducts?.();
+          }}
+          onClick={() => {
+            if (!isOpen) setIsOpen(true);
+          }}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            if (!isOpen) setIsOpen(true);
+          }}
+          onKeyDown={handleKeyDown}
+        />
+        {isSyncingCloud && (
+          <span className="catalog-search-sync-badge" aria-live="polite">
+            Syncing…
+          </span>
+        )}
+        {query && (
+          <button
+            type="button"
+            className="catalog-search-clear-btn"
+            aria-label="Clear search"
+            onClick={() => {
+              setQuery('');
               setIsOpen(true);
-              onEnsureCloudProducts?.();
+              inputRef.current?.focus();
             }}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              if (!isOpen) setIsOpen(true);
-            }}
-            onKeyDown={handleKeyDown}
-          />
-          {isSyncingCloud && (
-            <span className="customer-search-sync-tag" aria-live="polite">
-              Syncing…
-            </span>
-          )}
-          {query && (
-            <button
-              type="button"
-              className="customer-search-clear-btn"
-              aria-label="Clear search"
-              onClick={() => {
-                setQuery('');
-                setIsOpen(true);
-                inputRef.current?.focus();
-              }}
-            >
-              <X size={16} />
-            </button>
-          )}
-        </div>
+          >
+            <X size={16} />
+          </button>
+        )}
+      </div>
 
-        {/* Instant Search Results & Suggestions Dropdown */}
-        {isOpen && (
-          <div className="customer-search-dropdown" role="listbox" aria-label="Search results and suggestions">
-            {trimmedQuery === '' ? (
-              <div className="search-suggestions-panel">
-                {suggestions.categories.length > 0 && (
-                  <div className="search-suggestion-group">
-                    <span className="search-suggestion-label">
-                      <Tag size={12} /> Browse by category
-                    </span>
-                    <div className="search-suggestion-chips">
-                      {suggestions.categories.map((cat) => (
-                        <button
-                          key={cat}
-                          type="button"
-                          className="search-suggestion-chip"
-                          onClick={() => handleSelectSuggestion(cat)}
-                        >
-                          <Search size={12} /> {cat}
-                        </button>
-                      ))}
-                    </div>
+      {isOpen && (
+        <div
+          className="catalog-search-dropdown"
+          role="listbox"
+          aria-label="Popular searches and live product results"
+        >
+          {trimmedQuery === '' ? (
+            <div className="catalog-search-popular-panel">
+              {sortedPopularSearches.length > 0 ? (
+                <>
+                  <div className="catalog-search-panel-label">
+                    <TrendingUp size={13} /> Popular Searches
                   </div>
-                )}
-
-                {suggestions.popularTerms.length > 0 && (
-                  <div className="search-suggestion-group">
-                    <span className="search-suggestion-label">
-                      <Sparkles size={12} /> Popular search suggestions
-                    </span>
-                    <div className="search-suggestion-chips">
-                      {suggestions.popularTerms.map((term) => (
-                        <button
-                          key={term}
-                          type="button"
-                          className="search-suggestion-chip subtle"
-                          onClick={() => handleSelectSuggestion(term)}
-                        >
-                          {term} <ArrowUpRight size={12} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                {matchingSuggestionChips.length > 0 && (
-                  <div className="search-inline-suggestions">
-                    <span>Suggestions:</span>
-                    {matchingSuggestionChips.map((chip) => (
+                  <div className="catalog-popular-chips">
+                    {sortedPopularSearches.map((item) => (
                       <button
-                        key={chip}
+                        key={item.id}
                         type="button"
-                        className="search-inline-chip"
-                        onClick={() => handleSelectSuggestion(chip)}
+                        className="catalog-popular-chip"
+                        onClick={() => handleApplyTerm(item.term)}
                       >
-                        {chip}
+                        <Search size={12} />
+                        <span>{item.term}</span>
                       </button>
                     ))}
                   </div>
-                )}
+                </>
+              ) : (
+                <p className="catalog-search-idle-hint">
+                  Start typing to search toys by name, category, or keywords…
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Live Search Suggestions Bar while typing */}
+              {liveSuggestions.length > 0 && (
+                <div className="catalog-live-suggestions">
+                  <span className="catalog-live-suggestions-title">
+                    <Sparkles size={12} /> Suggestions
+                  </span>
+                  <div className="catalog-live-suggestion-pills">
+                    {liveSuggestions.map((s) => (
+                      <button
+                        key={`${s.kind}-${s.label}`}
+                        type="button"
+                        className="catalog-live-suggestion-pill"
+                        onClick={() => handleApplyTerm(s.label)}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-                {searchResults.length > 0 ? (
-                  <>
-                    <div className="search-results-meta">
-                      <span>
-                        Showing {searchResults.length}{' '}
-                        {searchResults.length === 1 ? 'product' : 'products'} for{' '}
-                        <strong>"{trimmedQuery}"</strong>
-                      </span>
-                      <span className="search-results-hint">Tap to open details</span>
-                    </div>
+              {/* Matching Products */}
+              {searchResults.length > 0 ? (
+                <>
+                  <div className="catalog-search-results-header">
+                    <span>
+                      {searchResults.length} {searchResults.length === 1 ? 'result' : 'results'} for{' '}
+                      <strong>&ldquo;{trimmedQuery}&rdquo;</strong>
+                    </span>
+                    <span className="catalog-search-tap-hint">Tap to open product page</span>
+                  </div>
 
-                    <div className="search-results-list">
-                      {searchResults.map((product, index) => {
-                        const firstImg =
-                          (product.imageUrls && product.imageUrls[0]) || product.imageUrl;
-                        const activeOffer = activeOffersByProductId.get(product.id);
-                        const campaignDiscount = calculateProductDiscount(
-                          product,
-                          activeDiscountCampaigns
-                        );
-                        const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
-                        const effectivePrice = activeOffer
-                          ? activeOffer.discountedPrice
-                          : campaignDiscount.isDiscounted
-                          ? campaignDiscount.discountedPrice
-                          : product.price;
-                        const isHighlighted = index === highlightedIndex;
+                  <div className="catalog-search-results-list">
+                    {searchResults.map((product, idx) => {
+                      const firstImg =
+                        (product.imageUrls && product.imageUrls[0]) || product.imageUrl;
+                      const activeOffer = activeOffersByProductId.get(product.id);
+                      const campaignDiscount = calculateProductDiscount(
+                        product,
+                        activeDiscountCampaigns
+                      );
+                      const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
+                      const effectivePrice = activeOffer
+                        ? activeOffer.discountedPrice
+                        : campaignDiscount.isDiscounted
+                        ? campaignDiscount.discountedPrice
+                        : product.price;
+                      const isHighlighted = idx === highlightedIndex;
 
-                        return (
-                          <button
-                            key={product.id}
-                            type="button"
-                            role="option"
-                            aria-selected={isHighlighted}
-                            className={`search-result-item ${isHighlighted ? 'is-highlighted' : ''}`}
-                            onClick={() => handleChooseProduct(product)}
-                            onMouseEnter={() => setHighlightedIndex(index)}
-                          >
-                            <div className="search-result-thumb">
-                              {firstImg ? (
-                                <img src={firstImg} alt={product.name} loading="lazy" />
-                              ) : (
-                                <span>🧸</span>
-                              )}
+                      return (
+                        <button
+                          key={product.id}
+                          type="button"
+                          role="option"
+                          aria-selected={isHighlighted}
+                          className={`catalog-search-result-row ${
+                            isHighlighted ? 'is-highlighted' : ''
+                          }`}
+                          onClick={() => handleChooseProduct(product)}
+                          onMouseEnter={() => setHighlightedIndex(idx)}
+                        >
+                          <div className="catalog-search-result-thumb">
+                            {firstImg ? (
+                              <img src={firstImg} alt={product.name} loading="lazy" />
+                            ) : (
+                              <span>🧸</span>
+                            )}
+                          </div>
+
+                          <div className="catalog-search-result-body">
+                            <div className="catalog-search-result-top">
+                              <span className="catalog-search-result-name">
+                                <HighlightMatch text={product.name} query={trimmedQuery} />
+                              </span>
+                              <span className="catalog-search-result-cat">
+                                <HighlightMatch
+                                  text={product.category || 'Other'}
+                                  query={trimmedQuery}
+                                />
+                              </span>
                             </div>
+                            {product.description && (
+                              <p className="catalog-search-result-desc">
+                                <HighlightMatch text={product.description} query={trimmedQuery} />
+                              </p>
+                            )}
+                          </div>
 
-                            <div className="search-result-info">
-                              <div className="search-result-title-row">
-                                <span className="search-result-name">
-                                  <HighlightMatch text={product.name} query={trimmedQuery} />
+                          <div className="catalog-search-result-price-wrap">
+                            {hasDiscount ? (
+                              <>
+                                <span className="catalog-search-result-price discounted">
+                                  {formatCurrency(effectivePrice)}
                                 </span>
-                                <span className="search-result-category">
-                                  <HighlightMatch
-                                    text={product.category || 'Other'}
-                                    query={trimmedQuery}
-                                  />
-                                </span>
-                              </div>
-                              {product.description && (
-                                <p className="search-result-desc">
-                                  <HighlightMatch text={product.description} query={trimmedQuery} />
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="search-result-price-col">
-                              {hasDiscount ? (
-                                <>
-                                  <span className="search-result-price discounted">
-                                    {formatCurrency(effectivePrice)}
-                                  </span>
-                                  <span className="search-result-old-price">
-                                    {formatCurrency(product.price)}
-                                  </span>
-                                </>
-                              ) : (
-                                <span className="search-result-price">
+                                <span className="catalog-search-result-old-price">
                                   {formatCurrency(product.price)}
                                 </span>
-                              )}
-                              <ChevronRight size={16} className="search-result-arrow" />
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </>
-                ) : (
-                  <div className="search-empty-state" role="status">
-                    <div className="search-empty-icon">🔍</div>
-                    <h4>No products found</h4>
-                    <p>
-                      No products matched <strong>"{trimmedQuery}"</strong>. Try another name,
-                      category, or keyword.
-                    </p>
-
-                    {(suggestions.categories.length > 0 || suggestions.popularTerms.length > 0) && (
-                      <div className="search-empty-suggestions">
-                        <span>Try searching for:</span>
-                        <div className="search-suggestion-chips center">
-                          {[...suggestions.categories, ...suggestions.popularTerms]
-                            .slice(0, 5)
-                            .map((term) => (
-                              <button
-                                key={term}
-                                type="button"
-                                className="search-suggestion-chip"
-                                onClick={() => handleSelectSuggestion(term)}
-                              >
-                                {term}
-                              </button>
-                            ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      className="secondary-btn"
-                      style={{ marginTop: '12px', padding: '8px 14px', fontSize: '12px' }}
-                      onClick={() => {
-                        setQuery('');
-                        inputRef.current?.focus();
-                      }}
-                    >
-                      Clear search
-                    </button>
+                              </>
+                            ) : (
+                              <span className="catalog-search-result-price">
+                                {formatCurrency(product.price)}
+                              </span>
+                            )}
+                            <ChevronRight size={16} className="catalog-search-result-chevron" />
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
+                </>
+              ) : (
+                <div className="catalog-search-empty" role="status">
+                  <div className="catalog-search-empty-icon">🔍</div>
+                  <h4>No products found</h4>
+                  <p>
+                    We couldn&apos;t find any toys matching{' '}
+                    <strong>&ldquo;{trimmedQuery}&rdquo;</strong>.
+                  </p>
+
+                  {sortedPopularSearches.length > 0 && (
+                    <div className="catalog-search-empty-popular">
+                      <span>Try a popular search:</span>
+                      <div className="catalog-popular-chips center">
+                        {sortedPopularSearches.slice(0, 6).map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className="catalog-popular-chip"
+                            onClick={() => handleApplyTerm(item.term)}
+                          >
+                            {item.term}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    style={{ marginTop: '12px', padding: '8px 14px', fontSize: '12px' }}
+                    onClick={() => {
+                      setQuery('');
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    Clear search
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 };

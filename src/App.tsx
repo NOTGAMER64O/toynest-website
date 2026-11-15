@@ -216,6 +216,7 @@ import {
   type CampaignConflict,
   type CartItem,
   type SavedForLaterItem,
+  type PopularSearchItem,
   DEFAULT_RESCUE_DEALS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
@@ -227,6 +228,8 @@ import {
   saveStoredCart,
   getStoredSavedItems,
   saveStoredSavedItems,
+  getStoredPopularSearches,
+  saveStoredPopularSearches,
   computeOfferStatus,
   computeCampaignStatus,
   calculateProductDiscount,
@@ -288,9 +291,15 @@ import {
   fetchCartItemsFromCloud,
   subscribeToCartItems,
   searchProductsFromCloud,
+  fetchPopularSearchesFromCloud,
+  subscribeToPopularSearches,
+  savePopularSearchToCloud,
+  deletePopularSearchFromCloud,
+  reorderPopularSearchesInCloud,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
+import { OwnerPopularSearchesManager } from './components/OwnerPopularSearchesManager';
 
 function getStoredColours(): string[] {
   try {
@@ -819,8 +828,9 @@ export default function App() {
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
+  const [popularSearches, setPopularSearches] = useState<PopularSearchItem[]>(() => getStoredPopularSearches());
   const [isAddingDeal, setIsAddingDeal] = useState<boolean>(false);
   const [dealSaving, setDealSaving] = useState<boolean>(false);
   const [deletingDealId, setDeletingDealId] = useState<string | null>(null);
@@ -1528,10 +1538,164 @@ export default function App() {
     setLoading(false);
   };
 
+  const loadPopularSearches = async () => {
+    try {
+      const cloudItems = await fetchPopularSearchesFromCloud();
+      setPopularSearches(cloudItems);
+      saveStoredPopularSearches(cloudItems);
+    } catch (err) {
+      console.warn('Could not load popular searches from cloud:', err);
+      setPopularSearches(getStoredPopularSearches());
+    }
+  };
+
+  const ensureAuthorizedOwner = (): boolean => {
+    if (page !== 'owner' || ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      setErrorMessage('Unauthorized: Only the authorized owner can manage popular searches.');
+      return false;
+    }
+    return true;
+  };
+
+  const handleAddPopularSearch = async (rawTerm: string) => {
+    if (!ensureAuthorizedOwner()) return;
+    const trimmed = rawTerm.trim();
+    if (!trimmed) {
+      setErrorMessage('Please enter a popular search keyword.');
+      return;
+    }
+    const exists = popularSearches.some(
+      (item) => item.term.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+    if (exists) {
+      setErrorMessage(`"${trimmed}" is already in your popular searches list.`);
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const nextOrder =
+      popularSearches.length > 0
+        ? Math.max(...popularSearches.map((p) => p.order ?? 0)) + 1
+        : 0;
+
+    const newItem: PopularSearchItem = {
+      id: `pop_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      term: trimmed.slice(0, 100),
+      order: nextOrder,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const updated = [...popularSearches, newItem];
+    setPopularSearches(updated);
+    saveStoredPopularSearches(updated);
+
+    try {
+      await savePopularSearchToCloud(newItem);
+      setSuccessMessage(`Added "${newItem.term}" to popular searches.`);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not save popular search to Firebase.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEditPopularSearch = async (item: PopularSearchItem, rawNewTerm: string) => {
+    if (!ensureAuthorizedOwner()) return;
+    const trimmed = rawNewTerm.trim();
+    if (!trimmed) {
+      setErrorMessage('Popular search keyword cannot be empty.');
+      return;
+    }
+    const duplicate = popularSearches.some(
+      (other) => other.id !== item.id && other.term.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      setErrorMessage(`"${trimmed}" already exists in popular searches.`);
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const updatedItem: PopularSearchItem = {
+      ...item,
+      term: trimmed.slice(0, 100),
+      updatedAt: new Date().toISOString(),
+    };
+    const updatedList = popularSearches.map((p) => (p.id === item.id ? updatedItem : p));
+    setPopularSearches(updatedList);
+    saveStoredPopularSearches(updatedList);
+
+    try {
+      await savePopularSearchToCloud(updatedItem);
+      setSuccessMessage(`Updated popular search to "${updatedItem.term}".`);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not update popular search in Firebase.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeletePopularSearch = async (searchId: string) => {
+    if (!ensureAuthorizedOwner()) return;
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const remaining = popularSearches
+      .filter((p) => p.id !== searchId)
+      .map((p, index) => ({ ...p, order: index }));
+
+    setPopularSearches(remaining);
+    saveStoredPopularSearches(remaining);
+
+    try {
+      await deletePopularSearchFromCloud(searchId);
+      if (remaining.length > 0) {
+        await reorderPopularSearchesInCloud(remaining);
+      }
+      setSuccessMessage('Popular search removed.');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not delete popular search from Firebase.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReorderPopularSearches = async (orderedItems: PopularSearchItem[]) => {
+    if (!ensureAuthorizedOwner()) return;
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const normalized = orderedItems.map((item, idx) => ({
+      ...item,
+      order: idx,
+      updatedAt: new Date().toISOString(),
+    }));
+    setPopularSearches(normalized);
+    saveStoredPopularSearches(normalized);
+
+    try {
+      await reorderPopularSearchesInCloud(normalized);
+      setSuccessMessage('Popular search display order updated.');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not save display order to Firebase.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadPaymentQr();
     loadShopModes();
     loadColours();
+    loadPopularSearches();
 
     let unsubProducts = () => {};
     try {
@@ -1552,6 +1716,16 @@ export default function App() {
         if (Array.isArray(colours)) {
           setAvailableColours(colours);
           saveStoredColours(colours);
+        }
+      });
+    } catch {}
+
+    let unsubPopularSearches = () => {};
+    try {
+      unsubPopularSearches = subscribeToPopularSearches((cloudPopular) => {
+        if (Array.isArray(cloudPopular)) {
+          setPopularSearches(cloudPopular);
+          saveStoredPopularSearches(cloudPopular);
         }
       });
     } catch {}
@@ -1616,6 +1790,7 @@ export default function App() {
     return () => {
       unsubProducts();
       unsubColours();
+      unsubPopularSearches();
       unsubDeals();
       unsubOffers();
       unsubCampaigns();
@@ -2257,6 +2432,7 @@ export default function App() {
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
+      if (ownerTab === 'popularSearches') await loadPopularSearches();
       setSuccessMessage('Dashboard refreshed with the latest data.');
     } finally {
       setIsRefreshing(false);
@@ -4081,6 +4257,33 @@ export default function App() {
                     </span>
                   )}
                 </button>
+
+                {/* 6. Edit Popular Searches */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'popularSearches' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('popularSearches');
+                    void loadPopularSearches();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon">
+                    <Search size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Edit Popular Searches</strong>
+                    <span>Customer search bar suggestions</span>
+                  </div>
+                  {ownerTab === 'popularSearches' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {popularSearches.length} saved
+                    </span>
+                  )}
+                </button>
               </div>
 
               <div className="owner-panel-divider" />
@@ -4163,21 +4366,6 @@ export default function App() {
         {/* HOME VIEW: Normal */}
         {page === 'home' && (adultPublished || childPublished) && (
           <>
-            <CustomerSearchBar
-              products={products}
-              activeOffersByProductId={activeOffersByProductId}
-              activeDiscountCampaigns={activeDiscountCampaigns}
-              isSyncingCloud={searchCloudSyncing}
-              onEnsureCloudProducts={() => void ensureCloudProductsForSearch()}
-              onSelectProduct={(prod) => {
-                setSelectedProductForDetail(prod);
-                setErrorMessage('');
-                setPage('productDetail');
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              formatCurrency={da}
-            />
-
             <section className="hero">
               <div className="hero-copy">
                 <span className="eyebrow">LITTLE THINGS, BIG SMILES</span>
@@ -4652,6 +4840,22 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              <CustomerSearchBar
+                products={products}
+                popularSearches={popularSearches}
+                activeOffersByProductId={activeOffersByProductId}
+                activeDiscountCampaigns={activeDiscountCampaigns}
+                isSyncingCloud={searchCloudSyncing}
+                onEnsureCloudProducts={() => void ensureCloudProductsForSearch()}
+                onSelectProduct={(prod) => {
+                  setSelectedProductForDetail(prod);
+                  setErrorMessage('');
+                  setPage('productDetail');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                formatCurrency={da}
+              />
 
               <div className="category-filter">
                 <label htmlFor="customer-category">Category</label>
@@ -5991,7 +6195,7 @@ export default function App() {
               >
                 Suggestions ({ownerSuggestions.length})
               </button>
-              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
+              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -6001,6 +6205,7 @@ export default function App() {
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
+                  {ownerTab === 'popularSearches' && `🔎 Popular Searches (${popularSearches.length})`}
                   {ownerTab === 'campaigns' && `🎉 Festival Campaigns (${discountCampaigns.filter((c) => !c.deleted).length})`}
                   {ownerTab === 'scheduledOffers' && `🏷️ Scheduled Offers (${scheduledOffers.filter((o) => !o.deleted).length})`}
                   {ownerTab === 'rescueDeals' && `⚡ Rescue Deals (${rescueDeals.filter((d) => !d.claimed && !d.deleted).length})`}
@@ -7300,6 +7505,19 @@ export default function App() {
                   )}
                 </div>
               </div>
+            )}
+
+            {/* EDIT POPULAR SEARCHES TAB */}
+            {ownerTab === 'popularSearches' && (
+              <OwnerPopularSearchesManager
+                popularSearches={popularSearches}
+                loading={loading}
+                onRefresh={loadPopularSearches}
+                onAddTerm={handleAddPopularSearch}
+                onEditTerm={handleEditPopularSearch}
+                onDeleteTerm={handleDeletePopularSearch}
+                onReorderTerms={handleReorderPopularSearches}
+              />
             )}
 
             {/* RESCUE DEALS TAB */}

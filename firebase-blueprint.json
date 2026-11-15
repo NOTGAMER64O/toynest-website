@@ -148,6 +148,19 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "name", "discountType", "discountValue", "targetScope", "startAt", "endAt", "status", "createdAt"]
+    },
+    "PopularSearch": {
+      "title": "Popular Search",
+      "description": "Owner-curated popular search suggestion chip for the customer search bar",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "term": { "type": "string", "maxLength": 100 },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "term", "order", "createdAt"]
     }
   },
   "firestore": {
@@ -178,6 +191,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/Setting" },
       "description": "Global shop settings"
+    },
+    "/popularSearches/{searchId}": {
+      "schema": { "$ref": "#/entities/PopularSearch" },
+      "description": "Owner-managed popular search terms for customers"
     }
   }
 }

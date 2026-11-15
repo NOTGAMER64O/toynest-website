@@ -821,3 +821,31 @@ export function saveStoredSavedItems(customerId: string, items: SavedForLaterIte
   } catch {}
 }
 
+export interface PopularSearchItem {
+  id: string;
+  term: string;
+  order: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export function getStoredPopularSearches(): PopularSearchItem[] {
+  try {
+    const raw = localStorage.getItem('playnix_popular_searches');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((x) => x && typeof x.term === 'string' && x.term.trim().length > 0)
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      }
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredPopularSearches(items: PopularSearchItem[]): void {
+  try {
+    localStorage.setItem('playnix_popular_searches', JSON.stringify(items));
+  } catch {}
+}

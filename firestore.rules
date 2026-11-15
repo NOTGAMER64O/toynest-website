@@ -118,6 +118,18 @@ service cloud.firestore {
         && request.resource.data.productId is string;
       allow update, delete: if isValidId(cartItemId);
     }
+
+    // Popular Searches Collection:
+    // Customers can read popular searches; owner workspace manages them
+    match /popularSearches/{searchId} {
+      allow read: if true;
+      allow create, update: if isValidId(searchId)
+        && request.resource.data.id is string
+        && request.resource.data.term is string
+        && request.resource.data.term.size() > 0
+        && request.resource.data.term.size() <= 100
+        && request.resource.data.order is number;
+      allow delete: if isValidId(searchId);
+    }
   }
 }
-
