@@ -39,6 +39,7 @@ import {
   Maximize2,
   BarChart3,
   Heart,
+  HelpCircle,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -222,6 +223,8 @@ import {
   type PopularSearchItem,
   type AnalyticsEvent,
   type AnalyticsCustomer,
+  type ProductQuestion,
+  type ProductQuestionStatus,
   DEFAULT_RESCUE_DEALS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
@@ -235,6 +238,8 @@ import {
   saveStoredSavedItems,
   getStoredPopularSearches,
   saveStoredPopularSearches,
+  getStoredProductQuestions,
+  saveStoredProductQuestions,
   computeOfferStatus,
   computeCampaignStatus,
   calculateProductDiscount,
@@ -317,6 +322,11 @@ import {
   fetchAnalyticsCustomersFromCloud,
   subscribeToAnalyticsEvents,
   subscribeToAnalyticsCustomers,
+  fetchAllProductQuestionsFromCloud,
+  subscribeToAllProductQuestions,
+  answerProductQuestionInCloud,
+  updateProductQuestionStatusInCloud,
+  deleteProductQuestionFromCloud,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
@@ -325,6 +335,8 @@ import { FullScreenImageGallery } from './components/FullScreenImageGallery';
 import { OwnerAnalyticsDashboard } from './components/OwnerAnalyticsDashboard';
 import { HeroToyShowcase } from './components/HeroToyShowcase';
 import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown';
+import { ProductQuestionsSection } from './components/ProductQuestionsSection';
+import { OwnerProductQuestionsManager } from './components/OwnerProductQuestionsManager';
 import {
   OrderSuccessCelebration,
   type OrderCelebrationData,
@@ -855,12 +867,21 @@ export default function App() {
   const [orderQuantity, setOrderQuantity] = useState<number>(1);
   const [galleryProduct, setGalleryProduct] = useState<Product | null>(null);
   const [galleryImageIndex, setGalleryImageIndex] = useState<number>(0);
+  const [galleryAskTrigger, setGalleryAskTrigger] = useState<number>(0);
   const [isGalleryZoomOpen, setIsGalleryZoomOpen] = useState<boolean>(false);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
+  const [ownerProductQuestions, setOwnerProductQuestions] = useState<ProductQuestion[]>(() =>
+    getStoredProductQuestions()
+  );
+  const [questionsLoading, setQuestionsLoading] = useState<boolean>(false);
+  const pendingQuestionsCount = useMemo(
+    () => ownerProductQuestions.filter((q) => q.status === 'Pending').length,
+    [ownerProductQuestions]
+  );
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
   const [analyticsCustomers, setAnalyticsCustomers] = useState<AnalyticsCustomer[]>([]);
   const [allCartItems, setAllCartItems] = useState<CartItem[]>([]);
@@ -1220,6 +1241,84 @@ export default function App() {
       const res = await api.post('/api/owner/suggestions', { pin: ownerPin });
       setOwnerSuggestions(res.data.suggestions || []);
     } catch {}
+  };
+
+  const loadOwnerProductQuestions = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    setQuestionsLoading(true);
+    try {
+      const list = await fetchAllProductQuestionsFromCloud();
+      setOwnerProductQuestions(list);
+      saveStoredProductQuestions(list);
+    } catch (err) {
+      console.warn('Could not load owner product questions:', err);
+    } finally {
+      setQuestionsLoading(false);
+    }
+  };
+
+  const handleSaveQuestionAnswer = async (
+    questionId: string,
+    answer: string,
+    status: ProductQuestionStatus
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    await answerProductQuestionInCloud(questionId, answer, status);
+    const nowIso = new Date().toISOString();
+    setOwnerProductQuestions((prev) => {
+      const next = prev.map((q) =>
+        q.id === questionId
+          ? {
+              ...q,
+              answer: answer.trim(),
+              status,
+              answeredAt: status === 'Answered' ? nowIso : '',
+              updatedAt: nowIso,
+            }
+          : q
+      );
+      saveStoredProductQuestions(next);
+      return next;
+    });
+  };
+
+  const handleMarkQuestionStatus = async (
+    questionId: string,
+    status: ProductQuestionStatus
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    await updateProductQuestionStatusInCloud(questionId, status);
+    const nowIso = new Date().toISOString();
+    setOwnerProductQuestions((prev) => {
+      const next = prev.map((q) =>
+        q.id === questionId
+          ? {
+              ...q,
+              status,
+              answeredAt: status === 'Answered' ? nowIso : '',
+              updatedAt: nowIso,
+            }
+          : q
+      );
+      saveStoredProductQuestions(next);
+      return next;
+    });
+  };
+
+  const handleDeleteQuestion = async (questionId: string) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    await deleteProductQuestionFromCloud(questionId);
+    setOwnerProductQuestions((prev) => {
+      const next = prev.filter((q) => q.id !== questionId);
+      saveStoredProductQuestions(next);
+      return next;
+    });
   };
 
   const dismissOwnerNotification = () => {
@@ -2182,6 +2281,7 @@ export default function App() {
       let unsubAnalyticsEvents = () => {};
       let unsubAnalyticsCustomers = () => {};
       let unsubAllCartItems = () => {};
+      let unsubProductQuestions = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -2194,6 +2294,12 @@ export default function App() {
         unsubAllCartItems = subscribeToAllCartItems((liveCarts) => {
           setAllCartItems(liveCarts);
         });
+        setQuestionsLoading(true);
+        unsubProductQuestions = subscribeToAllProductQuestions((list) => {
+          setOwnerProductQuestions(list);
+          saveStoredProductQuestions(list);
+          setQuestionsLoading(false);
+        });
       } else {
         setAllCartItems([]);
       }
@@ -2204,6 +2310,7 @@ export default function App() {
         unsubAnalyticsEvents();
         unsubAnalyticsCustomers();
         unsubAllCartItems();
+        unsubProductQuestions();
       };
     } else {
       setAllCartItems([]);
@@ -2794,6 +2901,7 @@ export default function App() {
         fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
       ]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
+      if (ownerTab === 'questions') await loadOwnerProductQuestions();
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
@@ -4717,6 +4825,18 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  className={`owner-quick-btn ${ownerTab === 'questions' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('questions');
+                    void loadOwnerProductQuestions();
+                    setIsOwnerMenuOpen(false);
+                  }}
+                >
+                  <HelpCircle size={15} /> Product Questions ({ownerProductQuestions.length})
+                  {pendingQuestionsCount > 0 ? ` · ${pendingQuestionsCount} pending` : ''}
+                </button>
+                <button
+                  type="button"
                   className={`owner-quick-btn ${ownerTab === 'analytics' ? 'active' : ''}`}
                   onClick={() => {
                     setOwnerTab('analytics');
@@ -5322,6 +5442,7 @@ export default function App() {
                               className="product-image product-image-button"
                               aria-label={`View photos and details for ${p.name}`}
                               onClick={() => {
+                                setGalleryAskTrigger(0);
                                 setGalleryProduct(p);
                                 setGalleryImageIndex(0);
                               }}
@@ -5505,6 +5626,9 @@ export default function App() {
               void handleToggleWishlist(prod, activeOffer);
             }}
             formatCurrency={da}
+            customerId={customerId}
+            defaultCustomerName={guestProvidedName}
+            onCustomerNameProvided={associateCheckoutNameWithGuestCart}
           />
         )}
 
@@ -6633,6 +6757,23 @@ export default function App() {
                 }}
               >
                 Suggestions ({ownerSuggestions.length})
+              </button>
+              <button
+                className={ownerTab === 'questions' ? 'active' : ''}
+                style={{ position: 'relative' }}
+                onClick={() => {
+                  setOwnerTab('questions');
+                  void loadOwnerProductQuestions();
+                }}
+              >
+                Product Questions ({ownerProductQuestions.length})
+                {pendingQuestionsCount > 0 && (
+                  <span
+                    className="blinking-green-dot"
+                    style={{ top: '6px', right: '8px' }}
+                    title={`${pendingQuestionsCount} pending customer question(s)`}
+                  />
+                )}
               </button>
               <button
                 className={ownerTab === 'analytics' ? 'active' : ''}
@@ -7955,6 +8096,19 @@ export default function App() {
                   )}
                 </div>
               </div>
+            )}
+
+            {/* OWNER PRODUCT QUESTIONS TAB */}
+            {ownerTab === 'questions' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+              <OwnerProductQuestionsManager
+                questions={ownerProductQuestions}
+                products={products}
+                loading={questionsLoading}
+                onRefresh={loadOwnerProductQuestions}
+                onSaveAnswer={handleSaveQuestionAnswer}
+                onMarkStatus={handleMarkQuestionStatus}
+                onDeleteQuestion={handleDeleteQuestion}
+              />
             )}
 
             {/* OWNER ANALYTICS DASHBOARD TAB */}
@@ -9440,34 +9594,53 @@ export default function App() {
                     <p>{galleryProduct.description || 'A fun new friend for playtime.'}</p>
                     <div className="gallery-footer">
                       <strong>{da(galleryProduct.price)}</strong>
-                      <button
-                        className="primary-btn"
-                        type="button"
-                        onClick={() => {
-                          setSelectedProductForBuy(galleryProduct);
-                          setOrderQuantity(1);
-                          setIsGalleryZoomOpen(false);
-                          setGalleryProduct(null);
-                          setCheckoutMode(null);
-                          setCheckoutForm({
-                            name: '',
-                            studentClass: '',
-                            section: '',
-                            phone: '',
-                            address: '',
-                            note: '',
-                            colour: '',
-                          });
-                          setErrorMessage('');
-                          setPage('buy');
-                        }}
-                      >
-                        Buy now <ArrowLeft size={16} />
-                      </button>
+                      <div className="gallery-footer-actions">
+                        <button
+                          type="button"
+                          className="secondary-btn gallery-ask-btn"
+                          onClick={() => setGalleryAskTrigger((c) => c + 1)}
+                        >
+                          <HelpCircle size={15} /> Ask a Question
+                        </button>
+                        <button
+                          className="primary-btn"
+                          type="button"
+                          onClick={() => {
+                            setSelectedProductForBuy(galleryProduct);
+                            setOrderQuantity(1);
+                            setIsGalleryZoomOpen(false);
+                            setGalleryAskTrigger(0);
+                            setGalleryProduct(null);
+                            setCheckoutMode(null);
+                            setCheckoutForm({
+                              name: '',
+                              studentClass: '',
+                              section: '',
+                              phone: '',
+                              address: '',
+                              note: '',
+                              colour: '',
+                            });
+                            setErrorMessage('');
+                            setPage('buy');
+                          }}
+                        >
+                          Buy now <ArrowLeft size={16} />
+                        </button>
+                      </div>
                     </div>
                     {urls.length > 1 && (
                       <p className="gallery-swipe-hint">Tap photo to zoom · Swipe left or right to see more</p>
                     )}
+
+                    <ProductQuestionsSection
+                      compact
+                      product={galleryProduct}
+                      customerId={customerId}
+                      defaultCustomerName={guestProvidedName}
+                      onCustomerNameProvided={associateCheckoutNameWithGuestCart}
+                      externalOpenTrigger={galleryAskTrigger}
+                    />
                   </div>
 
                   <FullScreenImageGallery

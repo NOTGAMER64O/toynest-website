@@ -187,5 +187,66 @@ service cloud.firestore {
         && (!('guestCode' in request.resource.data) || (request.resource.data.guestCode is string && request.resource.data.guestCode.size() <= 16))
         && (!('linkedFromGuestId' in request.resource.data) || (request.resource.data.linkedFromGuestId is string && request.resource.data.linkedFromGuestId.size() <= 128));
     }
+
+    // Product Questions & Owner Answers Collection:
+    function isValidProductQuestion(data) {
+      return data.keys().hasAll(['id', 'productId', 'productName', 'customerId', 'question', 'status', 'createdAt'])
+        && data.keys().hasOnly([
+          'id',
+          'productId',
+          'productName',
+          'productImageUrl',
+          'customerId',
+          'guestCode',
+          'customerName',
+          'question',
+          'answer',
+          'status',
+          'createdAt',
+          'answeredAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.productId is string
+        && data.productId.size() > 0
+        && data.productId.size() <= 128
+        && data.productName is string
+        && data.productName.size() > 0
+        && data.productName.size() <= 200
+        && (!('productImageUrl' in data) || (data.productImageUrl is string && data.productImageUrl.size() <= 800000))
+        && data.customerId is string
+        && data.customerId.size() > 0
+        && data.customerId.size() <= 128
+        && (!('guestCode' in data) || (data.guestCode is string && data.guestCode.size() <= 16))
+        && (!('customerName' in data) || (data.customerName is string && data.customerName.size() <= 100))
+        && data.question is string
+        && data.question.size() > 0
+        && data.question.size() <= 1000
+        && (!('answer' in data) || (data.answer is string && data.answer.size() <= 2000))
+        && data.status in ['Pending', 'Answered']
+        && data.createdAt is string
+        && data.createdAt.size() > 0
+        && data.createdAt.size() <= 64
+        && (!('answeredAt' in data) || (data.answeredAt is string && data.answeredAt.size() <= 64))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    match /productQuestions/{questionId} {
+      allow read: if true;
+      allow create: if isValidId(questionId)
+        && isValidProductQuestion(request.resource.data)
+        && request.resource.data.id == questionId
+        && request.resource.data.status == 'Pending'
+        && (!('answer' in request.resource.data) || request.resource.data.answer == '');
+      allow update: if isValidId(questionId)
+        && isValidProductQuestion(request.resource.data)
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.customerId == resource.data.customerId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.question == resource.data.question
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['answer', 'status', 'answeredAt', 'updatedAt']);
+      allow delete: if isValidId(questionId);
+    }
   }
 }

@@ -969,3 +969,42 @@ export function getISTDateKey(input: string | number | Date = Date.now()): strin
   }
 }
 
+/* =========================================================================
+   PRODUCT QUESTIONS & OWNER ANSWERS SYSTEM
+   ========================================================================= */
+
+export type ProductQuestionStatus = 'Pending' | 'Answered';
+
+export interface ProductQuestion {
+  id: string;
+  productId: string;
+  productName: string;
+  productImageUrl: string;
+  customerId: string;
+  guestCode?: string;
+  customerName?: string;
+  question: string;
+  answer?: string;
+  status: ProductQuestionStatus;
+  createdAt: string;
+  answeredAt?: string;
+  updatedAt?: string;
+}
+
+export function getStoredProductQuestions(): ProductQuestion[] {
+  try {
+    const raw = localStorage.getItem('playnix_product_questions');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredProductQuestions(items: ProductQuestion[]): void {
+  try {
+    localStorage.setItem('playnix_product_questions', JSON.stringify(items));
+  } catch {}
+}
+

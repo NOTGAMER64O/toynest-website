@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Clock,
   Heart,
+  HelpCircle,
   Maximize2,
   ShoppingBag,
   ShoppingCart,
@@ -19,6 +20,7 @@ import {
   formatTimeRemaining,
 } from '../defaultData';
 import { FullScreenImageGallery } from './FullScreenImageGallery';
+import { ProductQuestionsSection } from './ProductQuestionsSection';
 
 interface CustomerProductDetailProps {
   product: Product;
@@ -31,6 +33,9 @@ interface CustomerProductDetailProps {
   isWishlisted?: boolean;
   onToggleWishlist?: (product: Product, activeOffer?: ScheduledOffer) => void;
   formatCurrency: (val: number) => string;
+  customerId: string;
+  defaultCustomerName?: string;
+  onCustomerNameProvided?: (name: string) => void;
 }
 
 export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
@@ -44,17 +49,22 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
   isWishlisted = false,
   onToggleWishlist,
   formatCurrency,
+  customerId,
+  defaultCustomerName = '',
+  onCustomerNameProvided,
 }) => {
   const [imageIndex, setImageIndex] = useState<number>(0);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [isFullScreenOpen, setIsFullScreenOpen] = useState<boolean>(false);
   const [justAdded, setJustAdded] = useState<boolean>(false);
   const [heartAnimState, setHeartAnimState] = useState<'idle' | 'added' | 'removed'>('idle');
+  const [askQuestionTrigger, setAskQuestionTrigger] = useState<number>(0);
   const didSwipeRef = useRef<boolean>(false);
 
   useEffect(() => {
     setImageIndex(0);
     setIsFullScreenOpen(false);
+    setAskQuestionTrigger(0);
   }, [product.id]);
 
   const urls =
@@ -309,9 +319,25 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
               {justAdded ? <Check size={17} /> : <ShoppingCart size={17} />}
               {justAdded ? 'Added!' : 'Add to cart'}
             </button>
+            <button
+              type="button"
+              className="secondary-btn product-detail-ask-btn"
+              onClick={() => setAskQuestionTrigger((c) => c + 1)}
+            >
+              <HelpCircle size={17} />
+              Ask a Question
+            </button>
           </div>
         </div>
       </div>
+
+      <ProductQuestionsSection
+        product={product}
+        customerId={customerId}
+        defaultCustomerName={defaultCustomerName}
+        onCustomerNameProvided={onCustomerNameProvided}
+        externalOpenTrigger={askQuestionTrigger}
+      />
 
       <FullScreenImageGallery
         isOpen={isFullScreenOpen}

@@ -38,6 +38,8 @@ import {
   type PopularSearchItem,
   type AnalyticsEvent,
   type AnalyticsCustomer,
+  type ProductQuestion,
+  type ProductQuestionStatus,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   getStoredDeletedRescueDealIds,
@@ -2269,4 +2271,188 @@ export function subscribeToAnalyticsCustomers(
     return () => {};
   }
 }
+
+// ----------------- PRODUCT QUESTIONS & OWNER ANSWERS -----------------
+
+function normalizeProductQuestion(data: any, docId: string): ProductQuestion {
+  return {
+    id: String(data?.id || docId),
+    productId: String(data?.productId || ''),
+    productName: String(data?.productName || 'Product'),
+    productImageUrl: String(data?.productImageUrl || ''),
+    customerId: String(data?.customerId || ''),
+    guestCode: data?.guestCode ? String(data.guestCode) : undefined,
+    customerName: data?.customerName ? String(data.customerName) : '',
+    question: String(data?.question || ''),
+    answer: data?.answer ? String(data.answer) : '',
+    status: data?.status === 'Answered' ? 'Answered' : 'Pending',
+    createdAt: String(data?.createdAt || new Date().toISOString()),
+    answeredAt: data?.answeredAt ? String(data.answeredAt) : undefined,
+    updatedAt: data?.updatedAt ? String(data.updatedAt) : undefined,
+  };
+}
+
+export async function submitProductQuestionToCloud(questionObj: ProductQuestion): Promise<void> {
+  const path = `productQuestions/${questionObj.id}`;
+  try {
+    const nowIso = questionObj.createdAt || new Date().toISOString();
+    const cleanPayload = sanitizeForFirestore({
+      id: questionObj.id.slice(0, 128),
+      productId: questionObj.productId.slice(0, 128),
+      productName: questionObj.productName.trim().slice(0, 200) || 'Product',
+      productImageUrl: String(questionObj.productImageUrl || '').slice(0, 800000),
+      customerId: questionObj.customerId.slice(0, 128),
+      guestCode: (questionObj.guestCode || getGuestShortCode(questionObj.customerId)).slice(0, 16),
+      customerName: String(questionObj.customerName || '').trim().slice(0, 100),
+      question: questionObj.question.trim().slice(0, 1000),
+      answer: '',
+      status: 'Pending',
+      createdAt: nowIso.slice(0, 64),
+      updatedAt: nowIso.slice(0, 64),
+    });
+
+    await setDoc(doc(db, 'productQuestions', questionObj.id), cleanPayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeToProductQuestionsByProduct(
+  productId: string,
+  callback: (questions: ProductQuestion[]) => void
+): () => void {
+  if (!productId) return () => {};
+  const path = `productQuestions?productId=${productId}`;
+  try {
+    const q = query(collection(db, 'productQuestions'), where('productId', '==', productId));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const list: ProductQuestion[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data() as any;
+          if (data && data.question) {
+            list.push(normalizeProductQuestion(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        console.warn('Product questions subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function fetchAllProductQuestionsFromCloud(): Promise<ProductQuestion[]> {
+  const path = 'productQuestions';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'productQuestions'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'productQuestions'));
+    }
+    const list: ProductQuestion[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data() as any;
+      if (data && data.question) {
+        list.push(normalizeProductQuestion(data, d.id));
+      }
+    });
+    return list.sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAllProductQuestions(
+  callback: (questions: ProductQuestion[]) => void
+): () => void {
+  const path = 'productQuestions';
+  try {
+    return onSnapshot(
+      collection(db, 'productQuestions'),
+      (snapshot) => {
+        const list: ProductQuestion[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data() as any;
+          if (data && data.question) {
+            list.push(normalizeProductQuestion(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        console.warn('Owner product questions subscription warning:', error);
+        try {
+          handleFirestoreError(error, OperationType.LIST, path);
+        } catch {}
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function answerProductQuestionInCloud(
+  questionId: string,
+  answer: string,
+  status: ProductQuestionStatus = 'Answered'
+): Promise<void> {
+  const path = `productQuestions/${questionId}`;
+  try {
+    const nowIso = new Date().toISOString();
+    const cleanAnswer = answer.trim().slice(0, 2000);
+    await updateDoc(doc(db, 'productQuestions', questionId), {
+      answer: cleanAnswer,
+      status,
+      answeredAt: status === 'Answered' ? nowIso : '',
+      updatedAt: nowIso,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateProductQuestionStatusInCloud(
+  questionId: string,
+  status: ProductQuestionStatus
+): Promise<void> {
+  const path = `productQuestions/${questionId}`;
+  try {
+    const nowIso = new Date().toISOString();
+    await updateDoc(doc(db, 'productQuestions', questionId), {
+      status,
+      answeredAt: status === 'Answered' ? nowIso : '',
+      updatedAt: nowIso,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteProductQuestionFromCloud(questionId: string): Promise<void> {
+  const path = `productQuestions/${questionId}`;
+  try {
+    await deleteDoc(doc(db, 'productQuestions', questionId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 
