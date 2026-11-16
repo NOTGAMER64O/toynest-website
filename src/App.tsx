@@ -933,6 +933,7 @@ export default function App() {
     checked: boolean;
     geminiConfigured: boolean;
     model?: string;
+    backendError?: string;
   }>({ checked: false, geminiConfigured: false });
   const aiInitialScanTriggeredRef = useRef<boolean>(false);
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
@@ -1383,9 +1384,15 @@ export default function App() {
         checked: true,
         geminiConfigured: Boolean(res.data?.geminiConfigured),
         model: res.data?.model,
+        backendError: undefined,
       });
-    } catch {
-      setAiGeminiStatus((prev) => ({ ...prev, checked: true }));
+    } catch (err: any) {
+      setAiGeminiStatus((prev) => ({
+        ...prev,
+        checked: true,
+        backendError:
+          err?.message || 'Could not reach Playnix AI server backend (/api/owner/ai/status).',
+      }));
     }
   };
 
@@ -1514,6 +1521,7 @@ export default function App() {
         ...prev,
         checked: true,
         geminiConfigured: Boolean(data.geminiConfigured),
+        backendError: undefined,
       }));
 
       setAiScanFeedback({

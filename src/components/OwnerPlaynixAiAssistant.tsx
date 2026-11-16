@@ -44,7 +44,7 @@ interface OwnerPlaynixAiAssistantProps {
   availableColours: string[];
   pendingQuestionsCount: number;
   scanning: boolean;
-  geminiStatus: { checked: boolean; geminiConfigured: boolean; model?: string };
+  geminiStatus: { checked: boolean; geminiConfigured: boolean; model?: string; backendError?: string };
   scanFeedback?: { message: string; isError?: boolean } | null;
   onTriggerScan: () => Promise<void>;
   onToggleEnabled: (nextEnabled: boolean) => Promise<void>;
@@ -408,15 +408,19 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
             </span>
             <span
               className={`playnix-ai-status-chip ${
-                geminiStatus.checked
-                  ? geminiStatus.geminiConfigured
-                    ? 'is-on'
-                    : 'is-warn'
-                  : 'is-neutral'
+                !geminiStatus.checked
+                  ? 'is-neutral'
+                  : geminiStatus.backendError
+                  ? 'is-off'
+                  : geminiStatus.geminiConfigured
+                  ? 'is-on'
+                  : 'is-warn'
               }`}
             >
               {!geminiStatus.checked
                 ? 'Checking Gemini Server...'
+                : geminiStatus.backendError
+                ? 'Backend API Unreachable'
                 : geminiStatus.geminiConfigured
                 ? 'Gemini API Connected'
                 : 'GEMINI_API_KEY Not Set'}
@@ -450,14 +454,27 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
         </div>
       </div>
 
-      {/* Warning banner when GEMINI_API_KEY is missing on server */}
-      {geminiStatus.checked && !geminiStatus.geminiConfigured && (
+      {/* Diagnostic alert if backend API returned 500 or failed */}
+      {geminiStatus.checked && geminiStatus.backendError && (
+        <div className="playnix-ai-alert warning">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Server API Error ({geminiStatus.backendError})</strong>
+            <p>
+              The frontend could not reach the server-side <code>/api/owner/ai/*</code> endpoints. If you are viewing on Vercel, ensure you redeploy the latest update with <code>api/index.ts</code> fixed and set <code>GEMINI_API_KEY</code> in Vercel Project Settings → Environment Variables.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Warning banner when server responded cleanly but GEMINI_API_KEY is missing */}
+      {geminiStatus.checked && !geminiStatus.backendError && !geminiStatus.geminiConfigured && (
         <div className="playnix-ai-alert warning">
           <AlertTriangle size={18} />
           <div>
             <strong>Server GEMINI_API_KEY configuration needed for AI reply generation</strong>
             <p>
-              Website scanning, training interview, and knowledge management work offline/locally right now. To enable live Gemini AI answer suggestions in Product Questions, add <code>GEMINI_API_KEY</code> in your server Secrets or Vercel Environment Variables.
+              Website scanning, training interview, and knowledge management work offline/locally right now. To enable live Gemini AI answer suggestions in Product Questions, add <code>GEMINI_API_KEY</code> in your AI Studio Secrets or Vercel Environment Variables and redeploy.
             </p>
           </div>
         </div>

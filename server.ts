@@ -1,5 +1,5 @@
+import 'dotenv/config';
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -1519,12 +1519,22 @@ app.post('/api/owner/ai/test-question', async (req, res) => {
   }
 });
 
+// Ensure API errors always return structured JSON instead of HTML error pages
+app.use('/api', (err: any, _req: any, res: any, _next: any) => {
+  console.error('Unhandled API middleware error:', err);
+  const status = typeof err?.status === 'number' ? err.status : 500;
+  res.status(status).json({
+    error: err?.message || `Server error (${status})`,
+  });
+});
+
 // Setup Vite middleware or static serving
 async function startServer() {
   if (process.env.VERCEL) {
     return;
   }
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
