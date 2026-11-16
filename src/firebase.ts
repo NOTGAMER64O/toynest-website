@@ -7,6 +7,8 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  type FirestoreSettings,
   collection,
   doc,
   setDoc,
@@ -34,7 +36,6 @@ import {
   type DiscountCampaign,
   type MoneyAdjustmentItem,
   type CartItem,
-  type SavedForLaterItem,
   type PopularSearchItem,
   type AnalyticsEvent,
   type AnalyticsCustomer,
@@ -52,7 +53,24 @@ import {
 } from './defaultData';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+function createFirestoreInstance() {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalForceLongPolling: true,
+        useFetchStreams: false,
+        ignoreUndefinedProperties: true,
+      } as FirestoreSettings & { useFetchStreams?: boolean },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreInstance();
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -127,13 +145,67 @@ export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): any
   return clean;
 }
 
+function isOfflineOrTransientError(error: unknown): boolean {
+  const code = typeof (error as any)?.code === 'string' ? (error as any).code : '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  return (
+    code === 'unavailable' ||
+    code === 'failed-precondition' ||
+    message.includes('the client is offline') ||
+    message.includes('Failed to get document because the client is offline') ||
+    message.includes('Could not reach Cloud Firestore backend')
+  );
+}
+
+function parseFirestoreRestValue(val: any): any {
+  if (!val || typeof val !== 'object') return undefined;
+  if ('stringValue' in val) return String(val.stringValue);
+  if ('booleanValue' in val) return Boolean(val.booleanValue);
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return Number(val.doubleValue);
+  if ('timestampValue' in val) return String(val.timestampValue);
+  if ('nullValue' in val) return null;
+  if ('arrayValue' in val) {
+    const arr = Array.isArray(val.arrayValue?.values) ? val.arrayValue.values : [];
+    return arr.map((item: any) => parseFirestoreRestValue(item));
+  }
+  if ('mapValue' in val) {
+    return parseFirestoreRestFields(val.mapValue?.fields || {});
+  }
+  return undefined;
+}
+
+function parseFirestoreRestFields(fields: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(fields || {})) {
+    const parsed = parseFirestoreRestValue(v);
+    if (parsed !== undefined) {
+      result[k] = parsed;
+    }
+  }
+  return result;
+}
+
+async function fetchFirestoreDocViaRest(collectionName: string, docId: string): Promise<Record<string, any> | null> {
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || !json.fields) return null;
+    return parseFirestoreRestFields(json.fields);
+  } catch {
+    return null;
+  }
+}
+
 // Initial connection test
 export async function testConnection() {
   try {
-    await getDocFromServer(doc(db, 'settings', 'test_connection'));
+    await getDocFromServer(doc(db, 'settings', 'store_config'));
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is offline or network restricted.');
+    if (!isOfflineOrTransientError(error)) {
+      console.warn('Firestore connection check warning:', error);
     }
   }
 }
@@ -208,6 +280,10 @@ export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<
     });
     return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   } catch (err) {
+    if (isOfflineOrTransientError(err)) {
+      console.warn('Customer orders fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(err, OperationType.LIST, path);
     return [];
   }
@@ -256,6 +332,10 @@ export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Orders list fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -417,6 +497,12 @@ export async function fetchProductsFromCloud(): Promise<Product[]> {
       (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
     );
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Firestore products fetch skipped while offline; using default catalog.');
+      return [...DEFAULT_PRODUCTS].sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    }
     console.error('Firestore products fetch error:', error);
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
@@ -623,6 +709,19 @@ export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
       };
     }
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      const restData = await fetchFirestoreDocViaRest('settings', 'store_config');
+      if (restData) {
+        return {
+          adultPublished: restData.adultPublished !== false,
+          childPublished: restData.childPublished !== false,
+          paymentQrUrl: restData.paymentQrUrl || '',
+          manualMoneyAdjustment: typeof restData.manualMoneyAdjustment === 'number' ? restData.manualMoneyAdjustment : 0,
+          moneyAdjustmentHistory: Array.isArray(restData.moneyAdjustmentHistory) ? restData.moneyAdjustmentHistory : [],
+        };
+      }
+      throw error;
+    }
     handleFirestoreError(error, OperationType.GET, path);
   }
   return {
@@ -681,6 +780,13 @@ export async function fetchColoursFromCloud(): Promise<string[]> {
       }
     }
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      const restData = await fetchFirestoreDocViaRest('settings', 'colours');
+      if (restData && Array.isArray(restData.list)) {
+        return restData.list.map(String).filter(Boolean);
+      }
+      throw error;
+    }
     handleFirestoreError(error, OperationType.GET, path);
   }
   return [];
@@ -718,7 +824,13 @@ export function subscribeToColours(callback: (colours: string[]) => void): () =>
         callback([]);
       },
       (error) => {
-        handleFirestoreError(error, OperationType.GET, path);
+        if (isOfflineOrTransientError(error)) {
+          console.warn('Colours subscription offline warning:', error);
+          return;
+        }
+        try {
+          handleFirestoreError(error, OperationType.GET, path);
+        } catch {}
       }
     );
   } catch (err) {
@@ -1349,6 +1461,10 @@ export async function fetchDiscountCampaignsFromCloud(): Promise<DiscountCampaig
     });
     return campaigns;
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Discount campaigns fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -1359,24 +1475,34 @@ export function subscribeToDiscountCampaigns(
   onError?: (err: Error) => void
 ): () => void {
   const path = 'discountCampaigns';
-  const q = query(collection(db, 'discountCampaigns'));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const campaigns: DiscountCampaign[] = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (!data.deleted) {
-          campaigns.push(normalizeDiscountCampaignData(d.id, data));
+  try {
+    const q = query(collection(db, 'discountCampaigns'));
+    return onSnapshot(
+      q,
+      (snap) => {
+        const campaigns: DiscountCampaign[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          if (!data.deleted) {
+            campaigns.push(normalizeDiscountCampaignData(d.id, data));
+          }
+        });
+        callback(campaigns);
+      },
+      (error) => {
+        if (isOfflineOrTransientError(error)) {
+          console.warn('Discount campaigns subscription offline warning:', error);
+        } else {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
         }
-      });
-      callback(campaigns);
-    },
-    (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
-      if (onError) onError(error);
-    }
-  );
+        if (onError) onError(error);
+      }
+    );
+  } catch {
+    return () => {};
+  }
 }
 
 export async function saveDiscountCampaignToCloud(campaign: DiscountCampaign): Promise<void> {
@@ -1457,93 +1583,20 @@ export async function recordCampaignOrderInCloud(
   }
 }
 
-// ----------------- SAVED FOR LATER FIRESTORE SYNC -----------------
-
-export async function saveSavedItemToCloud(item: SavedForLaterItem): Promise<void> {
-  const path = `savedItems/${item.id}`;
-  try {
-    const docRef = doc(db, 'savedItems', item.id);
-    await setDoc(
-      docRef,
-      sanitizeForFirestore({
-        ...item,
-        updatedAt: new Date().toISOString(),
-      }),
-      { merge: true }
-    );
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
-}
-
-export async function deleteSavedItemFromCloud(itemId: string): Promise<void> {
-  const path = `savedItems/${itemId}`;
-  try {
-    const docRef = doc(db, 'savedItems', itemId);
-    await deleteDoc(docRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
-}
-
-export async function fetchSavedItemsFromCloud(customerId: string): Promise<SavedForLaterItem[]> {
-  if (!customerId) return [];
-  const path = `savedItems (customerId: ${customerId})`;
-  try {
-    const q = query(collection(db, 'savedItems'), where('customerId', '==', customerId));
-    const snapshot = await getDocs(q);
-    const items: SavedForLaterItem[] = [];
-    snapshot.forEach((d) => {
-      items.push(d.data() as SavedForLaterItem);
-    });
-    return items.sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime());
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
-}
-
-export function subscribeToSavedItems(
-  customerId: string,
-  callback: (items: SavedForLaterItem[]) => void
-): () => void {
-  if (!customerId) return () => {};
-  try {
-    const q = query(collection(db, 'savedItems'), where('customerId', '==', customerId));
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const items: SavedForLaterItem[] = [];
-        snapshot.forEach((d) => {
-          items.push(d.data() as SavedForLaterItem);
-        });
-        items.sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime());
-        callback(items);
-      },
-      (error) => {
-        console.warn('Saved items subscription error:', error);
-      }
-    );
-  } catch {
-    return () => {};
-  }
-}
-
-// ----------------- ACTIVE CART FIRESTORE SYNC -----------------
+// ----------------- PERMANENT CART FIRESTORE SYNC -----------------
 
 export function buildCartDocId(
-  prefix: 'cart' | 'saved',
+  prefix: 'cart',
   customerId: string,
   productId: string,
   colour?: string
 ): string {
-  const safePrefix = prefix === 'saved' ? 'saved' : 'cart';
   const safeCustomer = String(customerId || 'guest').replace(/[^a-zA-Z0-9_-]/g, '_');
   const safeProduct = String(productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
   const safeColour = String(colour || '').trim()
     ? String(colour).trim().replace(/[^a-zA-Z0-9_-]/g, '_')
     : 'default';
-  const full = `${safePrefix}_${safeCustomer}_${safeProduct}_${safeColour}`;
+  const full = `${prefix}_${safeCustomer}_${safeProduct}_${safeColour}`;
   if (full.length <= 128) return full;
   const suffix = getGuestShortCode(full, 8);
   return `${full.slice(0, 118)}_${suffix}`;
@@ -1563,11 +1616,15 @@ export async function saveCartItemToCloud(item: CartItem): Promise<void> {
         ...item,
         isGuest,
         guestCode: isGuest ? item.guestCode || getGuestShortCode(item.customerId) : undefined,
-        updatedAt: new Date().toISOString(),
+        updatedAt: item.updatedAt || new Date().toISOString(),
       }),
       { merge: true }
     );
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Cart item saved locally; cloud sync deferred while offline.');
+      return;
+    }
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
@@ -1578,6 +1635,10 @@ export async function deleteCartItemFromCloud(cartItemId: string): Promise<void>
     const docRef = doc(db, 'cartItems', cartItemId);
     await deleteDoc(docRef);
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Cart item removal saved locally; cloud delete deferred while offline.');
+      return;
+    }
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
@@ -1587,13 +1648,22 @@ export async function fetchCartItemsFromCloud(customerId: string): Promise<CartI
   const path = `cartItems (customerId: ${customerId})`;
   try {
     const q = query(collection(db, 'cartItems'), where('customerId', '==', customerId));
-    const snapshot = await getDocs(q);
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(q);
+    } catch {
+      snapshot = await getDocs(q);
+    }
     const items: CartItem[] = [];
     snapshot.forEach((d) => {
       items.push(d.data() as CartItem);
     });
-    return items.sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+    return items.sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Cart items fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -1609,11 +1679,14 @@ export function subscribeToCartItems(
     return onSnapshot(
       q,
       (snapshot) => {
+        if (snapshot.metadata.fromCache && snapshot.empty) {
+          return;
+        }
         const items: CartItem[] = [];
         snapshot.forEach((d) => {
           items.push(d.data() as CartItem);
         });
-        items.sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+        items.sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
         callback(items);
       },
       (error) => {
@@ -1670,6 +1743,10 @@ export async function fetchAllCartItemsFromCloud(): Promise<CartItem[]> {
     }
     return normalizeActiveCartSnapshot(snapshot);
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('All cart items fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -1687,9 +1764,11 @@ export function subscribeToAllCartItems(
       },
       (error) => {
         console.warn('All cart items subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {
@@ -1729,6 +1808,10 @@ export async function fetchPopularSearchesFromCloud(): Promise<PopularSearchItem
       return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
     });
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Popular searches fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -1757,9 +1840,11 @@ export function subscribeToPopularSearches(
       },
       (error) => {
         console.warn('Popular searches subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {
@@ -1957,12 +2042,11 @@ export async function syncCustomerNameWithCartInCloud(
   });
 
   try {
-    const [cartSnap, savedSnap] = await Promise.all([
-      getDocs(query(collection(db, 'cartItems'), where('customerId', '==', customerId))),
-      getDocs(query(collection(db, 'savedItems'), where('customerId', '==', customerId))),
-    ]);
+    const cartSnap = await getDocs(
+      query(collection(db, 'cartItems'), where('customerId', '==', customerId))
+    );
 
-    if (cartSnap.empty && savedSnap.empty) return;
+    if (cartSnap.empty) return;
 
     const batch = writeBatch(db);
     cartSnap.forEach((d) => {
@@ -1977,20 +2061,12 @@ export async function syncCustomerNameWithCartInCloud(
         { merge: true }
       );
     });
-    savedSnap.forEach((d) => {
-      batch.set(
-        d.ref,
-        sanitizeForFirestore({
-          customerName: cleanName,
-          isGuest,
-          guestCode,
-          updatedAt: nowIso,
-        }),
-        { merge: true }
-      );
-    });
     await batch.commit();
   } catch (err) {
+    if (isOfflineOrTransientError(err)) {
+      console.warn('Cart name cloud sync skipped while offline.');
+      return;
+    }
     handleFirestoreError(err, OperationType.WRITE, `cartItems (name sync: ${customerId})`);
   }
 }
@@ -2186,6 +2262,10 @@ export async function fetchAnalyticsEventsFromCloud(): Promise<AnalyticsEvent[]>
     });
     return list;
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Analytics events fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -2210,9 +2290,11 @@ export function subscribeToAnalyticsEvents(
       },
       (error) => {
         console.warn('Analytics events subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {
@@ -2238,6 +2320,10 @@ export async function fetchAnalyticsCustomersFromCloud(): Promise<AnalyticsCusto
     });
     return list;
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Analytics customers fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -2262,9 +2348,11 @@ export function subscribeToAnalyticsCustomers(
       },
       (error) => {
         console.warn('Analytics customers subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {
@@ -2342,9 +2430,11 @@ export function subscribeToProductQuestionsByProduct(
       },
       (error) => {
         console.warn('Product questions subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {
@@ -2372,6 +2462,10 @@ export async function fetchAllProductQuestionsFromCloud(): Promise<ProductQuesti
       (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
     );
   } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Product questions fetch skipped while offline.');
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
   }
@@ -2399,9 +2493,11 @@ export function subscribeToAllProductQuestions(
       },
       (error) => {
         console.warn('Owner product questions subscription warning:', error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, path);
-        } catch {}
+        if (!isOfflineOrTransientError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, path);
+          } catch {}
+        }
       }
     );
   } catch {

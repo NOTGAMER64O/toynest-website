@@ -5,7 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
-  Heart,
   HelpCircle,
   Maximize2,
   ShoppingBag,
@@ -30,8 +29,6 @@ interface CustomerProductDetailProps {
   onBack: () => void;
   onBuyNow: (product: Product, activeOffer?: ScheduledOffer) => void;
   onAddToCart: (product: Product, activeOffer?: ScheduledOffer) => void;
-  isWishlisted?: boolean;
-  onToggleWishlist?: (product: Product, activeOffer?: ScheduledOffer) => void;
   formatCurrency: (val: number) => string;
   customerId: string;
   defaultCustomerName?: string;
@@ -46,8 +43,6 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
   onBack,
   onBuyNow,
   onAddToCart,
-  isWishlisted = false,
-  onToggleWishlist,
   formatCurrency,
   customerId,
   defaultCustomerName = '',
@@ -57,7 +52,6 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [isFullScreenOpen, setIsFullScreenOpen] = useState<boolean>(false);
   const [justAdded, setJustAdded] = useState<boolean>(false);
-  const [heartAnimState, setHeartAnimState] = useState<'idle' | 'added' | 'removed'>('idle');
   const [askQuestionTrigger, setAskQuestionTrigger] = useState<number>(0);
   const didSwipeRef = useRef<boolean>(false);
 
@@ -220,35 +214,11 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
         <div className="product-detail-info">
           <div className="product-detail-meta-row">
             <span className="product-category">{product.category || 'Other'}</span>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-              {urls.length > 1 && (
-                <span className="gallery-counter">
-                  PHOTO {imageIndex + 1} OF {urls.length}
-                </span>
-              )}
-              {onToggleWishlist && (
-                <button
-                  type="button"
-                  className={`wishlist-heart-btn detail-wishlist-btn ${isWishlisted ? 'is-wishlisted' : ''} ${
-                    heartAnimState === 'added'
-                      ? 'anim-heart-pop'
-                      : heartAnimState === 'removed'
-                      ? 'anim-heart-unpop'
-                      : ''
-                  }`}
-                  aria-label={isWishlisted ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}
-                  aria-pressed={isWishlisted}
-                  title={isWishlisted ? 'Saved in wishlist' : 'Save to wishlist'}
-                  onClick={() => {
-                    setHeartAnimState(isWishlisted ? 'removed' : 'added');
-                    window.setTimeout(() => setHeartAnimState('idle'), 500);
-                    onToggleWishlist(product, activeOffer);
-                  }}
-                >
-                  <Heart size={16} />
-                </button>
-              )}
-            </div>
+            {urls.length > 1 && (
+              <span className="gallery-counter">
+                PHOTO {imageIndex + 1} OF {urls.length}
+              </span>
+            )}
           </div>
 
           <h1 className="product-detail-title">{product.name}</h1>

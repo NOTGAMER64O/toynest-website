@@ -33,12 +33,9 @@ import {
   AlertTriangle,
   Calendar,
   Clock,
-  Bookmark,
-  BookmarkCheck,
   ShoppingCart,
   Maximize2,
   BarChart3,
-  Heart,
   HelpCircle,
 } from 'lucide-react';
 
@@ -98,14 +95,32 @@ export function getOrderStatusClass(status?: string): string {
 
 function getCustomerKey(): string {
   const KEY = 'toynest_customer_key';
-  let val = localStorage.getItem(KEY);
+  let val: string | null = null;
+  try {
+    val = localStorage.getItem(KEY);
+  } catch {}
+  if (!val && typeof document !== 'undefined') {
+    const match = document.cookie
+      .split('; ')
+      .find((row) => row.startsWith(`${KEY}=`));
+    if (match) {
+      val = decodeURIComponent(match.split('=')[1] || '');
+    }
+  }
   if (!val) {
     val =
       typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    localStorage.setItem(KEY, val);
   }
+  try {
+    localStorage.setItem(KEY, val);
+  } catch {}
+  try {
+    if (typeof document !== 'undefined') {
+      document.cookie = `${KEY}=${encodeURIComponent(val)}; path=/; max-age=31536000; SameSite=Lax`;
+    }
+  } catch {}
   return val;
 }
 
@@ -219,7 +234,6 @@ import {
   type MoneyAdjustmentItem,
   type CampaignConflict,
   type CartItem,
-  type SavedForLaterItem,
   type PopularSearchItem,
   type AnalyticsEvent,
   type AnalyticsCustomer,
@@ -234,8 +248,9 @@ import {
   saveStoredMoneyAdjustmentHistory,
   getStoredCart,
   saveStoredCart,
-  getStoredSavedItems,
-  saveStoredSavedItems,
+  markCartItemDeletedLocally,
+  unmarkCartItemDeletedLocally,
+  mergePermanentCartItems,
   getStoredPopularSearches,
   saveStoredPopularSearches,
   getStoredProductQuestions,
@@ -296,10 +311,6 @@ import {
   cancelDiscountCampaignInCloud,
   deleteDiscountCampaignFromCloud,
   recordCampaignOrderInCloud,
-  saveSavedItemToCloud,
-  deleteSavedItemFromCloud,
-  fetchSavedItemsFromCloud,
-  subscribeToSavedItems,
   saveCartItemToCloud,
   deleteCartItemFromCloud,
   fetchCartItemsFromCloud,
@@ -1110,13 +1121,13 @@ export default function App() {
   const lastSyncedGuestNameRef = useRef<string>('');
   const customerId = guestCustomerId;
   const [cartItems, setCartItems] = useState<CartItem[]>(() => getStoredCart(getCustomerKey()));
-  const [savedItems, setSavedItems] = useState<SavedForLaterItem[]>(() => getStoredSavedItems(getCustomerKey()));
+  const cartItemsRef = useRef<CartItem[]>(cartItems);
+  cartItemsRef.current = cartItems;
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
   const [cartToastMessage, setCartToastMessage] = useState<string>('');
   const [cartAnimKey, setCartAnimKey] = useState<number>(0);
   const [isCartBouncing, setIsCartBouncing] = useState<boolean>(false);
   const [justAddedProductId, setJustAddedProductId] = useState<string | null>(null);
-  const [heartAnimMap, setHeartAnimMap] = useState<Record<string, 'added' | 'removed'>>({});
   const [orderSuccessCelebration, setOrderSuccessCelebration] = useState<OrderCelebrationData | null>(null);
   const cartBounceTimerRef = useRef<number | null>(null);
   const justAddedTimerRef = useRef<number | null>(null);
@@ -2197,47 +2208,60 @@ export default function App() {
     }
   }, [page, guestProvidedName]);
 
-  // Real-time Firestore sync for customer Cart & Saved for Later items
+  // Real-time permanent cart synchronization across visits & cloud storage
   useEffect(() => {
     if (!customerId) return;
     let unsubCart = () => {};
-    let unsubSaved = () => {};
+
+    const reconcileWithCloud = (cloudItems: CartItem[]) => {
+      const localItems = getStoredCart(customerId);
+      const { merged, missingInCloud, staleInCloudIds } = mergePermanentCartItems(
+        customerId,
+        localItems.length > 0 ? localItems : cartItemsRef.current,
+        cloudItems
+      );
+
+      setCartItems(merged);
+      saveStoredCart(customerId, merged);
+
+      if (missingInCloud.length > 0) {
+        missingInCloud.forEach((item) => {
+          void saveCartItemToCloud(item).catch(() => {});
+        });
+      }
+      if (staleInCloudIds.length > 0) {
+        staleInCloudIds.forEach((id) => {
+          void deleteCartItemFromCloud(id).catch(() => {});
+        });
+      }
+    };
 
     try {
       unsubCart = subscribeToCartItems(customerId, (liveCart) => {
-        setCartItems(liveCart);
-        saveStoredCart(customerId, liveCart);
-      });
-      unsubSaved = subscribeToSavedItems(customerId, (liveSaved) => {
-        setSavedItems(liveSaved);
-        saveStoredSavedItems(customerId, liveSaved);
+        reconcileWithCloud(liveCart);
       });
     } catch (err) {
-      console.warn('Cart or saved items subscription error:', err);
+      console.warn('Cart subscription error:', err);
     }
 
-    // Initial load from cloud if needed
+    // Fetch latest cloud cart and merge with any locally persisted items
     fetchCartItemsFromCloud(customerId)
       .then((items) => {
-        if (items && items.length > 0) {
-          setCartItems(items);
-          saveStoredCart(customerId, items);
-        }
+        reconcileWithCloud(items || []);
       })
       .catch(() => {});
 
-    fetchSavedItemsFromCloud(customerId)
-      .then((items) => {
-        if (items && items.length > 0) {
-          setSavedItems(items);
-          saveStoredSavedItems(customerId, items);
-        }
-      })
-      .catch(() => {});
+    const flushCartToStorage = () => {
+      saveStoredCart(customerId, cartItemsRef.current);
+    };
+    window.addEventListener('beforeunload', flushCartToStorage);
+    window.addEventListener('pagehide', flushCartToStorage);
 
     return () => {
+      flushCartToStorage();
+      window.removeEventListener('beforeunload', flushCartToStorage);
+      window.removeEventListener('pagehide', flushCartToStorage);
       unsubCart();
-      unsubSaved();
     };
   }, [customerId]);
 
@@ -2492,7 +2516,7 @@ export default function App() {
     return () => observer.disconnect();
   }, [page, selectedCategory, products.length, adultPublished, childPublished]);
 
-  // ----------------- SHOPPING CART & SAVED FOR LATER HANDLERS -----------------
+  // ----------------- PERMANENT SHOPPING CART HANDLERS -----------------
   const triggerCartBounce = (productId?: string) => {
     setCartAnimKey((prev) => prev + 1);
     setIsCartBouncing(false);
@@ -2543,6 +2567,7 @@ export default function App() {
     const resolvedCustomerName = guestProvidedName?.trim() || undefined;
     const isGuestSession = true;
     const activeGuestCode = getGuestShortCode(customerId);
+    const nowIso = new Date().toISOString();
 
     if (existingIndex >= 0) {
       const current = cartItems[existingIndex];
@@ -2553,6 +2578,7 @@ export default function App() {
         customerName: resolvedCustomerName || current.customerName,
         isGuest: isGuestSession,
         guestCode: activeGuestCode,
+        updatedAt: nowIso,
       };
       updated = [...cartItems];
       updated[existingIndex] = targetItem;
@@ -2575,11 +2601,13 @@ export default function App() {
         rescueDealId,
         isScheduledOffer: Boolean(isScheduledOffer),
         scheduledOfferId,
-        addedAt: new Date().toISOString(),
+        addedAt: nowIso,
+        updatedAt: nowIso,
       };
       updated = [targetItem, ...cartItems];
     }
 
+    unmarkCartItemDeletedLocally(customerId, targetItem.id);
     setCartItems(updated);
     saveStoredCart(customerId, updated);
     triggerCartBounce(prod.id);
@@ -2603,6 +2631,7 @@ export default function App() {
   const handleRemoveFromCart = async (itemId: string) => {
     const target = cartItems.find((it) => it.id === itemId);
     const next = cartItems.filter((it) => it.id !== itemId);
+    markCartItemDeletedLocally(customerId, itemId);
     setCartItems(next);
     saveStoredCart(customerId, next);
     if (target) showCartToast(`Removed "${target.productName}" from cart`);
@@ -2621,216 +2650,15 @@ export default function App() {
     const clamped = Math.min(5, Math.max(1, newQty));
     const target = cartItems.find((it) => it.id === itemId);
     if (!target) return;
-    const updatedItem = { ...target, quantity: clamped };
+    const updatedItem = { ...target, quantity: clamped, updatedAt: new Date().toISOString() };
     const next = cartItems.map((it) => (it.id === itemId ? updatedItem : it));
+    unmarkCartItemDeletedLocally(customerId, itemId);
     setCartItems(next);
     saveStoredCart(customerId, next);
     try {
       await saveCartItemToCloud(updatedItem);
     } catch (err) {
       console.warn('Could not update cart item in cloud:', err);
-    }
-  };
-
-  const handleSaveForLater = async (cartItem: CartItem) => {
-    // 1. Remove from active cart
-    const nextCart = cartItems.filter((it) => it.id !== cartItem.id);
-    setCartItems(nextCart);
-    saveStoredCart(customerId, nextCart);
-
-    // 2. Add to saved for later
-    const savedId = buildCartDocId('saved', customerId, cartItem.productId, cartItem.colour);
-    const resolvedCustomerName =
-      guestProvidedName?.trim() ||
-      cartItem.customerName ||
-      undefined;
-    const isGuestSession = true;
-    const newSavedItem: SavedForLaterItem = {
-      id: savedId,
-      customerId,
-      customerName: resolvedCustomerName,
-      isGuest: isGuestSession,
-      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
-      productId: cartItem.productId,
-      productName: cartItem.productName,
-      productImageUrl: cartItem.productImageUrl,
-      category: cartItem.category,
-      price: cartItem.price,
-      colour: cartItem.colour,
-      quantity: cartItem.quantity || 1,
-      isRescueDeal: cartItem.isRescueDeal,
-      rescueDealId: cartItem.rescueDealId,
-      isScheduledOffer: cartItem.isScheduledOffer,
-      scheduledOfferId: cartItem.scheduledOfferId,
-      savedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const nextSaved = [newSavedItem, ...savedItems.filter((s) => s.id !== savedId)];
-    setSavedItems(nextSaved);
-    saveStoredSavedItems(customerId, nextSaved);
-    showCartToast(`Moved "${cartItem.productName}" to Saved for Later`);
-
-    try {
-      await Promise.all([
-        deleteCartItemFromCloud(cartItem.id),
-        saveSavedItemToCloud(newSavedItem),
-      ]);
-    } catch (err) {
-      console.warn('Could not sync save for later to cloud:', err);
-    }
-  };
-
-  const handleMoveToCart = async (savedItem: SavedForLaterItem) => {
-    // Check product availability
-    const prod = products.find((p) => p.id === savedItem.productId);
-    if (!prod || prod.available === false) {
-      setErrorMessage(`"${savedItem.productName}" is currently unavailable or out of stock.`);
-      return;
-    }
-    if (savedItem.isRescueDeal) {
-      const deal = rescueDeals.find((d) => d.id === (savedItem.rescueDealId || savedItem.productId));
-      if (!deal || deal.claimed || deal.status === 'claimed' || deal.deleted) {
-        setErrorMessage(`This Rescue Deal has already been claimed and is no longer available.`);
-        return;
-      }
-    }
-
-    // 1. Remove from saved items
-    const nextSaved = savedItems.filter((s) => s.id !== savedItem.id);
-    setSavedItems(nextSaved);
-    saveStoredSavedItems(customerId, nextSaved);
-
-    // 2. Add to active cart
-    const cartId = buildCartDocId('cart', customerId, savedItem.productId, savedItem.colour);
-    const resolvedCustomerName =
-      guestProvidedName?.trim() ||
-      savedItem.customerName ||
-      undefined;
-    const isGuestSession = true;
-    const newCartItem: CartItem = {
-      id: cartId,
-      customerId,
-      customerName: resolvedCustomerName,
-      isGuest: isGuestSession,
-      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
-      productId: savedItem.productId,
-      productName: savedItem.productName,
-      productImageUrl: (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || savedItem.productImageUrl,
-      category: prod.category || savedItem.category,
-      price: prod.price,
-      colour: savedItem.colour || '',
-      quantity: savedItem.quantity || 1,
-      isRescueDeal: savedItem.isRescueDeal,
-      rescueDealId: savedItem.rescueDealId,
-      isScheduledOffer: savedItem.isScheduledOffer,
-      scheduledOfferId: savedItem.scheduledOfferId,
-      addedAt: new Date().toISOString(),
-    };
-
-    const existingIndex = cartItems.findIndex((it) => it.id === cartId);
-    let nextCart: CartItem[];
-    if (existingIndex >= 0) {
-      nextCart = [...cartItems];
-      nextCart[existingIndex] = {
-        ...nextCart[existingIndex],
-        quantity: Math.min(5, (nextCart[existingIndex].quantity || 1) + (newCartItem.quantity || 1)),
-      };
-    } else {
-      nextCart = [newCartItem, ...cartItems];
-    }
-
-    setCartItems(nextCart);
-    saveStoredCart(customerId, nextCart);
-    triggerCartBounce(savedItem.productId);
-    showCartToast(`Moved "${savedItem.productName}" back to active cart`);
-
-    try {
-      const itemToSaveInCloud =
-        existingIndex >= 0 ? nextCart[existingIndex] : newCartItem;
-      await Promise.all([
-        deleteSavedItemFromCloud(savedItem.id),
-        saveCartItemToCloud(itemToSaveInCloud),
-      ]);
-    } catch (err) {
-      console.warn('Could not sync move to cart to cloud:', err);
-    }
-  };
-
-  const handleRemoveFromSaved = async (savedItemId: string, productName?: string) => {
-    const nextSaved = savedItems.filter((s) => s.id !== savedItemId);
-    setSavedItems(nextSaved);
-    saveStoredSavedItems(customerId, nextSaved);
-    showCartToast(`Removed "${productName || 'item'}" from Saved for Later`);
-    try {
-      await deleteSavedItemFromCloud(savedItemId);
-    } catch (err) {
-      console.warn('Could not delete saved item from cloud:', err);
-    }
-  };
-
-  const handleToggleWishlist = async (prod: Product, activeOffer?: ScheduledOffer) => {
-    const matchingSaved = savedItems.filter((s) => s.productId === prod.id);
-    const isCurrentlyWishlisted = matchingSaved.length > 0;
-
-    setHeartAnimMap((prev) => ({
-      ...prev,
-      [prod.id]: isCurrentlyWishlisted ? 'removed' : 'added',
-    }));
-    window.setTimeout(() => {
-      setHeartAnimMap((prev) => {
-        const copy = { ...prev };
-        delete copy[prod.id];
-        return copy;
-      });
-    }, 520);
-
-    if (isCurrentlyWishlisted) {
-      const removeIds = new Set(matchingSaved.map((s) => s.id));
-      const nextSaved = savedItems.filter((s) => !removeIds.has(s.id));
-      setSavedItems(nextSaved);
-      saveStoredSavedItems(customerId, nextSaved);
-      showCartToast(`Removed "${prod.name}" from wishlist`);
-      try {
-        await Promise.all(matchingSaved.map((s) => deleteSavedItemFromCloud(s.id)));
-      } catch (err) {
-        console.warn('Could not remove wishlist item from cloud:', err);
-      }
-      return;
-    }
-
-    const savedId = buildCartDocId('saved', customerId, prod.id, '');
-    const resolvedCustomerName = guestProvidedName?.trim() || undefined;
-    const isGuestSession = true;
-    const newSavedItem: SavedForLaterItem = {
-      id: savedId,
-      customerId,
-      customerName: resolvedCustomerName,
-      isGuest: isGuestSession,
-      guestCode: isGuestSession ? getGuestShortCode(customerId) : undefined,
-      productId: prod.id,
-      productName: prod.name,
-      productImageUrl:
-        (prod.imageUrls && prod.imageUrls[0]) || prod.imageUrl || '/toys/toy-40ba4ba9-1.jpg',
-      category: prod.category,
-      price: activeOffer ? activeOffer.discountedPrice : prod.price,
-      colour: '',
-      quantity: 1,
-      isRescueDeal: false,
-      isScheduledOffer: Boolean(activeOffer),
-      scheduledOfferId: activeOffer?.id,
-      savedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const nextSaved = [newSavedItem, ...savedItems.filter((s) => s.id !== savedId)];
-    setSavedItems(nextSaved);
-    saveStoredSavedItems(customerId, nextSaved);
-    showCartToast(`Saved "${prod.name}" to your wishlist`);
-    try {
-      await saveSavedItemToCloud(newSavedItem);
-    } catch (err) {
-      console.warn('Could not save wishlist item to cloud:', err);
     }
   };
 
@@ -4375,16 +4203,13 @@ export default function App() {
                 type="button"
                 style={{ position: 'relative' }}
                 onClick={() => setIsCartOpen(true)}
-                title="View Shopping Cart & Saved for Later"
+                title="View Shopping Cart"
               >
                 <ShoppingCart size={16} className="cart-nav-icon" /> Cart
                 {cartItems.length > 0 && (
                   <span key={`nav-badge-${cartAnimKey}`} className="cart-badge-count cart-badge-pop">
                     {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
                   </span>
-                )}
-                {savedItems.length > 0 && cartItems.length === 0 && (
-                  <span className="saved-badge-indicator" title={`${savedItems.length} items saved for later`}>🔖</span>
                 )}
               </button>
               <button
@@ -4484,9 +4309,9 @@ export default function App() {
                 <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <ShoppingCart size={19} /> Shopping Cart
                 </span>
-                {(cartItems.length > 0 || savedItems.length > 0) && (
+                {cartItems.length > 0 && (
                   <span key={`side-badge-${cartAnimKey}`} className="cart-badge-count cart-badge-pop" style={{ marginLeft: 'auto' }}>
-                    {cartItems.length > 0 ? cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0) : `🔖 ${savedItems.length}`}
+                    {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
                   </span>
                 )}
               </button>
@@ -5422,8 +5247,6 @@ export default function App() {
                       const savingsAmount = originalPrice - effectivePrice;
                       const discountPct =
                         originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
-                      const isWishlisted = savedItems.some((s) => s.productId === p.id);
-                      const heartAnim = heartAnimMap[p.id];
                       const isJustAdded = justAddedProductId === p.id;
 
                       return (
@@ -5472,30 +5295,6 @@ export default function App() {
                               <span className="product-badge">
                                 {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
                               </span>
-                            </button>
-
-                            <button
-                              type="button"
-                              className={`wishlist-heart-btn ${isWishlisted ? 'is-wishlisted' : ''} ${
-                                heartAnim === 'added'
-                                  ? 'anim-heart-pop'
-                                  : heartAnim === 'removed'
-                                  ? 'anim-heart-unpop'
-                                  : ''
-                              }`}
-                              aria-label={
-                                isWishlisted
-                                  ? `Remove ${p.name} from wishlist`
-                                  : `Add ${p.name} to wishlist`
-                              }
-                              aria-pressed={isWishlisted}
-                              title={isWishlisted ? 'Remove from wishlist' : 'Save to wishlist'}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleToggleWishlist(p, activeOffer);
-                              }}
-                            >
-                              <Heart size={16} />
                             </button>
                           </div>
 
@@ -5620,10 +5419,6 @@ export default function App() {
             }}
             onAddToCart={(prod, activeOffer) => {
               void handleAddToCart(prod, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
-            }}
-            isWishlisted={savedItems.some((s) => s.productId === selectedProductForDetail.id)}
-            onToggleWishlist={(prod, activeOffer) => {
-              void handleToggleWishlist(prod, activeOffer);
             }}
             formatCurrency={da}
             customerId={customerId}
@@ -9943,7 +9738,7 @@ export default function App() {
         </div>
       )}
 
-      {/* SHOPPING CART & SAVED FOR LATER SLIDE-OVER DRAWER */}
+      {/* SHOPPING CART SLIDE-OVER DRAWER */}
       {isCartOpen && (
         <div
           className="cart-drawer-backdrop"
@@ -9954,7 +9749,7 @@ export default function App() {
             className="cart-drawer"
             role="dialog"
             aria-modal="true"
-            aria-label="Shopping Cart and Saved for Later"
+            aria-label="Shopping Cart"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Drawer Header */}
@@ -9975,12 +9770,12 @@ export default function App() {
 
             {/* Drawer Body */}
             <div className="cart-drawer-body">
-              {/* ---------------- 1. ACTIVE SHOPPING CART SECTION ---------------- */}
+              {/* ---------------- PERMANENT SHOPPING CART SECTION ---------------- */}
               <section className="cart-active-section">
                 <div className="cart-section-header">
                   <h3 className="cart-section-title">
                     <ShoppingBag size={17} style={{ color: '#273824' }} />
-                    Active Cart
+                    Your Cart
                   </h3>
                   <span className="cart-section-count">
                     {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)} {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0) === 1 ? 'item' : 'items'}
@@ -9990,9 +9785,9 @@ export default function App() {
                 {cartItems.length === 0 ? (
                   <div className="empty-state compact" style={{ padding: '24px 16px', textAlign: 'center', background: '#ffffff', borderRadius: '12px', border: '1.5px dashed #e2e8f0' }}>
                     <div style={{ fontSize: '32px', marginBottom: '8px' }}>🛒</div>
-                    <h4 style={{ margin: '0 0 4px 0', fontSize: '15px', color: '#1f271e' }}>Your active cart is empty</h4>
+                    <h4 style={{ margin: '0 0 4px 0', fontSize: '15px', color: '#1f271e' }}>Your cart is empty</h4>
                     <p style={{ margin: '0 0 14px 0', fontSize: '12px', color: '#6d7568' }}>
-                      Browse toys to add them to your cart, or restore any products from your Saved for Later list below.
+                      Browse toys and add them to your cart—your items stay saved even after you exit the site.
                     </p>
                     <button
                       type="button"
@@ -10077,16 +9872,8 @@ export default function App() {
                                   </button>
                                 </div>
 
-                                {/* Cart Item Action Buttons: Save for Later & Remove */}
+                                {/* Cart Item Action Button: Remove */}
                                 <div className="cart-item-actions">
-                                  <button
-                                    type="button"
-                                    className="btn-save-for-later"
-                                    onClick={() => void handleSaveForLater(item)}
-                                    title="Save this product for later"
-                                  >
-                                    <Bookmark size={12} /> Save for Later
-                                  </button>
                                   <button
                                     type="button"
                                     className="btn-remove-cart"
@@ -10178,109 +9965,6 @@ export default function App() {
                   </>
                 )}
               </section>
-
-              {/* ---------------- 2. SAVED FOR LATER SECTION ---------------- */}
-              <section className="save-for-later-section" aria-label="Saved for Later Products">
-                <div className="cart-section-header">
-                  <h3 className="cart-section-title">
-                    <Bookmark size={17} style={{ color: '#0284c7' }} />
-                    Saved for Later
-                  </h3>
-                  <span className="cart-section-count">
-                    {savedItems.length} {savedItems.length === 1 ? 'item' : 'items'}
-                  </span>
-                </div>
-
-                <div className="saved-section-banner">
-                  <span style={{ fontWeight: 700, color: '#1e293b' }}>🔖 Your Private Wishlist:</span> Items saved here remain securely stored across devices and visits. Saving an item does not create an order or reserve stock.
-                </div>
-
-                {savedItems.length === 0 ? (
-                  <div className="empty-state compact" style={{ padding: '24px 16px', textAlign: 'center', background: '#ffffff', borderRadius: '12px', border: '1.5px dashed #e2e8f0' }}>
-                    <div style={{ fontSize: '30px', marginBottom: '6px' }}>🔖</div>
-                    <h4 style={{ margin: '0 0 4px 0', fontSize: '14px', color: '#1f271e' }}>No items saved for later</h4>
-                    <p style={{ margin: 0, fontSize: '12px', color: '#64748b', lineHeight: 1.4 }}>
-                      Want to save a toy for your next visit? Click <strong>"Save for Later"</strong> on any item in your active cart above.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="saved-items-grid">
-                    {savedItems.map((sItem) => {
-                      const prod = products.find((p) => p.id === sItem.productId);
-                      const isProductDeletedOrUnavailable = !prod || prod.available === false;
-                      const isRescueClaimed = Boolean(
-                        sItem.isRescueDeal &&
-                        rescueDeals.find((d) => d.id === (sItem.rescueDealId || sItem.productId))?.claimed
-                      );
-                      const isUnavailable = isProductDeletedOrUnavailable || isRescueClaimed;
-                      const displayPrice = prod ? prod.price : sItem.price;
-
-                      return (
-                        <div
-                          key={sItem.id}
-                          className={`saved-item-card ${isUnavailable ? 'is-unavailable' : ''}`}
-                        >
-                          <img
-                            src={sItem.productImageUrl || (prod?.imageUrls && prod.imageUrls[0]) || prod?.imageUrl || '/toys/toy-40ba4ba9-1.jpg'}
-                            alt={sItem.productName}
-                            className="saved-item-thumb"
-                          />
-
-                          <div className="saved-item-info">
-                            {/* Availability Status Badge (Requirement 11) */}
-                            {isUnavailable ? (
-                              <span className="saved-status-badge unavailable">
-                                <AlertCircle size={10} />
-                                {isRescueClaimed ? 'Sold Out (Claimed)' : 'Currently Unavailable / Out of Stock'}
-                              </span>
-                            ) : (
-                              <span className="saved-status-badge in-stock">
-                                <Check size={10} /> In Stock
-                              </span>
-                            )}
-
-                            <h4 className="cart-item-name">{sItem.productName}</h4>
-                            {sItem.category && <div className="cart-item-category">{sItem.category}</div>}
-
-                            {sItem.colour && (
-                              <div className="cart-item-colour-pill">
-                                <ColourDot colour={sItem.colour} size={10} />
-                                <span>{sItem.colour}</span>
-                              </div>
-                            )}
-
-                            <div style={{ fontSize: '14px', fontWeight: 800, color: '#1f271e', margin: '4px 0' }}>
-                              {da(displayPrice)}
-                            </div>
-
-                            {/* Saved Actions: Move to Cart & Remove */}
-                            <div className="saved-item-actions">
-                              <button
-                                type="button"
-                                className="btn-move-to-cart"
-                                disabled={isUnavailable}
-                                onClick={() => void handleMoveToCart(sItem)}
-                                title={isUnavailable ? 'This product is currently out of stock' : 'Move back into your active shopping cart'}
-                              >
-                                <ShoppingCart size={13} /> Move to Cart
-                              </button>
-
-                              <button
-                                type="button"
-                                className="btn-remove-saved"
-                                onClick={() => void handleRemoveFromSaved(sItem.id, sItem.productName)}
-                                title="Remove permanently from saved for later"
-                              >
-                                <Trash2 size={12} /> Remove
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
             </div>
           </aside>
         </div>
@@ -10292,18 +9976,16 @@ export default function App() {
           type="button"
           className={`cart-floating-trigger ${isCartBouncing ? 'is-cart-bouncing' : ''}`}
           onClick={() => setIsCartOpen(true)}
-          title="Open Shopping Cart & Saved for Later"
+          title="Open Shopping Cart"
           aria-label="Open Shopping Cart"
         >
           <ShoppingCart size={18} className="cart-nav-icon" />
           <span>Cart</span>
-          {cartItems.length > 0 ? (
+          {cartItems.length > 0 && (
             <span key={`float-badge-${cartAnimKey}`} className="cart-floating-badge cart-badge-pop">
               {cartItems.reduce((acc, it) => acc + (it.quantity || 1), 0)}
             </span>
-          ) : savedItems.length > 0 ? (
-            <span className="cart-floating-badge">🔖 {savedItems.length}</span>
-          ) : null}
+          )}
         </button>
       )}
 

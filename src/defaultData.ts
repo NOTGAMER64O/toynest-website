@@ -769,25 +769,92 @@ export interface CartItem {
   updatedAt?: string;
 }
 
-export interface SavedForLaterItem {
-  id: string;
-  customerId: string;
-  customerName?: string;
-  isGuest?: boolean;
-  guestCode?: string;
-  productId: string;
-  productName: string;
-  productImageUrl: string;
-  category?: string;
-  price: number;
-  colour?: string;
-  quantity: number;
-  isRescueDeal?: boolean;
-  rescueDealId?: string;
-  isScheduledOffer?: boolean;
-  scheduledOfferId?: string;
-  savedAt: string;
-  updatedAt?: string;
+export function getStoredDeletedCartIds(customerId: string): string[] {
+  if (!customerId) return [];
+  try {
+    const raw = localStorage.getItem(`playnix_cart_deleted_${customerId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    }
+  } catch {}
+  return [];
+}
+
+export function markCartItemDeletedLocally(customerId: string, itemId: string): void {
+  if (!customerId || !itemId) return;
+  try {
+    const current = getStoredDeletedCartIds(customerId);
+    if (!current.includes(itemId)) {
+      localStorage.setItem(
+        `playnix_cart_deleted_${customerId}`,
+        JSON.stringify([...current.slice(-199), itemId])
+      );
+    }
+  } catch {}
+}
+
+export function unmarkCartItemDeletedLocally(customerId: string, itemId: string): void {
+  if (!customerId || !itemId) return;
+  try {
+    const current = getStoredDeletedCartIds(customerId);
+    if (current.includes(itemId)) {
+      localStorage.setItem(
+        `playnix_cart_deleted_${customerId}`,
+        JSON.stringify(current.filter((id) => id !== itemId))
+      );
+    }
+  } catch {}
+}
+
+export function mergePermanentCartItems(
+  customerId: string,
+  localItems: CartItem[],
+  cloudItems: CartItem[]
+): {
+  merged: CartItem[];
+  missingInCloud: CartItem[];
+  staleInCloudIds: string[];
+} {
+  const deletedSet = new Set(getStoredDeletedCartIds(customerId));
+  const byId = new Map<string, CartItem>();
+  const cloudIds = new Set<string>();
+  const staleInCloudIds: string[] = [];
+
+  for (const item of cloudItems) {
+    if (!item || !item.id || !item.productId) continue;
+    if (deletedSet.has(item.id)) {
+      staleInCloudIds.push(item.id);
+      continue;
+    }
+    cloudIds.add(item.id);
+    byId.set(item.id, item);
+  }
+
+  const missingInCloud: CartItem[] = [];
+  for (const localItem of localItems) {
+    if (!localItem || !localItem.id || !localItem.productId) continue;
+    if (deletedSet.has(localItem.id)) continue;
+
+    const existingCloud = byId.get(localItem.id);
+    if (!existingCloud) {
+      byId.set(localItem.id, localItem);
+      missingInCloud.push(localItem);
+    } else {
+      const localTime = new Date(localItem.updatedAt || localItem.addedAt || 0).getTime();
+      const cloudTime = new Date(existingCloud.updatedAt || existingCloud.addedAt || 0).getTime();
+      if (localTime > cloudTime) {
+        byId.set(localItem.id, localItem);
+        missingInCloud.push(localItem);
+      }
+    }
+  }
+
+  const merged = Array.from(byId.values()).sort(
+    (a, b) => new Date(b.addedAt || 0).getTime() - new Date(a.addedAt || 0).getTime()
+  );
+
+  return { merged, missingInCloud, staleInCloudIds };
 }
 
 /**
@@ -857,25 +924,6 @@ export function saveStoredCart(customerId: string, items: CartItem[]): void {
   if (!customerId) return;
   try {
     localStorage.setItem(`playnix_cart_${customerId}`, JSON.stringify(items));
-  } catch {}
-}
-
-export function getStoredSavedItems(customerId: string): SavedForLaterItem[] {
-  if (!customerId) return [];
-  try {
-    const raw = localStorage.getItem(`playnix_saved_${customerId}`);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch {}
-  return [];
-}
-
-export function saveStoredSavedItems(customerId: string, items: SavedForLaterItem[]): void {
-  if (!customerId) return;
-  try {
-    localStorage.setItem(`playnix_saved_${customerId}`, JSON.stringify(items));
   } catch {}
 }
 
