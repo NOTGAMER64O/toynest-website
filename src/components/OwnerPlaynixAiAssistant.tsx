@@ -19,6 +19,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   SkipForward,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ import {
   type AiAssistantState,
   type AiKnowledgeCategory,
   type AiKnowledgeEntry,
+  type AiResponseStyleMode,
   type AiSuggestedReplyResult,
   type AiTrainingAnswer,
   type AiTrainingStepKey,
@@ -34,7 +36,7 @@ import {
   formatInIST,
 } from '../defaultData';
 
-export type PlaynixAiSubView = 'overview' | 'training' | 'knowledge' | 'tester';
+export type PlaynixAiSubView = 'overview' | 'feed' | 'training' | 'knowledge' | 'tester';
 
 interface OwnerPlaynixAiAssistantProps {
   aiState: AiAssistantState;
@@ -64,6 +66,10 @@ interface OwnerPlaynixAiAssistantProps {
     }
   ) => Promise<void>;
   onDeleteKnowledgeEntry: (entryId: string) => Promise<void>;
+  onSaveBehaviorSettings: (settings: {
+    responseStyleMode: AiResponseStyleMode;
+    customInstructions: string;
+  }) => Promise<void>;
   onTestAiQuestion: (
     product: Product,
     questionText: string
@@ -107,10 +113,35 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   onJumpTrainingStep,
   onSaveKnowledgeEntry,
   onDeleteKnowledgeEntry,
+  onSaveBehaviorSettings,
   onTestAiQuestion,
   onOpenProductQuestions,
 }) => {
   const [subView, setSubView] = useState<PlaynixAiSubView>('overview');
+
+  // Feed AI Info & Response Style States
+  const [styleModeDraft, setStyleModeDraft] = useState<AiResponseStyleMode>(
+    aiState.responseStyleMode || 'balanced'
+  );
+  const [customInstructionsDraft, setCustomInstructionsDraft] = useState<string>(
+    aiState.customInstructions || ''
+  );
+  const [savingStyle, setSavingStyle] = useState<boolean>(false);
+  const [styleSuccess, setStyleSuccess] = useState<string>('');
+  const [styleError, setStyleError] = useState<string>('');
+
+  const [quickFeedTitle, setQuickFeedTitle] = useState<string>('');
+  const [quickFeedCategory, setQuickFeedCategory] = useState<AiKnowledgeCategory>('faq');
+  const [quickFeedProductId, setQuickFeedProductId] = useState<string>('');
+  const [quickFeedContent, setQuickFeedContent] = useState<string>('');
+  const [quickFeedSaving, setQuickFeedSaving] = useState<boolean>(false);
+  const [quickFeedSuccess, setQuickFeedSuccess] = useState<string>('');
+  const [quickFeedError, setQuickFeedError] = useState<string>('');
+
+  useEffect(() => {
+    setStyleModeDraft(aiState.responseStyleMode || 'balanced');
+    setCustomInstructionsDraft(aiState.customInstructions || '');
+  }, [aiState.responseStyleMode, aiState.customInstructions]);
 
   // Training interview local draft for current question
   const currentStepIdx = Math.max(
@@ -222,6 +253,71 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
       await onToggleEnabled(!aiState.enabled);
     } finally {
       setTogglingPower(false);
+    }
+  };
+
+  const handleSaveStyleRules = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStyleError('');
+    setStyleSuccess('');
+    setSavingStyle(true);
+    try {
+      await onSaveBehaviorSettings({
+        responseStyleMode: styleModeDraft,
+        customInstructions: customInstructionsDraft,
+      });
+      setStyleSuccess('Saved! Playnix AI will now follow these answer rules & style.');
+    } catch (err: any) {
+      setStyleError(err?.message || 'Could not save AI style rules.');
+    } finally {
+      setSavingStyle(false);
+    }
+  };
+
+  const appendInstructionPreset = (snippet: string) => {
+    setStyleSuccess('');
+    setCustomInstructionsDraft((prev) => {
+      const clean = prev.trim();
+      if (!clean) return snippet;
+      if (clean.toLowerCase().includes(snippet.toLowerCase())) return prev;
+      return `${clean}\n${snippet}`.slice(0, 2000);
+    });
+  };
+
+  const handleQuickFeedSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setQuickFeedError('');
+    setQuickFeedSuccess('');
+    const title = quickFeedTitle.trim();
+    const content = quickFeedContent.trim();
+    if (!title || !content) {
+      setQuickFeedError('Please enter both a short title and the information to feed Playnix AI.');
+      return;
+    }
+    const linkedProd = quickFeedProductId
+      ? products.find((p) => p.id === quickFeedProductId)
+      : undefined;
+
+    setQuickFeedSaving(true);
+    try {
+      await onSaveKnowledgeEntry({
+        id: `owner_feed_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        title,
+        content,
+        category: quickFeedCategory,
+        source: 'owner',
+        productId: linkedProd?.id || undefined,
+        productName: linkedProd?.name || undefined,
+        verified: true,
+      });
+      setQuickFeedTitle('');
+      setQuickFeedProductId('');
+      setQuickFeedContent('');
+      setQuickFeedSuccess('Information fed to Playnix AI and saved to Firebase!');
+    } catch (err: any) {
+      setQuickFeedError(err?.message || 'Could not save information to AI knowledge base.');
+    } finally {
+      setQuickFeedSaving(false);
     }
   };
 
@@ -562,6 +658,15 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
         <button
           type="button"
           role="tab"
+          aria-selected={subView === 'feed'}
+          className={`offers-filter-tab-btn ${subView === 'feed' ? 'active' : ''}`}
+          onClick={() => setSubView('feed')}
+        >
+          <SlidersHorizontal size={14} /> Feed AI Info &amp; Rules
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={subView === 'training'}
           className={`offers-filter-tab-btn ${subView === 'training' ? 'active' : ''}`}
           onClick={() => setSubView('training')}
@@ -639,6 +744,13 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               <button
                 type="button"
                 className="primary-btn"
+                onClick={() => setSubView('feed')}
+              >
+                <SlidersHorizontal size={15} /> Feed AI Info &amp; Answer Style
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
                 onClick={() => setSubView('training')}
               >
                 <MessageSquareText size={15} />
@@ -697,6 +809,253 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               </ul>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          VIEW 1B: FEED AI INFO, ANSWER STYLE & STANDING INSTRUCTIONS
+         ===================================================================== */}
+      {subView === 'feed' && (
+        <div className="playnix-ai-overview-grid">
+          {/* Card 1: Response Length / Style & Standing Rules */}
+          <form className="playnix-ai-card" onSubmit={(e) => void handleSaveStyleRules(e)}>
+            <div className="playnix-ai-card-head">
+              <div>
+                <span className="eyebrow">AI ANSWER STYLE &amp; RULES</span>
+                <h3>Tell Playnix AI How to Reply</h3>
+                <p className="playnix-ai-subtitle">
+                  Choose whether answers should be small &amp; straight or detailed, and feed custom rules Playnix AI will follow on every Product Question draft.
+                </p>
+              </div>
+            </div>
+
+            <div className="product-qa-field">
+              <label>Answer Length &amp; Style</label>
+              <div className="playnix-ai-style-grid" role="radiogroup" aria-label="AI answer length style">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={styleModeDraft === 'short_direct'}
+                  className={`playnix-ai-style-card ${styleModeDraft === 'short_direct' ? 'is-selected' : ''}`}
+                  onClick={() => setStyleModeDraft('short_direct')}
+                >
+                  <strong>Small &amp; Straight</strong>
+                  <small>1–2 short sentences. Direct answer immediately, zero fluff.</small>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={styleModeDraft === 'balanced'}
+                  className={`playnix-ai-style-card ${styleModeDraft === 'balanced' ? 'is-selected' : ''}`}
+                  onClick={() => setStyleModeDraft('balanced')}
+                >
+                  <strong>Balanced &amp; Clear</strong>
+                  <small>2–3 friendly, clear sentences with helpful key facts.</small>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={styleModeDraft === 'detailed'}
+                  className={`playnix-ai-style-card ${styleModeDraft === 'detailed' ? 'is-selected' : ''}`}
+                  onClick={() => setStyleModeDraft('detailed')}
+                >
+                  <strong>Detailed</strong>
+                  <small>Full verified explanation covering relevant policies.</small>
+                </button>
+              </div>
+            </div>
+
+            <div className="playnix-ai-preset-row">
+              <span>Quick add rule:</span>
+              <button
+                type="button"
+                className="playnix-ai-preset-chip"
+                onClick={() => {
+                  setStyleModeDraft('short_direct');
+                  appendInstructionPreset('Give small, straight answers in 1–2 short lines with no filler.');
+                }}
+              >
+                + Small &amp; straight
+              </button>
+              <button
+                type="button"
+                className="playnix-ai-preset-chip"
+                onClick={() =>
+                  appendInstructionPreset('Always state the exact price in ₹ first when asked about cost.')
+                }
+              >
+                + Price in ₹ first
+              </button>
+              <button
+                type="button"
+                className="playnix-ai-preset-chip"
+                onClick={() =>
+                  appendInstructionPreset('Use simple everyday words; avoid long greetings.')
+                }
+              >
+                + Simple words
+              </button>
+            </div>
+
+            <div className="product-qa-field">
+              <label htmlFor="ai-custom-instructions">
+                Custom Instructions to AI <span>(saved in Firebase)</span>
+              </label>
+              <textarea
+                id="ai-custom-instructions"
+                rows={4}
+                maxLength={2000}
+                value={customInstructionsDraft}
+                onChange={(e) => setCustomInstructionsDraft(e.target.value)}
+                placeholder="e.g., Give small and straight answers (1–2 lines max). Never write long intros. Mention Child BCS school pickup rules clearly when relevant."
+              />
+            </div>
+
+            {styleError && (
+              <p className="error-msg" style={{ margin: 0 }}>
+                {styleError}
+              </p>
+            )}
+            {styleSuccess && (
+              <p className="success-msg" style={{ margin: 0 }}>
+                {styleSuccess}
+              </p>
+            )}
+
+            <div className="playnix-ai-card-footer">
+              <button type="submit" className="primary-btn" disabled={savingStyle}>
+                <CheckCircle2 size={15} />
+                {savingStyle ? 'Saving Rules...' : 'Save AI Rules & Style'}
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setSubView('tester')}
+              >
+                <FlaskConical size={14} /> Test Reply Now
+              </button>
+            </div>
+          </form>
+
+          {/* Card 2: Quick Feed Facts & Info to AI */}
+          <form className="playnix-ai-card" onSubmit={(e) => void handleQuickFeedSubmit(e)}>
+            <div className="playnix-ai-card-head">
+              <div>
+                <span className="eyebrow">TEACH PLAYNIX AI</span>
+                <h3>Feed New Information Directly</h3>
+                <p className="playnix-ai-subtitle">
+                  Type any shop policy, toy material, size, offer rule, or quick note you want Playnix AI to remember.
+                </p>
+              </div>
+            </div>
+
+            <div className="product-qa-field">
+              <label htmlFor="ai-feed-title">Topic / Short Title *</label>
+              <input
+                id="ai-feed-title"
+                type="text"
+                maxLength={240}
+                value={quickFeedTitle}
+                onChange={(e) => setQuickFeedTitle(e.target.value)}
+                placeholder="e.g., Kit Card Material & Assembly"
+                required
+              />
+            </div>
+
+            <div className="playnix-ai-form-grid">
+              <div className="product-qa-field">
+                <label htmlFor="ai-feed-category">Category</label>
+                <select
+                  id="ai-feed-category"
+                  value={quickFeedCategory}
+                  onChange={(e) => setQuickFeedCategory(e.target.value as AiKnowledgeCategory)}
+                  className="playnix-ai-select full"
+                >
+                  {KNOWLEDGE_CATEGORIES.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="product-qa-field">
+                <label htmlFor="ai-feed-product">Product (Optional)</label>
+                <select
+                  id="ai-feed-product"
+                  value={quickFeedProductId}
+                  onChange={(e) => setQuickFeedProductId(e.target.value)}
+                  className="playnix-ai-select full"
+                >
+                  <option value="">All Products / General Shop</option>
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="product-qa-field">
+              <label htmlFor="ai-feed-content">Information / Facts to Feed AI *</label>
+              <textarea
+                id="ai-feed-content"
+                rows={4}
+                maxLength={5000}
+                value={quickFeedContent}
+                onChange={(e) => setQuickFeedContent(e.target.value)}
+                placeholder="e.g., All car kit cards are 3D-printed in durable PLA plastic and snap together without glue in 2–3 minutes."
+                required
+              />
+            </div>
+
+            {quickFeedError && (
+              <p className="error-msg" style={{ margin: 0 }}>
+                {quickFeedError}
+              </p>
+            )}
+            {quickFeedSuccess && (
+              <p className="success-msg" style={{ margin: 0 }}>
+                {quickFeedSuccess}
+              </p>
+            )}
+
+            <div className="playnix-ai-card-footer">
+              <button type="submit" className="primary-btn" disabled={quickFeedSaving}>
+                <Plus size={15} />
+                {quickFeedSaving ? 'Feeding AI...' : 'Feed Info to AI'}
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setSubView('knowledge')}
+              >
+                View All ({ownerKnowledgeCount} Owner Entries)
+              </button>
+            </div>
+
+            {knowledgeEntries.filter((e) => e.source === 'owner').length > 0 && (
+              <div className="playnix-ai-recent-fed">
+                <span className="eyebrow" style={{ marginBottom: 0 }}>
+                  RECENTLY FED INFORMATION
+                </span>
+                {knowledgeEntries
+                  .filter((e) => e.source === 'owner')
+                  .slice(0, 3)
+                  .map((item) => (
+                    <div key={item.id} className="playnix-ai-recent-fed-item">
+                      <div>
+                        <strong>
+                          {item.title}
+                          {item.productName ? ` · ${item.productName}` : ''}
+                        </strong>
+                        <p>{item.content.slice(0, 140)}{item.content.length > 140 ? '...' : ''}</p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </form>
         </div>
       )}
 

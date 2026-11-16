@@ -241,6 +241,7 @@ import {
   type ProductQuestion,
   type ProductQuestionStatus,
   type AiAssistantState,
+  type AiResponseStyleMode,
   type AiKnowledgeEntry,
   type AiTrainingAnswer,
   type AiTrainingStepKey,
@@ -1556,6 +1557,25 @@ export default function App() {
     await saveAiAssistantStateToCloud(nextState);
   };
 
+  const handleSaveAiBehaviorSettings = async (settings: {
+    responseStyleMode: AiResponseStyleMode;
+    customInstructions: string;
+  }) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const nowIso = new Date().toISOString();
+    const nextState: AiAssistantState = {
+      ...aiState,
+      responseStyleMode: settings.responseStyleMode,
+      customInstructions: settings.customInstructions.trim().slice(0, 2000),
+      updatedAt: nowIso,
+    };
+    setAiState(nextState);
+    saveStoredAiState(nextState);
+    await saveAiAssistantStateToCloud(nextState);
+  };
+
   const handleSaveAiKnowledgeEntry = async (
     entryInput: Omit<AiKnowledgeEntry, 'createdAt' | 'updatedAt'> & {
       createdAt?: string;
@@ -1740,6 +1760,8 @@ export default function App() {
         question: questionText,
         knowledgeEntries: aiKnowledge,
         trainingAnswers: aiTrainingAnswers,
+        responseStyleMode: aiState.responseStyleMode || 'balanced',
+        customInstructions: aiState.customInstructions || '',
       });
 
       if (typeof res.data?.geminiConfigured === 'boolean') {
@@ -8468,6 +8490,7 @@ export default function App() {
                 onJumpTrainingStep={handleJumpTrainingStep}
                 onSaveKnowledgeEntry={handleSaveAiKnowledgeEntry}
                 onDeleteKnowledgeEntry={handleDeleteAiKnowledgeEntry}
+                onSaveBehaviorSettings={handleSaveAiBehaviorSettings}
                 onTestAiQuestion={handleTestAiQuestion}
                 onOpenProductQuestions={() => {
                   setOwnerTab('questions');

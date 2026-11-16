@@ -2582,6 +2582,13 @@ function normalizeAiAssistantState(data: any): AiAssistantState {
         : 0,
     trainingCompletedAt: data?.trainingCompletedAt ? String(data.trainingCompletedAt) : undefined,
     geminiConfigured: typeof data?.geminiConfigured === 'boolean' ? data.geminiConfigured : undefined,
+    responseStyleMode:
+      data?.responseStyleMode === 'short_direct' ||
+      data?.responseStyleMode === 'detailed' ||
+      data?.responseStyleMode === 'balanced'
+        ? data.responseStyleMode
+        : 'balanced',
+    customInstructions: data?.customInstructions ? String(data.customInstructions).slice(0, 2000) : '',
     updatedAt: String(data?.updatedAt || new Date().toISOString()),
   };
 }
@@ -2701,6 +2708,16 @@ export async function saveAiAssistantStateToCloud(state: AiAssistantState): Prom
         : undefined,
       geminiConfigured:
         typeof state.geminiConfigured === 'boolean' ? state.geminiConfigured : undefined,
+      responseStyleMode:
+        state.responseStyleMode === 'short_direct' ||
+        state.responseStyleMode === 'detailed' ||
+        state.responseStyleMode === 'balanced'
+          ? state.responseStyleMode
+          : undefined,
+      customInstructions:
+        typeof state.customInstructions === 'string'
+          ? state.customInstructions.trim().slice(0, 2000)
+          : undefined,
       updatedAt: (state.updatedAt || new Date().toISOString()).slice(0, 64),
     });
     await setDoc(doc(db, 'aiAssistantState', 'config'), payload, { merge: true });

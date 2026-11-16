@@ -264,6 +264,8 @@
         "trainingCurrentStepIndex": { "type": "number" },
         "trainingCompletedAt": { "type": "string", "maxLength": 64 },
         "geminiConfigured": { "type": "boolean" },
+        "responseStyleMode": { "type": "string", "enum": ["short_direct", "balanced", "detailed"] },
+        "customInstructions": { "type": "string", "maxLength": 2000 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "enabled", "hasCompletedInitialScan", "trainingStatus", "trainingCurrentStepIndex", "updatedAt"]

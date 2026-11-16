@@ -1113,6 +1113,8 @@ export interface AiTrainingAnswer {
   updatedAt: string;
 }
 
+export type AiResponseStyleMode = 'short_direct' | 'balanced' | 'detailed';
+
 export interface AiAssistantState {
   id: 'config';
   enabled: boolean;
@@ -1125,6 +1127,8 @@ export interface AiAssistantState {
   trainingCurrentStepIndex: number;
   trainingCompletedAt?: string;
   geminiConfigured?: boolean;
+  responseStyleMode?: AiResponseStyleMode;
+  customInstructions?: string;
   updatedAt: string;
 }
 

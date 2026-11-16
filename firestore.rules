@@ -264,6 +264,8 @@ service cloud.firestore {
           'trainingCurrentStepIndex',
           'trainingCompletedAt',
           'geminiConfigured',
+          'responseStyleMode',
+          'customInstructions',
           'updatedAt'
         ])
         && data.id == 'config'
@@ -279,6 +281,8 @@ service cloud.firestore {
         && data.trainingCurrentStepIndex <= 20
         && (!('trainingCompletedAt' in data) || (data.trainingCompletedAt is string && data.trainingCompletedAt.size() <= 64))
         && (!('geminiConfigured' in data) || data.geminiConfigured is bool)
+        && (!('responseStyleMode' in data) || data.responseStyleMode in ['short_direct', 'balanced', 'detailed'])
+        && (!('customInstructions' in data) || (data.customInstructions is string && data.customInstructions.size() <= 2000))
         && data.updatedAt is string
         && data.updatedAt.size() <= 64;
     }
