@@ -247,6 +247,60 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "productId", "productName", "customerId", "question", "status", "createdAt"]
+    },
+    "AiAssistantState": {
+      "title": "Playnix AI Assistant State",
+      "description": "Configuration, activation status, website scan summary, and training progress for Playnix AI Assistant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "enabled": { "type": "boolean" },
+        "hasCompletedInitialScan": { "type": "boolean" },
+        "lastScannedAt": { "type": "string", "maxLength": 64 },
+        "scanSummary": { "type": "string", "maxLength": 4000 },
+        "learnedHighlights": { "type": "array" },
+        "missingInfoItems": { "type": "array" },
+        "trainingStatus": { "type": "string", "enum": ["not_started", "in_progress", "completed"] },
+        "trainingCurrentStepIndex": { "type": "number" },
+        "trainingCompletedAt": { "type": "string", "maxLength": 64 },
+        "geminiConfigured": { "type": "boolean" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "enabled", "hasCompletedInitialScan", "trainingStatus", "trainingCurrentStepIndex", "updatedAt"]
+    },
+    "AiKnowledgeEntry": {
+      "title": "Playnix AI Knowledge Entry",
+      "description": "Verified website-derived or owner-provided knowledge base entry for Playnix AI Assistant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 240 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "category": { "type": "string", "enum": ["catalog", "product_spec", "delivery", "returns", "payment", "availability", "orders", "support", "faq", "policy", "tone"] },
+        "source": { "type": "string", "enum": ["website", "owner"] },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "trainingStepKey": { "type": "string", "maxLength": 64 },
+        "verified": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "title", "content", "category", "source", "verified", "createdAt", "updatedAt"]
+    },
+    "AiTrainingAnswer": {
+      "title": "Playnix AI Training Answer",
+      "description": "Owner training interview response saved step-by-step for Playnix AI Assistant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "stepKey": { "type": "string", "enum": ["delivery", "returns", "payment", "materials_specs", "availability", "order_processing", "customer_support", "faq", "unknown_fallback", "communication_style"] },
+        "question": { "type": "string", "maxLength": 500 },
+        "answer": { "type": "string", "maxLength": 4000 },
+        "status": { "type": "string", "enum": ["pending", "answered", "skipped"] },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "stepKey", "question", "answer", "status", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -297,6 +351,18 @@
     "/productQuestions/{questionId}": {
       "schema": { "$ref": "#/entities/ProductQuestion" },
       "description": "Product-linked customer questions and owner answers"
+    },
+    "/aiAssistantState/{stateId}": {
+      "schema": { "$ref": "#/entities/AiAssistantState" },
+      "description": "Playnix AI Assistant status, scan metadata, and training progress"
+    },
+    "/aiKnowledge/{entryId}": {
+      "schema": { "$ref": "#/entities/AiKnowledgeEntry" },
+      "description": "Playnix AI verified website-derived and owner-provided knowledge base entries"
+    },
+    "/aiTrainingAnswers/{stepId}": {
+      "schema": { "$ref": "#/entities/AiTrainingAnswer" },
+      "description": "Owner answers from the interactive Playnix AI training interview"
     }
   }
 }

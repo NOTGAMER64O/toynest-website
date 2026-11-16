@@ -41,8 +41,13 @@ import {
   type AnalyticsCustomer,
   type ProductQuestion,
   type ProductQuestionStatus,
+  type AiAssistantState,
+  type AiKnowledgeEntry,
+  type AiTrainingAnswer,
+  type AiTrainingStepKey,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
+  DEFAULT_AI_ASSISTANT_STATE,
   getStoredDeletedRescueDealIds,
   markRescueDealDeletedLocally,
   computeOfferStatus,
@@ -2550,5 +2555,393 @@ export async function deleteProductQuestionFromCloud(questionId: string): Promis
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
+
+// ----------------- PLAYNIX AI ASSISTANT (OWNER-ONLY DATA) -----------------
+
+function normalizeAiAssistantState(data: any): AiAssistantState {
+  const trainingStatus =
+    data?.trainingStatus === 'completed' || data?.trainingStatus === 'in_progress'
+      ? data.trainingStatus
+      : 'not_started';
+  return {
+    id: 'config',
+    enabled: data?.enabled !== false,
+    hasCompletedInitialScan: Boolean(data?.hasCompletedInitialScan),
+    lastScannedAt: data?.lastScannedAt ? String(data.lastScannedAt) : undefined,
+    scanSummary: data?.scanSummary ? String(data.scanSummary) : undefined,
+    learnedHighlights: Array.isArray(data?.learnedHighlights)
+      ? data.learnedHighlights.map(String).slice(0, 40)
+      : [],
+    missingInfoItems: Array.isArray(data?.missingInfoItems)
+      ? data.missingInfoItems.map(String).slice(0, 60)
+      : [],
+    trainingStatus,
+    trainingCurrentStepIndex:
+      typeof data?.trainingCurrentStepIndex === 'number' && isFinite(data.trainingCurrentStepIndex)
+        ? Math.max(0, Math.min(20, Math.round(data.trainingCurrentStepIndex)))
+        : 0,
+    trainingCompletedAt: data?.trainingCompletedAt ? String(data.trainingCompletedAt) : undefined,
+    geminiConfigured: typeof data?.geminiConfigured === 'boolean' ? data.geminiConfigured : undefined,
+    updatedAt: String(data?.updatedAt || new Date().toISOString()),
+  };
+}
+
+function normalizeAiKnowledgeEntry(data: any, docId: string): AiKnowledgeEntry {
+  const validCategories = new Set([
+    'catalog',
+    'product_spec',
+    'delivery',
+    'returns',
+    'payment',
+    'availability',
+    'orders',
+    'support',
+    'faq',
+    'policy',
+    'tone',
+  ]);
+  const cat = validCategories.has(data?.category) ? data.category : 'faq';
+  return {
+    id: String(data?.id || docId).slice(0, 128),
+    title: String(data?.title || 'Shop Knowledge').trim().slice(0, 240),
+    content: String(data?.content || '').trim().slice(0, 5000),
+    category: cat,
+    source: data?.source === 'website' ? 'website' : 'owner',
+    productId: data?.productId ? String(data.productId).slice(0, 128) : undefined,
+    productName: data?.productName ? String(data.productName).slice(0, 200) : undefined,
+    trainingStepKey: data?.trainingStepKey ? String(data.trainingStepKey).slice(0, 64) : undefined,
+    verified: data?.verified !== false,
+    createdAt: String(data?.createdAt || new Date().toISOString()).slice(0, 64),
+    updatedAt: String(data?.updatedAt || new Date().toISOString()).slice(0, 64),
+  };
+}
+
+function normalizeAiTrainingAnswer(data: any, docId: string): AiTrainingAnswer {
+  const stepKey = String(data?.stepKey || docId) as AiTrainingStepKey;
+  const status =
+    data?.status === 'answered' || data?.status === 'skipped' ? data.status : 'pending';
+  return {
+    id: stepKey,
+    stepKey,
+    question: String(data?.question || '').trim().slice(0, 500),
+    answer: String(data?.answer || '').trim().slice(0, 4000),
+    status,
+    createdAt: String(data?.createdAt || new Date().toISOString()).slice(0, 64),
+    updatedAt: String(data?.updatedAt || new Date().toISOString()).slice(0, 64),
+  };
+}
+
+export async function fetchAiAssistantStateFromCloud(): Promise<AiAssistantState> {
+  const path = 'aiAssistantState/config';
+  try {
+    let snap;
+    try {
+      snap = await getDocFromServer(doc(db, 'aiAssistantState', 'config'));
+    } catch {
+      snap = await getDoc(doc(db, 'aiAssistantState', 'config'));
+    }
+    if (snap.exists()) {
+      return normalizeAiAssistantState(snap.data());
+    }
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      const restData = await fetchFirestoreDocViaRest('aiAssistantState', 'config');
+      if (restData) return normalizeAiAssistantState(restData);
+      return { ...DEFAULT_AI_ASSISTANT_STATE };
+    }
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+  return { ...DEFAULT_AI_ASSISTANT_STATE };
+}
+
+export function subscribeToAiAssistantState(
+  callback: (state: AiAssistantState) => void
+): () => void {
+  try {
+    return onSnapshot(
+      doc(db, 'aiAssistantState', 'config'),
+      (snap) => {
+        if (snap.exists()) {
+          callback(normalizeAiAssistantState(snap.data()));
+        }
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('AI Assistant state subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveAiAssistantStateToCloud(state: AiAssistantState): Promise<void> {
+  const path = 'aiAssistantState/config';
+  try {
+    const payload = sanitizeForFirestore({
+      id: 'config',
+      enabled: Boolean(state.enabled),
+      hasCompletedInitialScan: Boolean(state.hasCompletedInitialScan),
+      lastScannedAt: state.lastScannedAt ? String(state.lastScannedAt).slice(0, 64) : undefined,
+      scanSummary: state.scanSummary ? String(state.scanSummary).slice(0, 4000) : undefined,
+      learnedHighlights: Array.isArray(state.learnedHighlights)
+        ? state.learnedHighlights.map((s) => String(s).slice(0, 300)).slice(0, 40)
+        : undefined,
+      missingInfoItems: Array.isArray(state.missingInfoItems)
+        ? state.missingInfoItems.map((s) => String(s).slice(0, 300)).slice(0, 60)
+        : undefined,
+      trainingStatus: state.trainingStatus || 'not_started',
+      trainingCurrentStepIndex: Math.max(
+        0,
+        Math.min(20, Math.round(state.trainingCurrentStepIndex || 0))
+      ),
+      trainingCompletedAt: state.trainingCompletedAt
+        ? String(state.trainingCompletedAt).slice(0, 64)
+        : undefined,
+      geminiConfigured:
+        typeof state.geminiConfigured === 'boolean' ? state.geminiConfigured : undefined,
+      updatedAt: (state.updatedAt || new Date().toISOString()).slice(0, 64),
+    });
+    await setDoc(doc(db, 'aiAssistantState', 'config'), payload, { merge: true });
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI state save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function fetchAiKnowledgeFromCloud(): Promise<AiKnowledgeEntry[]> {
+  const path = 'aiKnowledge';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'aiKnowledge'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'aiKnowledge'));
+    }
+    const list: AiKnowledgeEntry[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.title && data.content) {
+        list.push(normalizeAiKnowledgeEntry(data, d.id));
+      }
+    });
+    return list.sort(
+      (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+    );
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI knowledge fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAiKnowledge(
+  callback: (entries: AiKnowledgeEntry[]) => void
+): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'aiKnowledge'),
+      (snapshot) => {
+        const list: AiKnowledgeEntry[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.title && data.content) {
+            list.push(normalizeAiKnowledgeEntry(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('AI knowledge subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveAiKnowledgeEntryToCloud(entry: AiKnowledgeEntry): Promise<void> {
+  const safeId = String(entry.id || `know_${Date.now().toString(36)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 128);
+  const path = `aiKnowledge/${safeId}`;
+  try {
+    const nowIso = new Date().toISOString();
+    const payload = sanitizeForFirestore({
+      id: safeId,
+      title: String(entry.title || '').trim().slice(0, 240),
+      content: String(entry.content || '').trim().slice(0, 5000),
+      category: entry.category || 'faq',
+      source: entry.source === 'website' ? 'website' : 'owner',
+      productId: entry.productId ? String(entry.productId).slice(0, 128) : undefined,
+      productName: entry.productName ? String(entry.productName).trim().slice(0, 200) : undefined,
+      trainingStepKey: entry.trainingStepKey
+        ? String(entry.trainingStepKey).slice(0, 64)
+        : undefined,
+      verified: entry.verified !== false,
+      createdAt: (entry.createdAt || nowIso).slice(0, 64),
+      updatedAt: (entry.updatedAt || nowIso).slice(0, 64),
+    });
+    await setDoc(doc(db, 'aiKnowledge', safeId), payload);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI knowledge save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteAiKnowledgeEntryFromCloud(entryId: string): Promise<void> {
+  const path = `aiKnowledge/${entryId}`;
+  try {
+    await deleteDoc(doc(db, 'aiKnowledge', entryId));
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI knowledge delete deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * Replaces website-derived knowledge docs cleanly while leaving all owner-provided entries untouched.
+ */
+export async function replaceWebsiteScanKnowledgeInCloud(
+  websiteEntries: AiKnowledgeEntry[]
+): Promise<void> {
+  const path = 'aiKnowledge (website scan batch)';
+  try {
+    const existingSnap = await getDocs(collection(db, 'aiKnowledge'));
+    const nextIds = new Set(websiteEntries.map((e) => e.id));
+    const batch = writeBatch(db);
+
+    existingSnap.forEach((d) => {
+      const data = d.data();
+      if (data?.source === 'website' && !nextIds.has(d.id)) {
+        batch.delete(d.ref);
+      }
+    });
+
+    const nowIso = new Date().toISOString();
+    for (const entry of websiteEntries) {
+      const safeId = String(entry.id)
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 128);
+      const payload = sanitizeForFirestore({
+        id: safeId,
+        title: String(entry.title || '').trim().slice(0, 240),
+        content: String(entry.content || '').trim().slice(0, 5000),
+        category: entry.category || 'catalog',
+        source: 'website',
+        productId: entry.productId ? String(entry.productId).slice(0, 128) : undefined,
+        productName: entry.productName ? String(entry.productName).trim().slice(0, 200) : undefined,
+        verified: true,
+        createdAt: (entry.createdAt || nowIso).slice(0, 64),
+        updatedAt: (entry.updatedAt || nowIso).slice(0, 64),
+      });
+      batch.set(doc(db, 'aiKnowledge', safeId), payload);
+    }
+
+    await batch.commit();
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Website scan knowledge batch sync deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function fetchAiTrainingAnswersFromCloud(): Promise<AiTrainingAnswer[]> {
+  const path = 'aiTrainingAnswers';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'aiTrainingAnswers'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'aiTrainingAnswers'));
+    }
+    const list: AiTrainingAnswer[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.stepKey) {
+        list.push(normalizeAiTrainingAnswer(data, d.id));
+      }
+    });
+    return list;
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI training answers fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAiTrainingAnswers(
+  callback: (answers: AiTrainingAnswer[]) => void
+): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'aiTrainingAnswers'),
+      (snapshot) => {
+        const list: AiTrainingAnswer[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.stepKey) {
+            list.push(normalizeAiTrainingAnswer(data, d.id));
+          }
+        });
+        callback(list);
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('AI training answers subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveAiTrainingAnswerToCloud(answerObj: AiTrainingAnswer): Promise<void> {
+  const path = `aiTrainingAnswers/${answerObj.stepKey}`;
+  try {
+    const nowIso = new Date().toISOString();
+    const payload = sanitizeForFirestore({
+      id: answerObj.stepKey,
+      stepKey: answerObj.stepKey,
+      question: String(answerObj.question || '').trim().slice(0, 500),
+      answer: String(answerObj.answer || '').trim().slice(0, 4000),
+      status: answerObj.status || 'pending',
+      createdAt: (answerObj.createdAt || nowIso).slice(0, 64),
+      updatedAt: (answerObj.updatedAt || nowIso).slice(0, 64),
+    });
+    await setDoc(doc(db, 'aiTrainingAnswers', answerObj.stepKey), payload);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI training answer save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
 
 

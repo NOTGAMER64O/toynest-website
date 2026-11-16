@@ -37,6 +37,7 @@ import {
   Maximize2,
   BarChart3,
   HelpCircle,
+  Bot,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -239,7 +240,14 @@ import {
   type AnalyticsCustomer,
   type ProductQuestion,
   type ProductQuestionStatus,
+  type AiAssistantState,
+  type AiKnowledgeEntry,
+  type AiTrainingAnswer,
+  type AiTrainingStepKey,
+  type AiSuggestedReplyResult,
   DEFAULT_RESCUE_DEALS,
+  DEFAULT_AI_ASSISTANT_STATE,
+  PLAYNIX_TRAINING_QUESTIONS,
   FESTIVAL_BANNER_PRESETS,
   getStoredDeletedRescueDealIds,
   getStoredMoneyAdjustment,
@@ -255,6 +263,12 @@ import {
   saveStoredPopularSearches,
   getStoredProductQuestions,
   saveStoredProductQuestions,
+  getStoredAiState,
+  saveStoredAiState,
+  getStoredAiKnowledge,
+  saveStoredAiKnowledge,
+  getStoredAiTrainingAnswers,
+  saveStoredAiTrainingAnswers,
   computeOfferStatus,
   computeCampaignStatus,
   calculateProductDiscount,
@@ -338,6 +352,17 @@ import {
   answerProductQuestionInCloud,
   updateProductQuestionStatusInCloud,
   deleteProductQuestionFromCloud,
+  fetchAiAssistantStateFromCloud,
+  subscribeToAiAssistantState,
+  saveAiAssistantStateToCloud,
+  fetchAiKnowledgeFromCloud,
+  subscribeToAiKnowledge,
+  saveAiKnowledgeEntryToCloud,
+  deleteAiKnowledgeEntryFromCloud,
+  replaceWebsiteScanKnowledgeInCloud,
+  fetchAiTrainingAnswersFromCloud,
+  subscribeToAiTrainingAnswers,
+  saveAiTrainingAnswerToCloud,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
@@ -348,6 +373,7 @@ import { HeroToyShowcase } from './components/HeroToyShowcase';
 import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown';
 import { ProductQuestionsSection } from './components/ProductQuestionsSection';
 import { OwnerProductQuestionsManager } from './components/OwnerProductQuestionsManager';
+import { OwnerPlaynixAiAssistant } from './components/OwnerPlaynixAiAssistant';
 import {
   OrderSuccessCelebration,
   type OrderCelebrationData,
@@ -883,7 +909,7 @@ export default function App() {
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'aiAssistant' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
   const [ownerProductQuestions, setOwnerProductQuestions] = useState<ProductQuestion[]>(() =>
     getStoredProductQuestions()
@@ -893,6 +919,22 @@ export default function App() {
     () => ownerProductQuestions.filter((q) => q.status === 'Pending').length,
     [ownerProductQuestions]
   );
+  const [aiState, setAiState] = useState<AiAssistantState>(() => getStoredAiState());
+  const [aiKnowledge, setAiKnowledge] = useState<AiKnowledgeEntry[]>(() => getStoredAiKnowledge());
+  const [aiTrainingAnswers, setAiTrainingAnswers] = useState<AiTrainingAnswer[]>(() =>
+    getStoredAiTrainingAnswers()
+  );
+  const [aiScanning, setAiScanning] = useState<boolean>(false);
+  const [aiScanFeedback, setAiScanFeedback] = useState<{
+    message: string;
+    isError?: boolean;
+  } | null>(null);
+  const [aiGeminiStatus, setAiGeminiStatus] = useState<{
+    checked: boolean;
+    geminiConfigured: boolean;
+    model?: string;
+  }>({ checked: false, geminiConfigured: false });
+  const aiInitialScanTriggeredRef = useRef<boolean>(false);
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
   const [analyticsCustomers, setAnalyticsCustomers] = useState<AnalyticsCustomer[]>([]);
   const [allCartItems, setAllCartItems] = useState<CartItem[]>([]);
@@ -1330,6 +1372,410 @@ export default function App() {
       saveStoredProductQuestions(next);
       return next;
     });
+  };
+
+  // ----------------- PLAYNIX AI ASSISTANT HANDLERS (OWNER ONLY) -----------------
+  const checkAiServerStatus = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    try {
+      const res = await ownerPost('/api/owner/ai/status', {});
+      setAiGeminiStatus({
+        checked: true,
+        geminiConfigured: Boolean(res.data?.geminiConfigured),
+        model: res.data?.model,
+      });
+    } catch {
+      setAiGeminiStatus((prev) => ({ ...prev, checked: true }));
+    }
+  };
+
+  const loadOwnerAiData = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    try {
+      const [cloudState, cloudKnowledge, cloudTraining] = await Promise.all([
+        fetchAiAssistantStateFromCloud(),
+        fetchAiKnowledgeFromCloud(),
+        fetchAiTrainingAnswersFromCloud(),
+      ]);
+      setAiState(cloudState);
+      saveStoredAiState(cloudState);
+      setAiKnowledge(cloudKnowledge);
+      saveStoredAiKnowledge(cloudKnowledge);
+      setAiTrainingAnswers(cloudTraining);
+      saveStoredAiTrainingAnswers(cloudTraining);
+    } catch (err) {
+      console.warn('Could not load Playnix AI data from Firebase:', err);
+    }
+    await checkAiServerStatus();
+  };
+
+  const triggerWebsiteAiScan = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    setAiScanning(true);
+    setAiScanFeedback(null);
+    try {
+      const answeredQuestions = ownerProductQuestions
+        .filter((q) => q.status === 'Answered' && q.answer?.trim())
+        .map((q) => ({
+          id: q.id,
+          productId: q.productId,
+          productName: q.productName,
+          question: q.question,
+          answer: q.answer,
+          status: q.status,
+        }));
+
+      const lightweightProducts = products.map((p) => ({
+        id: p.id,
+        name: p.name,
+        price: p.price,
+        category: p.category,
+        description: p.description,
+        available: p.available,
+        imageCount: Array.isArray(p.imageUrls)
+          ? p.imageUrls.length
+          : p.imageUrl
+          ? 1
+          : 0,
+      }));
+      const lightweightDeals = rescueDeals.map((d) => ({
+        id: d.id,
+        title: d.title,
+        dealPrice: d.dealPrice,
+        originalPrice: d.originalPrice,
+        condition: d.condition,
+        deleted: d.deleted,
+        claimed: d.claimed,
+        status: d.status,
+      }));
+      const lightweightOffers = scheduledOffers.map((o) => ({
+        id: o.id,
+        title: o.title,
+        productName: o.productName,
+        discountedPrice: o.discountedPrice,
+        originalPrice: o.originalPrice,
+        startAt: o.startAt,
+        endAt: o.endAt,
+        deleted: o.deleted,
+        cancelled: o.cancelled,
+        isDraft: o.isDraft,
+        claimed: o.claimed,
+      }));
+
+      const res = await ownerPost('/api/owner/ai/scan', {
+        products: lightweightProducts,
+        rescueDeals: lightweightDeals,
+        scheduledOffers: lightweightOffers,
+        discountCampaigns,
+        shopModes: { adultPublished, childPublished },
+        availableColours,
+        answeredQuestions,
+        existingTrainingAnswers: aiTrainingAnswers,
+      });
+
+      const data = res.data || {};
+      const websiteEntries: AiKnowledgeEntry[] = Array.isArray(data.websiteEntries)
+        ? data.websiteEntries
+        : [];
+      const nowIso = data.scannedAt || new Date().toISOString();
+
+      await replaceWebsiteScanKnowledgeInCloud(websiteEntries);
+
+      setAiKnowledge((prev) => {
+        const ownerOnly = prev.filter((e) => e.source === 'owner');
+        const next = [...ownerOnly, ...websiteEntries].sort(
+          (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+        );
+        saveStoredAiKnowledge(next);
+        return next;
+      });
+
+      const nextState: AiAssistantState = {
+        ...aiState,
+        id: 'config',
+        hasCompletedInitialScan: true,
+        lastScannedAt: nowIso,
+        scanSummary: data.scanSummary || aiState.scanSummary,
+        learnedHighlights: Array.isArray(data.learnedHighlights)
+          ? data.learnedHighlights
+          : aiState.learnedHighlights,
+        missingInfoItems: Array.isArray(data.missingInfoItems)
+          ? data.missingInfoItems
+          : aiState.missingInfoItems,
+        geminiConfigured: Boolean(data.geminiConfigured),
+        updatedAt: nowIso,
+      };
+      setAiState(nextState);
+      saveStoredAiState(nextState);
+      await saveAiAssistantStateToCloud(nextState);
+      setAiGeminiStatus((prev) => ({
+        ...prev,
+        checked: true,
+        geminiConfigured: Boolean(data.geminiConfigured),
+      }));
+
+      setAiScanFeedback({
+        message: data.usedGemini
+          ? `Website scanned with Gemini AI — ${websiteEntries.length} verified knowledge entries updated.`
+          : `Website scanned factually — ${websiteEntries.length} verified entries saved. ${data.geminiStatusNote || ''}`.trim(),
+        isError: false,
+      });
+    } catch (err: any) {
+      setAiScanFeedback({
+        message:
+          err?.response?.data?.error ||
+          err?.message ||
+          'Could not complete website scan. Please check connection and retry.',
+        isError: true,
+      });
+    } finally {
+      setAiScanning(false);
+    }
+  };
+
+  const handleToggleAiEnabled = async (nextEnabled: boolean) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const nowIso = new Date().toISOString();
+    const nextState: AiAssistantState = {
+      ...aiState,
+      enabled: nextEnabled,
+      updatedAt: nowIso,
+    };
+    setAiState(nextState);
+    saveStoredAiState(nextState);
+    await saveAiAssistantStateToCloud(nextState);
+  };
+
+  const handleSaveAiKnowledgeEntry = async (
+    entryInput: Omit<AiKnowledgeEntry, 'createdAt' | 'updatedAt'> & {
+      createdAt?: string;
+      updatedAt?: string;
+    }
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const nowIso = new Date().toISOString();
+    const fullEntry: AiKnowledgeEntry = {
+      ...entryInput,
+      createdAt: entryInput.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+    await saveAiKnowledgeEntryToCloud(fullEntry);
+    setAiKnowledge((prev) => {
+      const filtered = prev.filter((e) => e.id !== fullEntry.id);
+      const next = [fullEntry, ...filtered].sort(
+        (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+      );
+      saveStoredAiKnowledge(next);
+      return next;
+    });
+  };
+
+  const handleDeleteAiKnowledgeEntry = async (entryId: string) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    await deleteAiKnowledgeEntryFromCloud(entryId);
+    setAiKnowledge((prev) => {
+      const next = prev.filter((e) => e.id !== entryId);
+      saveStoredAiKnowledge(next);
+      return next;
+    });
+  };
+
+  const handleSaveTrainingAnswer = async (
+    stepKey: AiTrainingStepKey,
+    answer: string,
+    status: 'answered' | 'skipped',
+    nextStepIndex: number,
+    finishTraining = false
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const def = PLAYNIX_TRAINING_QUESTIONS.find((q) => q.stepKey === stepKey);
+    if (!def) return;
+
+    const nowIso = new Date().toISOString();
+    const existingAns = aiTrainingAnswers.find((a) => a.stepKey === stepKey);
+    const answerObj: AiTrainingAnswer = {
+      id: stepKey,
+      stepKey,
+      question: def.question,
+      answer: answer.trim(),
+      status,
+      createdAt: existingAns?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    await saveAiTrainingAnswerToCloud(answerObj);
+    const updatedAnswers = [
+      ...aiTrainingAnswers.filter((a) => a.stepKey !== stepKey),
+      answerObj,
+    ];
+    setAiTrainingAnswers(updatedAnswers);
+    saveStoredAiTrainingAnswers(updatedAnswers);
+
+    const knowId = `owner_train_${stepKey}`;
+    if (status === 'answered' && answer.trim()) {
+      await handleSaveAiKnowledgeEntry({
+        id: knowId,
+        title: def.title,
+        content: answer.trim(),
+        category: def.category,
+        source: 'owner',
+        trainingStepKey: stepKey,
+        verified: true,
+      });
+    } else if (status === 'skipped' && !answer.trim()) {
+      const existingKnow = aiKnowledge.find((k) => k.id === knowId);
+      if (existingKnow) {
+        await handleDeleteAiKnowledgeEntry(knowId);
+      }
+    }
+
+    const nextState: AiAssistantState = {
+      ...aiState,
+      trainingStatus: finishTraining ? 'completed' : 'in_progress',
+      trainingCurrentStepIndex: Math.max(
+        0,
+        Math.min(PLAYNIX_TRAINING_QUESTIONS.length - 1, nextStepIndex)
+      ),
+      trainingCompletedAt: finishTraining ? nowIso : aiState.trainingCompletedAt,
+      updatedAt: nowIso,
+    };
+    setAiState(nextState);
+    saveStoredAiState(nextState);
+    await saveAiAssistantStateToCloud(nextState);
+  };
+
+  const handleFinishTraining = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const nowIso = new Date().toISOString();
+    const nextState: AiAssistantState = {
+      ...aiState,
+      trainingStatus: 'completed',
+      trainingCompletedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setAiState(nextState);
+    saveStoredAiState(nextState);
+    await saveAiAssistantStateToCloud(nextState);
+  };
+
+  const handleJumpTrainingStep = async (stepIndex: number) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const clamped = Math.max(0, Math.min(PLAYNIX_TRAINING_QUESTIONS.length - 1, stepIndex));
+    const nextState: AiAssistantState = {
+      ...aiState,
+      trainingCurrentStepIndex: clamped,
+      updatedAt: new Date().toISOString(),
+    };
+    setAiState(nextState);
+    saveStoredAiState(nextState);
+    await saveAiAssistantStateToCloud(nextState);
+  };
+
+  const runGroundedAiSuggestion = async (
+    product: Product | null,
+    questionText: string,
+    endpoint: '/api/owner/ai/suggest-answer' | '/api/owner/ai/test-question',
+    fallbackProductId?: string,
+    fallbackProductName?: string
+  ): Promise<{
+    success: boolean;
+    geminiConfigured?: boolean;
+    error?: string;
+    suggestion?: AiSuggestedReplyResult;
+  }> => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+
+    let effectivePrice: number | undefined = product?.price;
+    let activeOfferLabel: string | undefined;
+    if (product) {
+      const discount = calculateProductDiscount(product, activeDiscountCampaigns);
+      if (discount.hasDiscount) {
+        effectivePrice = discount.discountedPrice;
+        activeOfferLabel = discount.discountLabel || discount.campaignName;
+      }
+    }
+
+    const lightweightProduct = product
+      ? {
+          id: product.id,
+          name: product.name,
+          category: product.category,
+          price: product.price,
+          available: product.available,
+          description: product.description,
+          imageCount: Array.isArray(product.imageUrls)
+            ? product.imageUrls.length
+            : product.imageUrl
+            ? 1
+            : 0,
+        }
+      : null;
+
+    try {
+      const res = await ownerPost(endpoint, {
+        product: lightweightProduct,
+        productId: product?.id || fallbackProductId,
+        productName: product?.name || fallbackProductName,
+        effectivePrice,
+        activeOfferLabel,
+        availableColours,
+        question: questionText,
+        knowledgeEntries: aiKnowledge,
+        trainingAnswers: aiTrainingAnswers,
+      });
+
+      if (typeof res.data?.geminiConfigured === 'boolean') {
+        setAiGeminiStatus((prev) => ({
+          ...prev,
+          checked: true,
+          geminiConfigured: Boolean(res.data.geminiConfigured),
+        }));
+      }
+
+      return res.data;
+    } catch (err: any) {
+      return {
+        success: false,
+        geminiConfigured: aiGeminiStatus.geminiConfigured,
+        error:
+          err?.response?.data?.error ||
+          err?.message ||
+          'Playnix AI request failed. You can still write a custom reply manually.',
+      };
+    }
+  };
+
+  const handleSuggestAiReplyForQuestion = async (
+    questionObj: ProductQuestion,
+    linkedProduct: Product | null
+  ) => {
+    return runGroundedAiSuggestion(
+      linkedProduct,
+      questionObj.question,
+      '/api/owner/ai/suggest-answer',
+      questionObj.productId,
+      questionObj.productName
+    );
+  };
+
+  const handleTestAiQuestion = async (product: Product, questionText: string) => {
+    return runGroundedAiSuggestion(
+      product,
+      questionText,
+      '/api/owner/ai/test-question',
+      product.id,
+      product.name
+    );
   };
 
   const dismissOwnerNotification = () => {
@@ -2306,6 +2752,9 @@ export default function App() {
       let unsubAnalyticsCustomers = () => {};
       let unsubAllCartItems = () => {};
       let unsubProductQuestions = () => {};
+      let unsubAiState = () => {};
+      let unsubAiKnowledge = () => {};
+      let unsubAiTraining = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -2324,6 +2773,19 @@ export default function App() {
           saveStoredProductQuestions(list);
           setQuestionsLoading(false);
         });
+        unsubAiState = subscribeToAiAssistantState((nextAi) => {
+          setAiState(nextAi);
+          saveStoredAiState(nextAi);
+        });
+        unsubAiKnowledge = subscribeToAiKnowledge((entries) => {
+          setAiKnowledge(entries);
+          saveStoredAiKnowledge(entries);
+        });
+        unsubAiTraining = subscribeToAiTrainingAnswers((answers) => {
+          setAiTrainingAnswers(answers);
+          saveStoredAiTrainingAnswers(answers);
+        });
+        void checkAiServerStatus();
       } else {
         setAllCartItems([]);
       }
@@ -2335,11 +2797,29 @@ export default function App() {
         unsubAnalyticsCustomers();
         unsubAllCartItems();
         unsubProductQuestions();
+        unsubAiState();
+        unsubAiKnowledge();
+        unsubAiTraining();
       };
     } else {
       setAllCartItems([]);
     }
   }, [page, ownerPin]);
+
+  // Auto-run Initial Website Scan once on first visit to Playnix AI Assistant
+  useEffect(() => {
+    if (
+      page === 'owner' &&
+      ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN &&
+      ownerTab === 'aiAssistant' &&
+      !aiState.hasCompletedInitialScan &&
+      !aiScanning &&
+      !aiInitialScanTriggeredRef.current
+    ) {
+      aiInitialScanTriggeredRef.current = true;
+      void triggerWebsiteAiScan();
+    }
+  }, [page, ownerPin, ownerTab, aiState.hasCompletedInitialScan, aiScanning]);
 
   const loadMyOrders = async () => {
     setMyOrdersLoading(true);
@@ -2730,6 +3210,7 @@ export default function App() {
       ]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
       if (ownerTab === 'questions') await loadOwnerProductQuestions();
+      if (ownerTab === 'aiAssistant') await loadOwnerAiData();
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
@@ -4633,6 +5114,37 @@ export default function App() {
                       {pendingQuestionsCount > 0
                         ? `${pendingQuestionsCount} pending`
                         : `${ownerProductQuestions.length} total`}
+                    </span>
+                  )}
+                </button>
+
+                {/* 8. Playnix AI Assistant */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'aiAssistant' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('aiAssistant');
+                    void loadOwnerAiData();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon" style={{ backgroundColor: '#ede9fe', color: '#5b21b6' }}>
+                    <Bot size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Playnix AI Assistant</strong>
+                    <span>Website scan, training &amp; Q&amp;A drafts</span>
+                  </div>
+                  {ownerTab === 'aiAssistant' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {!aiState.enabled
+                        ? 'Paused'
+                        : aiState.hasCompletedInitialScan
+                        ? 'AI On'
+                        : 'Setup'}
                     </span>
                   )}
                 </button>
@@ -6594,7 +7106,7 @@ export default function App() {
                 <BarChart3 size={15} style={{ display: 'inline', verticalAlign: '-2px', marginRight: '5px' }} />
                 Analytics
               </button>
-              {(ownerTab === 'questions' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
+              {(ownerTab === 'questions' || ownerTab === 'aiAssistant' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -6602,6 +7114,7 @@ export default function App() {
                   title="Active section opened from Owner Menu (Tap to change)"
                 >
                   {ownerTab === 'questions' && `❓ Product Questions (${ownerProductQuestions.length})`}
+                  {ownerTab === 'aiAssistant' && `🤖 Playnix AI Assistant`}
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
@@ -7914,10 +8427,45 @@ export default function App() {
                 questions={ownerProductQuestions}
                 products={products}
                 loading={questionsLoading}
+                aiEnabled={aiState.enabled}
                 onRefresh={loadOwnerProductQuestions}
                 onSaveAnswer={handleSaveQuestionAnswer}
                 onMarkStatus={handleMarkQuestionStatus}
                 onDeleteQuestion={handleDeleteQuestion}
+                onSuggestAiReply={handleSuggestAiReplyForQuestion}
+                onOpenAiAssistant={() => {
+                  setOwnerTab('aiAssistant');
+                  void loadOwnerAiData();
+                  window.scrollTo({ top: 320, behavior: 'smooth' });
+                }}
+              />
+            )}
+
+            {/* PLAYNIX AI ASSISTANT TAB */}
+            {ownerTab === 'aiAssistant' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+              <OwnerPlaynixAiAssistant
+                aiState={aiState}
+                knowledgeEntries={aiKnowledge}
+                trainingAnswers={aiTrainingAnswers}
+                products={products}
+                availableColours={availableColours}
+                pendingQuestionsCount={pendingQuestionsCount}
+                scanning={aiScanning}
+                geminiStatus={aiGeminiStatus}
+                scanFeedback={aiScanFeedback}
+                onTriggerScan={triggerWebsiteAiScan}
+                onToggleEnabled={handleToggleAiEnabled}
+                onSaveTrainingAnswer={handleSaveTrainingAnswer}
+                onFinishTraining={handleFinishTraining}
+                onJumpTrainingStep={handleJumpTrainingStep}
+                onSaveKnowledgeEntry={handleSaveAiKnowledgeEntry}
+                onDeleteKnowledgeEntry={handleDeleteAiKnowledgeEntry}
+                onTestAiQuestion={handleTestAiQuestion}
+                onOpenProductQuestions={() => {
+                  setOwnerTab('questions');
+                  void loadOwnerProductQuestions();
+                  window.scrollTo({ top: 320, behavior: 'smooth' });
+                }}
               />
             )}
 

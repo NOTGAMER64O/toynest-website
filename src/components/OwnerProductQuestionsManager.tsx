@@ -1,15 +1,22 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
+  Bot,
+  Check,
   CheckCircle2,
   Clock,
+  Edit3,
   HelpCircle,
   MessageSquareReply,
   RefreshCw,
   Search,
+  Sparkles,
+  ThumbsDown,
   Trash2,
   X,
 } from 'lucide-react';
 import {
+  type AiSuggestedReplyResult,
   type Product,
   type ProductQuestion,
   type ProductQuestionStatus,
@@ -21,6 +28,7 @@ interface OwnerProductQuestionsManagerProps {
   questions: ProductQuestion[];
   products: Product[];
   loading?: boolean;
+  aiEnabled?: boolean;
   onRefresh: () => void | Promise<void>;
   onSaveAnswer: (
     questionId: string,
@@ -32,16 +40,29 @@ interface OwnerProductQuestionsManagerProps {
     status: ProductQuestionStatus
   ) => Promise<void>;
   onDeleteQuestion: (questionId: string) => Promise<void>;
+  onSuggestAiReply?: (
+    question: ProductQuestion,
+    linkedProduct: Product | null
+  ) => Promise<{
+    success: boolean;
+    geminiConfigured?: boolean;
+    error?: string;
+    suggestion?: AiSuggestedReplyResult;
+  }>;
+  onOpenAiAssistant?: () => void;
 }
 
 export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManagerProps> = ({
   questions,
   products,
   loading = false,
+  aiEnabled = false,
   onRefresh,
   onSaveAnswer,
   onMarkStatus,
   onDeleteQuestion,
+  onSuggestAiReply,
+  onOpenAiAssistant,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'Pending' | 'Answered'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -51,6 +72,15 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string>('');
   const [modalSuccess, setModalSuccess] = useState<string>('');
+  const [aiLoading, setAiLoading] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string>('');
+  const [aiSuggestionsByQId, setAiSuggestionsByQId] = useState<
+    Record<string, AiSuggestedReplyResult>
+  >({});
+  const [aiDecisionByQId, setAiDecisionByQId] = useState<
+    Record<string, 'pending_review' | 'approved' | 'edited' | 'rejected'>
+  >({});
+  const replyTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   const productLookup = useMemo(() => {
     const map = new Map<string, Product>();
@@ -117,7 +147,62 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     setReplyDraft(item.answer || '');
     setModalError('');
     setModalSuccess('');
+    setAiError('');
     setConfirmDeleteId(null);
+  };
+
+  const handleGenerateAiSuggestion = async (item: ProductQuestion) => {
+    if (!onSuggestAiReply) return;
+    const liveProd = productLookup.get(item.productId) || null;
+    setAiError('');
+    setModalSuccess('');
+    setAiLoading(true);
+    try {
+      const res = await onSuggestAiReply(item, liveProd);
+      if (!res.success || !res.suggestion) {
+        setAiError(
+          res.error || 'Could not generate a suggested reply. You can still write a custom answer manually.'
+        );
+        return;
+      }
+      setAiSuggestionsByQId((prev) => ({ ...prev, [item.id]: res.suggestion! }));
+      setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'pending_review' }));
+    } catch (err: any) {
+      setAiError(err?.message || 'Playnix AI suggestion failed. You can still reply manually.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleApproveAiSuggestion = (item: ProductQuestion) => {
+    const sug = aiSuggestionsByQId[item.id];
+    if (!sug) return;
+    setReplyDraft(sug.suggestedAnswer);
+    setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'approved' }));
+    setModalError('');
+    setModalSuccess(
+      'AI suggestion approved and loaded into your reply box. Review it and click "Send & Publish Answer" to send manually.'
+    );
+  };
+
+  const handleEditAiSuggestion = (item: ProductQuestion) => {
+    const sug = aiSuggestionsByQId[item.id];
+    if (!sug) return;
+    setReplyDraft(sug.suggestedAnswer);
+    setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'edited' }));
+    setModalError('');
+    setModalSuccess('AI suggestion copied into the editor — customize freely before sending manually.');
+    window.setTimeout(() => {
+      replyTextareaRef.current?.focus();
+    }, 30);
+  };
+
+  const handleRejectAiSuggestion = (item: ProductQuestion) => {
+    setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'rejected' }));
+    setModalSuccess('AI suggestion rejected. Write your own custom answer below.');
+    window.setTimeout(() => {
+      replyTextareaRef.current?.focus();
+    }, 30);
   };
 
   const handleSaveReply = async (e: React.FormEvent) => {
@@ -184,18 +269,31 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
           <span className="eyebrow">CUSTOMER Q&amp;A</span>
           <h2>Product Questions</h2>
           <p className="owner-questions-subtitle">
-            Click any question to view the linked product details, reply on the product page, mark answered, or remove it.
+            Click any question to view the linked product details, generate a Playnix AI draft (manual approval required), write a custom reply, mark answered, or remove it.
           </p>
         </div>
-        <button
-          type="button"
-          className="secondary-btn"
-          onClick={() => void onRefresh()}
-          disabled={loading}
-        >
-          <RefreshCw size={15} className={loading ? 'refresh-spinning' : ''} />
-          Refresh
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {onOpenAiAssistant && (
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={onOpenAiAssistant}
+              title="Configure Playnix AI Assistant knowledge and training"
+            >
+              <Bot size={15} />
+              {aiEnabled ? 'Playnix AI Active' : 'Playnix AI Paused'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={() => void onRefresh()}
+            disabled={loading}
+          >
+            <RefreshCw size={15} className={loading ? 'refresh-spinning' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Summary & Filters */}
@@ -463,18 +561,151 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
               </div>
             </div>
 
-            {/* Owner Reply Form */}
+            {/* Playnix AI Assistant Suggested Answer Panel (Owner-only, manual approval always required) */}
+            {onSuggestAiReply && (
+              <div className="playnix-ai-q-assist-card">
+                <div className="playnix-ai-q-assist-head">
+                  <div className="playnix-ai-q-assist-title">
+                    <Sparkles size={15} />
+                    <strong>Playnix AI Assistant Draft</strong>
+                    <span className="playnix-ai-manual-pill">Manual Approval Only</span>
+                  </div>
+
+                  {aiEnabled ? (
+                    <button
+                      type="button"
+                      className="secondary-btn owner-q-action-btn"
+                      disabled={aiLoading}
+                      onClick={() => void handleGenerateAiSuggestion(selectedQuestion)}
+                    >
+                      <Bot size={14} className={aiLoading ? 'refresh-spinning' : ''} />
+                      {aiLoading
+                        ? 'Drafting Suggestion...'
+                        : aiSuggestionsByQId[selectedQuestion.id]
+                        ? 'Regenerate Suggestion'
+                        : 'Suggest Answer with AI'}
+                    </button>
+                  ) : (
+                    onOpenAiAssistant && (
+                      <button
+                        type="button"
+                        className="secondary-btn owner-q-action-btn"
+                        onClick={onOpenAiAssistant}
+                      >
+                        Activate Playnix AI
+                      </button>
+                    )
+                  )}
+                </div>
+
+                {!aiEnabled && (
+                  <p className="playnix-ai-q-muted">
+                    Playnix AI suggestions are currently paused. Activate Playnix AI to generate verified draft answers, or write your custom reply below.
+                  </p>
+                )}
+
+                {aiError && (
+                  <div className="playnix-ai-alert warning" style={{ marginTop: 8 }}>
+                    <AlertTriangle size={16} />
+                    <div>
+                      <strong>Suggestion Unavailable</strong>
+                      <p>{aiError}</p>
+                    </div>
+                  </div>
+                )}
+
+                {(() => {
+                  const sug = aiSuggestionsByQId[selectedQuestion.id];
+                  const decision = aiDecisionByQId[selectedQuestion.id];
+                  if (!sug) return null;
+
+                  if (decision === 'rejected') {
+                    return (
+                      <div className="playnix-ai-q-rejected">
+                        <span>Suggestion dismissed. Write a custom answer below or click Regenerate Suggestion.</span>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="playnix-ai-suggestion-box" style={{ marginTop: 10 }}>
+                      <div className="playnix-ai-suggestion-head">
+                        <span className="playnix-ai-suggestion-title">
+                          <Bot size={14} /> Suggested Answer Preview
+                          {decision === 'approved' && ' · Approved into editor'}
+                          {decision === 'edited' && ' · Loaded for editing'}
+                        </span>
+                        <span
+                          className={`playnix-ai-grounding-badge status-${sug.groundingStatus}`}
+                        >
+                          {sug.groundingStatus === 'verified'
+                            ? 'Verified Answer'
+                            : sug.groundingStatus === 'partial'
+                            ? 'Partially Covered'
+                            : 'Missing Info Detected'}
+                        </span>
+                      </div>
+
+                      <p className="playnix-ai-suggestion-body">{sug.suggestedAnswer}</p>
+
+                      {sug.missingInfoNote && (
+                        <div className="playnix-ai-missing-note">
+                          <AlertTriangle size={14} />
+                          <span>
+                            <strong>Missing Information Notice:</strong> {sug.missingInfoNote}
+                          </span>
+                        </div>
+                      )}
+
+                      {sug.usedSources.length > 0 && (
+                        <div className="playnix-ai-sources-line">
+                          <HelpCircle size={13} />
+                          <span>Verified sources used: {sug.usedSources.join(' · ')}</span>
+                        </div>
+                      )}
+
+                      <div className="playnix-ai-suggestion-actions">
+                        <button
+                          type="button"
+                          className="primary-btn owner-q-action-btn"
+                          onClick={() => handleApproveAiSuggestion(selectedQuestion)}
+                        >
+                          <Check size={14} /> Approve Suggestion
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-btn owner-q-action-btn"
+                          onClick={() => handleEditAiSuggestion(selectedQuestion)}
+                        >
+                          <Edit3 size={14} /> Edit Suggestion
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-btn owner-q-action-btn danger-text"
+                          onClick={() => handleRejectAiSuggestion(selectedQuestion)}
+                        >
+                          <ThumbsDown size={14} /> Reject
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* Owner Reply Form (Always manual final submission) */}
             <form className="owner-q-reply-form" onSubmit={(e) => void handleSaveReply(e)}>
               <label htmlFor={`owner-reply-${selectedQuestion.id}`}>
-                Your Answer (visible on the product page)
+                Final Answer to Publish (visible on product page — sent manually only)
               </label>
               <textarea
+                ref={replyTextareaRef}
                 id={`owner-reply-${selectedQuestion.id}`}
                 rows={4}
                 maxLength={2000}
                 value={replyDraft}
                 onChange={(e) => setReplyDraft(e.target.value)}
-                placeholder="Write a helpful answer for this customer and future shoppers..."
+                placeholder="Write a custom answer or approve/edit Playnix AI's suggestion above..."
               />
 
               {modalError && <p className="error-msg" style={{ margin: '0' }}>{modalError}</p>}
@@ -522,8 +753,8 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                   {savingId === selectedQuestion.id
                     ? 'Saving...'
                     : selectedQuestion.answer
-                    ? 'Update Answer'
-                    : 'Save & Publish Answer'}
+                    ? 'Update Answer Manually'
+                    : 'Send & Publish Answer'}
                 </button>
               </div>
             </form>

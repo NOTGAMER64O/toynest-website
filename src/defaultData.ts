@@ -1056,3 +1056,273 @@ export function saveStoredProductQuestions(items: ProductQuestion[]): void {
   } catch {}
 }
 
+/* =========================================================================
+   PLAYNIX AI ASSISTANT — KNOWLEDGE BASE, TRAINING INTERVIEW & STATE
+   ========================================================================= */
+
+export type AiKnowledgeSource = 'website' | 'owner';
+
+export type AiKnowledgeCategory =
+  | 'catalog'
+  | 'product_spec'
+  | 'delivery'
+  | 'returns'
+  | 'payment'
+  | 'availability'
+  | 'orders'
+  | 'support'
+  | 'faq'
+  | 'policy'
+  | 'tone';
+
+export interface AiKnowledgeEntry {
+  id: string;
+  title: string;
+  content: string;
+  category: AiKnowledgeCategory;
+  source: AiKnowledgeSource;
+  productId?: string;
+  productName?: string;
+  trainingStepKey?: string;
+  verified: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AiTrainingStepKey =
+  | 'delivery'
+  | 'returns'
+  | 'payment'
+  | 'materials_specs'
+  | 'availability'
+  | 'order_processing'
+  | 'customer_support'
+  | 'faq'
+  | 'unknown_fallback'
+  | 'communication_style';
+
+export type AiTrainingStepStatus = 'pending' | 'answered' | 'skipped';
+
+export interface AiTrainingAnswer {
+  id: AiTrainingStepKey;
+  stepKey: AiTrainingStepKey;
+  question: string;
+  answer: string;
+  status: AiTrainingStepStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiAssistantState {
+  id: 'config';
+  enabled: boolean;
+  hasCompletedInitialScan: boolean;
+  lastScannedAt?: string;
+  scanSummary?: string;
+  learnedHighlights?: string[];
+  missingInfoItems?: string[];
+  trainingStatus: 'not_started' | 'in_progress' | 'completed';
+  trainingCurrentStepIndex: number;
+  trainingCompletedAt?: string;
+  geminiConfigured?: boolean;
+  updatedAt: string;
+}
+
+export interface AiSuggestedReplyResult {
+  suggestedAnswer: string;
+  groundingStatus: 'verified' | 'partial' | 'missing_info';
+  confidence: 'high' | 'medium' | 'low';
+  missingInfoNote: string;
+  usedSources: string[];
+  modelUsed?: string;
+  generatedAt: string;
+}
+
+export interface AiTrainingQuestionDefinition {
+  stepKey: AiTrainingStepKey;
+  title: string;
+  category: AiKnowledgeCategory;
+  question: string;
+  helperText: string;
+  placeholder: string;
+}
+
+export const PLAYNIX_TRAINING_QUESTIONS: AiTrainingQuestionDefinition[] = [
+  {
+    stepKey: 'delivery',
+    title: 'Delivery times & charges',
+    category: 'delivery',
+    question: 'What are your delivery or pickup times, and are there any delivery charges?',
+    helperText:
+      'Include how long Child (BCS student pickup/delivery) and Adult orders take, plus any delivery fee or free delivery threshold.',
+    placeholder:
+      'e.g., BCS student Child orders are handed over at school within 1–2 school days (no delivery charge). Adult local orders take 2–4 days...',
+  },
+  {
+    stepKey: 'returns',
+    title: 'Return & refund policies',
+    category: 'returns',
+    question: 'What is your return, replacement, or refund policy if a customer has an issue?',
+    helperText:
+      'Mention whether returns/exchanges are accepted, within how many days, and what happens for Rescue Deals or damaged items.',
+    placeholder:
+      'e.g., Damaged or wrong toys are replaced within 3 days. Open-box Rescue Deals are final sale unless damaged on arrival...',
+  },
+  {
+    stepKey: 'payment',
+    title: 'Payment methods',
+    category: 'payment',
+    question: 'Which payment methods do you accept for Child and Adult customers?',
+    helperText:
+      'Clarify UPI QR, cash, or payment recipient handover rules so customers never get confused.',
+    placeholder:
+      'e.g., Adult orders pay via the Playnix UPI QR shown at checkout. Child orders confirm payment recipient/cash details as listed at checkout...',
+  },
+  {
+    stepKey: 'materials_specs',
+    title: 'Product materials & specifications',
+    category: 'product_spec',
+    question:
+      'What general materials, build details, or age suitability should customers know across your toys and kit cards?',
+    helperText:
+      'Many products only show name/price without a description yet. Share what material/type your toys/kit cards are made of (or say if it varies per item).',
+    placeholder:
+      'e.g., Most Kit Cards & figures are precision 3D-printed PLA plastic parts; kit cards snap out and assemble without glue...',
+  },
+  {
+    stepKey: 'availability',
+    title: 'Product availability & custom orders',
+    category: 'availability',
+    question:
+      'How do stock availability, colours, and restocks work if a customer asks whether something is in stock?',
+    helperText:
+      'Specify how custom colour choices or sold-out items are handled and whether out-of-stock toys can be requested.',
+    placeholder:
+      'e.g., Live products on the storefront are made/stocked to order up to qty 5. Rescue Deals have only 1 unit available...',
+  },
+  {
+    stepKey: 'order_processing',
+    title: 'Order processing',
+    category: 'orders',
+    question:
+      'Once a customer places an order, how is it processed, queued, and confirmed?',
+    helperText:
+      'Explain how queue numbers work and what order statuses (New, Confirmed, Preparing, Dispatched, Ready for pickup) mean.',
+    placeholder:
+      'e.g., Every order gets an automatic TN order number and queue position. We review New orders daily and update status in My Orders...',
+  },
+  {
+    stepKey: 'customer_support',
+    title: 'Customer support',
+    category: 'support',
+    question:
+      'How should customers reach you for help, special colour requests, or order changes?',
+    helperText:
+      'Share preferred channels (My Orders note box, Toy Request / Suggestions form, or specific contact info you want public).',
+    placeholder:
+      'e.g., Customers can edit notes inside My Orders or ask on the product page. Do not invent phone numbers unless listed here...',
+  },
+  {
+    stepKey: 'faq',
+    title: 'Frequently asked questions',
+    category: 'faq',
+    question:
+      'Are there any common questions customers always ask about Playnix Shop (e.g., assembly, gifting, bulk orders)?',
+    helperText:
+      'Add any recurring facts that help answer customer questions accurately.',
+    placeholder:
+      'e.g., Kit cards are easy to assemble in 2–5 minutes. Max 5 per item in a checkout; message us via Suggestions for larger requests...',
+  },
+  {
+    stepKey: 'unknown_fallback',
+    title: 'When AI does not know an answer',
+    category: 'policy',
+    question:
+      'How should Playnix AI draft a suggested answer (or message to you) when verified info is missing?',
+    helperText:
+      'Define your fallback rule when a product detail or policy is not in the knowledge base.',
+    placeholder:
+      'e.g., Clearly tell me which detail is missing and suggest a polite holding reply thanking the customer while I check...',
+  },
+  {
+    stepKey: 'communication_style',
+    title: 'Preferred communication style & tone',
+    category: 'tone',
+    question:
+      'What tone and writing style should Playnix AI use when drafting replies for you?',
+    helperText:
+      'Choose how warm, concise, formal, or kid/parent-friendly suggested replies should sound.',
+    placeholder:
+      'e.g., Warm, polite, helpful, and concise (2–3 sentences). Clear English without robotic jargon...',
+  },
+];
+
+export const DEFAULT_AI_ASSISTANT_STATE: AiAssistantState = {
+  id: 'config',
+  enabled: true,
+  hasCompletedInitialScan: false,
+  trainingStatus: 'not_started',
+  trainingCurrentStepIndex: 0,
+  learnedHighlights: [],
+  missingInfoItems: [],
+  updatedAt: new Date(0).toISOString(),
+};
+
+export function getStoredAiState(): AiAssistantState {
+  try {
+    const raw = localStorage.getItem('playnix_ai_state');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          ...DEFAULT_AI_ASSISTANT_STATE,
+          ...parsed,
+          id: 'config',
+        };
+      }
+    }
+  } catch {}
+  return { ...DEFAULT_AI_ASSISTANT_STATE };
+}
+
+export function saveStoredAiState(state: AiAssistantState): void {
+  try {
+    localStorage.setItem('playnix_ai_state', JSON.stringify(state));
+  } catch {}
+}
+
+export function getStoredAiKnowledge(): AiKnowledgeEntry[] {
+  try {
+    const raw = localStorage.getItem('playnix_ai_knowledge');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredAiKnowledge(entries: AiKnowledgeEntry[]): void {
+  try {
+    localStorage.setItem('playnix_ai_knowledge', JSON.stringify(entries));
+  } catch {}
+}
+
+export function getStoredAiTrainingAnswers(): AiTrainingAnswer[] {
+  try {
+    const raw = localStorage.getItem('playnix_ai_training_answers');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredAiTrainingAnswers(answers: AiTrainingAnswer[]): void {
+  try {
+    localStorage.setItem('playnix_ai_training_answers', JSON.stringify(answers));
+  } catch {}
+}
+
+

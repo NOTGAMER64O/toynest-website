@@ -8035,4 +8035,831 @@ footer > button:hover {
   }
 }
 
+/* =========================================================================
+   PLAYNIX AI ASSISTANT & PRODUCT QUESTIONS AI SUGGESTIONS
+   ========================================================================= */
+
+.playnix-ai-panel {
+  border: 1px solid #eeece5;
+  border-radius: 14px;
+  padding: 22px;
+  background: #fffefa;
+  display: grid;
+  gap: 18px;
+}
+
+.playnix-ai-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-title-block h2 {
+  margin: 6px 0 4px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 1.45rem;
+  color: #1f2b1e;
+}
+
+.playnix-ai-subtitle {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #656e5f;
+  max-width: 680px;
+  line-height: 1.5;
+}
+
+.playnix-ai-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.playnix-ai-status-chip.is-on {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.playnix-ai-status-chip.is-off {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+.playnix-ai-status-chip.is-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.playnix-ai-status-chip.is-neutral {
+  background: #f1f2e8;
+  color: #55604d;
+}
+
+.playnix-ai-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-power-btn.is-active {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.playnix-ai-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.playnix-ai-alert svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.playnix-ai-alert strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.playnix-ai-alert p {
+  margin: 0;
+}
+
+.playnix-ai-alert.warning {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #78350f;
+}
+
+.playnix-ai-alert.success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+
+.playnix-ai-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.playnix-ai-kpi-card {
+  padding: 14px;
+  border-radius: 12px;
+  background: #f8f7ef;
+  border: 1px solid #e6e4d8;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.playnix-ai-kpi-card.is-clickable {
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.playnix-ai-kpi-card.is-clickable:hover {
+  border-color: #8ea572;
+  background: #f2f5ea;
+}
+
+.playnix-ai-kpi-card .kpi-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6d7863;
+}
+
+.playnix-ai-kpi-card strong {
+  font-family: 'Manrope', sans-serif;
+  font-size: 0.96rem;
+  color: #1f2b1e;
+}
+
+.playnix-ai-kpi-card small {
+  font-size: 0.74rem;
+  color: #6f7768;
+}
+
+.playnix-ai-overview-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 16px;
+}
+
+.playnix-ai-card {
+  border: 1px solid #e6e4d8;
+  border-radius: 13px;
+  background: #fbfaf5;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.playnix-ai-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-card-head h3 {
+  margin: 4px 0 0;
+  font-family: 'Manrope', sans-serif;
+  font-size: 1.08rem;
+  color: #1f2b1e;
+}
+
+.playnix-ai-date-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: #eef1e4;
+  color: #485440;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.playnix-ai-scanning-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 10px;
+  background: #eef5e7;
+  border: 1px solid #cfe0be;
+  color: #263c20;
+  font-size: 0.85rem;
+}
+
+.playnix-ai-scanning-box p {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+  color: #54664d;
+}
+
+.playnix-ai-summary-text {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: #243022;
+}
+
+.playnix-ai-highlight-list,
+.playnix-ai-gap-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.playnix-ai-highlight-list li,
+.playnix-ai-gap-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.playnix-ai-highlight-list li {
+  background: #fffefa;
+  border: 1px solid #e4e6d8;
+  color: #243022;
+}
+
+.playnix-ai-highlight-list li svg {
+  color: #2f6b2e;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.playnix-ai-gap-list li {
+  background: #fff9eb;
+  border: 1px solid #f4dea8;
+  color: #78350f;
+}
+
+.playnix-ai-gap-list li svg {
+  color: #d97706;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.playnix-ai-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid #eae8dc;
+}
+
+.playnix-ai-safety-box {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #f2f5ea;
+  border: 1px solid #dbe4ca;
+  font-size: 0.8rem;
+  color: #2c3b28;
+}
+
+.playnix-ai-safety-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.playnix-ai-safety-box ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  color: #465341;
+}
+
+/* Training Interview */
+.playnix-ai-training-wrap {
+  display: grid;
+  gap: 16px;
+}
+
+.playnix-ai-training-top {
+  display: grid;
+  grid-template-columns: 1.35fr 0.65fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.playnix-ai-training-top h3 {
+  margin: 5px 0 6px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 1.15rem;
+  color: #1f2b1e;
+}
+
+.playnix-ai-training-helper {
+  margin: 0;
+  font-size: 0.83rem;
+  color: #646d5e;
+  line-height: 1.5;
+}
+
+.playnix-ai-progress-box {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #fffefa;
+  border: 1px solid #e3e2d5;
+  display: grid;
+  gap: 6px;
+}
+
+.playnix-ai-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: #495443;
+}
+
+.playnix-ai-progress-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #e8eadc;
+  overflow: hidden;
+}
+
+.playnix-ai-progress-fill {
+  height: 100%;
+  background: #273824;
+  border-radius: 999px;
+  transition: width 220ms ease;
+}
+
+.playnix-ai-progress-box small {
+  font-size: 0.71rem;
+  color: #747c6d;
+}
+
+.playnix-ai-context-hint {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #eef4e2;
+  border: 1px solid #d5e2bd;
+  font-size: 0.8rem;
+  color: #293e24;
+}
+
+.playnix-ai-interview-form {
+  display: grid;
+  gap: 10px;
+}
+
+.playnix-ai-interview-form label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #273824;
+}
+
+.playnix-ai-interview-form textarea {
+  width: 100%;
+  border: 1px solid #d4d6c5;
+  border-radius: 10px;
+  padding: 12px 13px;
+  font: inherit;
+  font-size: 0.88rem;
+  background: #fffefa;
+  color: #1f2b1e;
+  resize: vertical;
+}
+
+.playnix-ai-interview-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-interview-left,
+.playnix-ai-interview-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-steps-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.playnix-ai-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  border: 1px solid #e2e0d4;
+  background: #fffefa;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.playnix-ai-step-item:hover {
+  border-color: #9bb182;
+}
+
+.playnix-ai-step-item.is-current {
+  border-color: #273824;
+  background: #eff4e6;
+}
+
+.playnix-ai-step-item .step-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #e9ece0;
+  color: #273824;
+  display: grid;
+  place-items: center;
+  font-size: 0.74rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.playnix-ai-step-item.status-answered .step-num {
+  background: #273824;
+  color: #fffefa;
+}
+
+.playnix-ai-step-item.status-skipped .step-num {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.playnix-ai-step-item .step-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.playnix-ai-step-item .step-info strong {
+  font-size: 0.75rem;
+  color: #1f2b1e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playnix-ai-step-item .step-info small {
+  font-size: 0.67rem;
+  color: #707968;
+}
+
+/* Knowledge Management */
+.playnix-ai-knowledge-wrap {
+  display: grid;
+  gap: 14px;
+}
+
+.playnix-ai-knowledge-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-knowledge-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-select {
+  border: 1px solid #d7d9c9;
+  border-radius: 10px;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 0.83rem;
+  background: #fffefa;
+  color: #212b20;
+}
+
+.playnix-ai-select.full {
+  width: 100%;
+}
+
+.playnix-ai-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.playnix-ai-knowledge-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.playnix-ai-know-card {
+  border: 1px solid #e5e3d7;
+  border-radius: 12px;
+  background: #fbfaf5;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.playnix-ai-know-card.source-owner {
+  border-left: 4px solid #273824;
+}
+
+.playnix-ai-know-card.source-website {
+  border-left: 4px solid #0369a1;
+}
+
+.playnix-ai-know-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-know-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.playnix-ai-source-badge {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.playnix-ai-source-badge.owner {
+  background: #e6f2de;
+  color: #22441d;
+}
+
+.playnix-ai-source-badge.website {
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.playnix-ai-cat-badge {
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #efede3;
+  color: #535c4d;
+  font-size: 0.69rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.playnix-ai-prod-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #516143;
+}
+
+.playnix-ai-know-card h4 {
+  margin: 0;
+  font-family: 'Manrope', sans-serif;
+  font-size: 0.96rem;
+  color: #1f2b1e;
+}
+
+.playnix-ai-know-content {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: #364134;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+
+.playnix-ai-know-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid #ecead9;
+}
+
+.playnix-ai-know-footer small {
+  font-size: 0.71rem;
+  color: #778070;
+}
+
+.playnix-ai-know-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Test Sandbox & Product Questions Suggestion Card */
+.playnix-ai-sample-prompts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  font-size: 0.76rem;
+  color: #6a7363;
+}
+
+.playnix-ai-q-assist-card {
+  padding: 13px 14px;
+  border-radius: 12px;
+  background: #f3f6eb;
+  border: 1px solid #d5e1c3;
+}
+
+.playnix-ai-q-assist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-q-assist-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  color: #21361e;
+  font-size: 0.88rem;
+}
+
+.playnix-ai-manual-pill {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #fffefa;
+  border: 1px solid #cad7b6;
+  font-size: 0.68rem;
+  font-weight: 800;
+  color: #465b3d;
+}
+
+.playnix-ai-q-muted {
+  margin: 8px 0 0;
+  font-size: 0.79rem;
+  color: #5e6858;
+}
+
+.playnix-ai-q-rejected {
+  margin-top: 8px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #fffefa;
+  border: 1px dashed #d3d5c5;
+  font-size: 0.78rem;
+  color: #677060;
+}
+
+.playnix-ai-suggestion-box {
+  padding: 13px;
+  border-radius: 10px;
+  background: #fffefa;
+  border: 1px solid #cfdcb9;
+  display: grid;
+  gap: 10px;
+}
+
+.playnix-ai-suggestion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playnix-ai-suggestion-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.77rem;
+  font-weight: 800;
+  color: #294025;
+}
+
+.playnix-ai-grounding-badge {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.playnix-ai-grounding-badge.status-verified {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.playnix-ai-grounding-badge.status-partial {
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.playnix-ai-grounding-badge.status-missing_info {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.playnix-ai-suggestion-body {
+  margin: 0;
+  font-size: 0.87rem;
+  line-height: 1.55;
+  color: #1f2b1e;
+  white-space: pre-wrap;
+}
+
+.playnix-ai-missing-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #78350f;
+  font-size: 0.77rem;
+  line-height: 1.4;
+}
+
+.playnix-ai-missing-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.playnix-ai-sources-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.73rem;
+  color: #6b7464;
+}
+
+.playnix-ai-suggestion-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid #ecead9;
+}
+
+@media (max-width: 960px) {
+  .playnix-ai-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .playnix-ai-overview-grid,
+  .playnix-ai-training-top {
+    grid-template-columns: 1fr;
+  }
+
+  .playnix-ai-steps-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .playnix-ai-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .playnix-ai-panel {
+    padding: 16px;
+  }
+
+  .playnix-ai-kpi-grid,
+  .playnix-ai-knowledge-grid,
+  .playnix-ai-steps-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
 
