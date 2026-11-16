@@ -392,6 +392,7 @@
 }
 
 .owner-dots-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -413,6 +414,7 @@
 }
 
 .owner-dots-btn-inline {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;

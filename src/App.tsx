@@ -4244,10 +4244,17 @@ export default function App() {
                 className="owner-dots-btn"
                 type="button"
                 onClick={() => setIsOwnerMenuOpen(true)}
-                title="Owner options menu (Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
+                title="Owner options menu (Product Questions, Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
                 aria-label="Owner options menu"
               >
                 <MoreVertical size={20} />
+                {pendingQuestionsCount > 0 && (
+                  <span
+                    className="blinking-green-dot"
+                    style={{ top: '4px', right: '4px' }}
+                    title={`${pendingQuestionsCount} pending customer question(s)`}
+                  />
+                )}
               </button>
             </div>
           )}
@@ -4600,6 +4607,35 @@ export default function App() {
                     </span>
                   )}
                 </button>
+
+                {/* 7. Product Questions */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'questions' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('questions');
+                    void loadOwnerProductQuestions();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon" style={{ backgroundColor: '#e0f2fe', color: '#0369a1' }}>
+                    <HelpCircle size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Product Questions</strong>
+                    <span>Reply to customer Q&A on products</span>
+                  </div>
+                  {ownerTab === 'questions' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {pendingQuestionsCount > 0
+                        ? `${pendingQuestionsCount} pending`
+                        : `${ownerProductQuestions.length} total`}
+                    </span>
+                  )}
+                </button>
               </div>
 
               <div className="owner-panel-divider" />
@@ -4647,18 +4683,6 @@ export default function App() {
                   }}
                 >
                   <MessageSquare size={15} /> Suggestions ({ownerSuggestions.length})
-                </button>
-                <button
-                  type="button"
-                  className={`owner-quick-btn ${ownerTab === 'questions' ? 'active' : ''}`}
-                  onClick={() => {
-                    setOwnerTab('questions');
-                    void loadOwnerProductQuestions();
-                    setIsOwnerMenuOpen(false);
-                  }}
-                >
-                  <HelpCircle size={15} /> Product Questions ({ownerProductQuestions.length})
-                  {pendingQuestionsCount > 0 ? ` · ${pendingQuestionsCount} pending` : ''}
                 </button>
                 <button
                   type="button"
@@ -6445,10 +6469,17 @@ export default function App() {
                   className="owner-dots-btn-inline"
                   type="button"
                   onClick={() => setIsOwnerMenuOpen(true)}
-                  title="Owner options (Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
+                  title="Owner options (Product Questions, Scheduled Offers, Rescue Deals, Shop Sections, Payment QR, Manage Colours)"
                   aria-label="Owner options menu"
                 >
                   <MoreVertical size={19} />
+                  {pendingQuestionsCount > 0 && (
+                    <span
+                      className="blinking-green-dot"
+                      style={{ top: '4px', right: '4px' }}
+                      title={`${pendingQuestionsCount} pending customer question(s)`}
+                    />
+                  )}
                 </button>
               </div>
             </div>
@@ -6554,23 +6585,6 @@ export default function App() {
                 Suggestions ({ownerSuggestions.length})
               </button>
               <button
-                className={ownerTab === 'questions' ? 'active' : ''}
-                style={{ position: 'relative' }}
-                onClick={() => {
-                  setOwnerTab('questions');
-                  void loadOwnerProductQuestions();
-                }}
-              >
-                Product Questions ({ownerProductQuestions.length})
-                {pendingQuestionsCount > 0 && (
-                  <span
-                    className="blinking-green-dot"
-                    style={{ top: '6px', right: '8px' }}
-                    title={`${pendingQuestionsCount} pending customer question(s)`}
-                  />
-                )}
-              </button>
-              <button
                 className={ownerTab === 'analytics' ? 'active' : ''}
                 onClick={() => {
                   setOwnerTab('analytics');
@@ -6580,13 +6594,14 @@ export default function App() {
                 <BarChart3 size={15} style={{ display: 'inline', verticalAlign: '-2px', marginRight: '5px' }} />
                 Analytics
               </button>
-              {(ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
+              {(ownerTab === 'questions' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
                   onClick={() => setIsOwnerMenuOpen(true)}
                   title="Active section opened from Owner Menu (Tap to change)"
                 >
+                  {ownerTab === 'questions' && `❓ Product Questions (${ownerProductQuestions.length})`}
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}

@@ -1002,22 +1002,12 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
   const customerAnalytics = useMemo(() => {
     interface CustomerSummary {
       customerId: string;
-      displayName: string;
-      mode: string;
       firstSeenAt: string;
       firstSeenDateKey: string;
       lastSeenAt: string;
       lastSeenDateKey: string;
       totalVisitsAllTime: number;
-      rangeVisits: number;
-      rangeViews: number;
-      rangeCartAdds: number;
-      rangeOrdersCount: number;
-      rangeSpent: number;
       allTimeOrdersCount: number;
-      activityScore: number;
-      isNewInRange: boolean;
-      isReturningInRange: boolean;
     }
 
     const custMap = new Map<string, CustomerSummary>();
@@ -1027,27 +1017,14 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       const dk = getISTDateKey(seenAt);
       const existing = custMap.get(cleanId);
       if (!existing) {
-        const defaultGuestLabel = isRegisteredCustomerId(cleanId)
-          ? `Registered Customer #${getGuestShortCode(cleanId, 4)}`
-          : `Guest Customer #${getGuestShortCode(cleanId, 4)}`;
         custMap.set(cleanId, {
           customerId: cleanId,
-          displayName: defaultGuestLabel,
-          mode: 'Visitor',
           firstSeenAt: seenAt,
           firstSeenDateKey: dk,
           lastSeenAt: seenAt,
           lastSeenDateKey: dk,
           totalVisitsAllTime: 0,
-          rangeVisits: 0,
-          rangeViews: 0,
-          rangeCartAdds: 0,
-          rangeOrdersCount: 0,
-          rangeSpent: 0,
           allTimeOrdersCount: 0,
-          activityScore: 0,
-          isNewInRange: false,
-          isReturningInRange: false,
         });
       } else {
         if (seenAt < existing.firstSeenAt) {
@@ -1068,10 +1045,6 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       const entry = touchCustomer(c.customerId, c.firstSeenAt || c.createdAt);
       touchCustomer(c.customerId, c.lastSeenAt || c.updatedAt || c.firstSeenAt);
       entry.totalVisitsAllTime = Math.max(entry.totalVisitsAllTime, c.visitCount || 0);
-      if (c.displayName && c.displayName.trim()) {
-        entry.displayName = c.displayName.trim();
-      }
-      if (c.mode) entry.mode = c.mode;
     }
 
     // Merge all historical orders so previously registered buyers are included
@@ -1079,16 +1052,6 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
       if (!o || !o.customerId) continue;
       const entry = touchCustomer(o.customerId, o.createdAt);
       entry.allTimeOrdersCount += 1;
-      if (o.name && o.name.trim()) {
-        entry.displayName = o.name.trim();
-      }
-      if (o.mode) entry.mode = o.mode;
-
-      const dk = getISTDateKey(o.createdAt);
-      if (dk >= startDateKey && dk <= endDateKey && (o.status || '').toLowerCase() !== 'cancelled') {
-        entry.rangeOrdersCount += 1;
-        entry.rangeSpent += parseOrderAmount(o);
-      }
     }
 
     // Track distinct active days in range per customer
@@ -1100,25 +1063,19 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
 
     for (const ev of rangeVisitEvents) {
       if (!ev.customerId) continue;
-      const entry = touchCustomer(ev.customerId, ev.createdAt);
-      entry.rangeVisits += ev.count || 1;
+      touchCustomer(ev.customerId, ev.createdAt);
       markRangeDate(ev.customerId, ev.dateKey);
     }
 
     for (const ev of rangeViewEvents) {
       if (!ev.customerId) continue;
-      const entry = touchCustomer(ev.customerId, ev.createdAt);
-      entry.rangeViews += ev.count || 1;
+      touchCustomer(ev.customerId, ev.createdAt);
       markRangeDate(ev.customerId, ev.dateKey);
     }
 
     for (const ev of rangeCartEvents) {
       if (!ev.customerId) continue;
-      const entry = touchCustomer(ev.customerId, ev.createdAt);
-      entry.rangeCartAdds +=
-        typeof ev.quantity === 'number' && ev.quantity > 0
-          ? ev.quantity
-          : ev.count || 1;
+      touchCustomer(ev.customerId, ev.createdAt);
       markRangeDate(ev.customerId, ev.dateKey);
     }
 
@@ -1137,7 +1094,6 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
         (entry.lastSeenDateKey >= startDateKey && entry.lastSeenDateKey <= endDateKey);
 
       if (entry.firstSeenDateKey >= startDateKey && entry.firstSeenDateKey <= endDateKey) {
-        entry.isNewInRange = true;
         newCount += 1;
       } else if (
         activeInRange &&
@@ -1145,38 +1101,14 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
           entry.allTimeOrdersCount >= 2 ||
           entry.totalVisitsAllTime >= 2)
       ) {
-        entry.isReturningInRange = true;
         returningCount += 1;
       }
-
-      entry.activityScore =
-        entry.rangeOrdersCount * 10 +
-        entry.rangeCartAdds * 4 +
-        entry.rangeViews * 2 +
-        entry.rangeVisits * 2 +
-        (entry.rangeSpent > 0 ? Math.min(20, Math.round(entry.rangeSpent / 50)) : 0);
     }
-
-    const activeCustomersRanked = Array.from(custMap.values())
-      .filter(
-        (c) =>
-          c.rangeOrdersCount > 0 ||
-          c.rangeCartAdds > 0 ||
-          c.rangeViews > 0 ||
-          c.rangeVisits > 0
-      )
-      .sort(
-        (a, b) =>
-          b.activityScore - a.activityScore ||
-          b.rangeSpent - a.rangeSpent ||
-          b.rangeOrdersCount - a.rangeOrdersCount
-      );
 
     return {
       totalRegisteredCustomers: custMap.size,
       newCustomersCount: newCount,
       returningCustomersCount: returningCount,
-      mostActiveCustomers: activeCustomersRanked,
     };
   }, [
     analyticsCustomers,
@@ -2018,7 +1950,7 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
               <Activity size={18} /> Customer Analytics
             </h3>
             <p>
-              Registered customers, new vs returning buyer breakdown, and most active shoppers.
+              Registered customers and new vs returning buyer breakdown.
             </p>
           </div>
         </div>
@@ -2078,57 +2010,6 @@ export const OwnerAnalyticsDashboard: React.FC<OwnerAnalyticsDashboardProps> = (
           </div>
         )}
 
-        {/* Most Active Customers Table */}
-        <h4 className="analytics-sub-heading">Most Active Customers ({rangeLabel})</h4>
-        {customerAnalytics.mostActiveCustomers.length === 0 ? (
-          <div className="analytics-empty-inline">
-            No customer activity recorded during the selected date range yet.
-          </div>
-        ) : (
-          <div className="analytics-table-wrap">
-            <table className="analytics-table">
-              <thead>
-                <tr>
-                  <th>Rank</th>
-                  <th>Customer</th>
-                  <th>Type</th>
-                  <th className="num">Visits</th>
-                  <th className="num">Views</th>
-                  <th className="num">Cart Adds</th>
-                  <th className="num">Orders</th>
-                  <th className="num">Spent</th>
-                  <th>Last Active</th>
-                </tr>
-              </thead>
-              <tbody>
-                {customerAnalytics.mostActiveCustomers.slice(0, 20).map((c, idx) => (
-                  <tr key={c.customerId}>
-                    <td className="num">#{idx + 1}</td>
-                    <td>
-                      <div className="analytics-cust-name">
-                        <strong>{c.displayName}</strong>
-                        <small>{c.customerId.slice(0, 14)}</small>
-                      </div>
-                    </td>
-                    <td>
-                      <span className="analytics-cust-type">
-                        {c.isReturningInRange ? 'Returning' : c.isNewInRange ? 'New' : c.mode}
-                      </span>
-                    </td>
-                    <td className="num">{c.rangeVisits}</td>
-                    <td className="num">{c.rangeViews}</td>
-                    <td className="num">{c.rangeCartAdds}</td>
-                    <td className="num">{c.rangeOrdersCount}</td>
-                    <td className="num">
-                      <strong>{formatCurrency(c.rangeSpent)}</strong>
-                    </td>
-                    <td>{formatDateTimeShort(c.lastSeenAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
       {/* INTERACTIVE REVENUE CHART ORDER DETAILS POPUP / BOTTOM SHEET */}
