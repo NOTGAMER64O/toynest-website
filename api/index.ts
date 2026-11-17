@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const ROOT_DIR = process.cwd();
 
@@ -1290,9 +1290,9 @@ app.post('/api/owner/ai/scan', async (req, res) => {
           usedGemini = true;
         }
       } catch (geminiErr: any) {
-        console.warn(
-          'Gemini website scan synthesis warning (using deterministic factual scan):',
-          geminiErr?.message || geminiErr
+        console.info(
+          'Gemini website scan synthesis skipped (using verified deterministic scan):',
+          String(geminiErr?.status || geminiErr?.name || 'unavailable')
         );
         geminiStatusNote =
           'Website data scanned and verified locally; Gemini AI synthesis encountered a connection/key issue so verified deterministic summary was saved.';
@@ -1460,40 +1460,76 @@ async function handleAiSuggestQuestion(reqBody: any) {
     '8. List the exact titles/sources used in usedSources.',
   ].join('\n');
 
-  const response = await ai.models.generateContent({
-    model: PLAYNIX_GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          suggestedAnswer: { type: Type.STRING },
-          groundingStatus: {
-            type: Type.STRING,
-            enum: ['verified', 'partial', 'missing_info'],
-          },
-          confidence: {
-            type: Type.STRING,
-            enum: ['high', 'medium', 'low'],
-          },
-          missingInfoNote: { type: Type.STRING },
-          usedSources: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
+  const suggestConfig = {
+    systemInstruction,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        suggestedAnswer: { type: Type.STRING },
+        groundingStatus: {
+          type: Type.STRING,
+          enum: ['verified', 'partial', 'missing_info'],
         },
-        required: [
-          'suggestedAnswer',
-          'groundingStatus',
-          'confidence',
-          'missingInfoNote',
-          'usedSources',
-        ],
+        confidence: {
+          type: Type.STRING,
+          enum: ['high', 'medium', 'low'],
+        },
+        missingInfoNote: { type: Type.STRING },
+        usedSources: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+        },
       },
+      required: [
+        'suggestedAnswer',
+        'groundingStatus',
+        'confidence',
+        'missingInfoNote',
+        'usedSources',
+      ],
     },
-  });
+  };
+
+  let activeSuggestModel =
+    Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+  const runSuggestOnce = async (modelName: string) => {
+    const cfg: any = {
+      ...suggestConfig,
+      abortSignal: AbortSignal.timeout(9000),
+    };
+    if (modelName === PLAYNIX_GEMINI_MODEL) {
+      cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+    }
+    return ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+      config: cfg,
+    });
+  };
+
+  let response: any;
+  try {
+    response = await runSuggestOnce(activeSuggestModel);
+  } catch (err: any) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    if (
+      activeSuggestModel === PLAYNIX_GEMINI_MODEL &&
+      (err?.status === 503 ||
+        err?.name === 'TimeoutError' ||
+        err?.name === 'AbortError' ||
+        msg.includes('503') ||
+        msg.includes('high demand') ||
+        msg.includes('unavailable') ||
+        msg.includes('aborted'))
+    ) {
+      hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+      activeSuggestModel = 'gemini-3.1-flash-lite';
+      response = await runSuggestOnce(activeSuggestModel);
+    } else {
+      throw err;
+    }
+  }
 
   const parsed = response.text ? JSON.parse(response.text) : null;
   if (!parsed || typeof parsed.suggestedAnswer !== 'string') {
@@ -1521,7 +1557,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
       usedSources: Array.isArray(parsed.usedSources)
         ? parsed.usedSources.map((s: any) => String(s || '').trim()).filter(Boolean).slice(0, 12)
         : [],
-      modelUsed: PLAYNIX_GEMINI_MODEL,
+      modelUsed: activeSuggestModel,
       generatedAt: new Date().toISOString(),
     },
   };
@@ -1563,6 +1599,371 @@ app.post('/api/owner/ai/test-question', async (req, res) => {
       success: false,
       geminiConfigured: getGeminiClient() !== null,
       error: err?.message || 'Could not test AI question right now.',
+    });
+  }
+});
+
+function extractJsonObjectFromText(rawText: string): any | null {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) return null;
+
+  // Strip optional markdown code fences
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function extractGroundingWebSources(response: any): Array<{ title: string; uri: string }> {
+  const chunks = response?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+  const seen = new Set<string>();
+  const out: Array<{ title: string; uri: string }> = [];
+  for (const ch of chunks) {
+    const uri = String(ch?.web?.uri || '').trim();
+    if (!uri || !/^https?:\/\//i.test(uri) || seen.has(uri)) continue;
+    seen.add(uri);
+    const title = String(ch?.web?.title || uri).trim().slice(0, 140);
+    out.push({ title, uri });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+let googleSearchCooldownUntil = 0;
+let hydrogenOverloadCooldownUntil = 0;
+
+app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
+  const { pin } = req.body || {};
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(400).json({
+      success: false,
+      geminiConfigured: false,
+      error:
+        'GEMINI_API_KEY is not configured on the server yet. Add GEMINI_API_KEY in AI Studio Secrets or Vercel Environment Variables.',
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const productName = String(body.productName || '').trim().slice(0, 120);
+    const category = String(body.category || '').trim().slice(0, 60);
+    const description = String(body.description || '').trim().slice(0, 400);
+    const mode = body.mode === 'estimate_final' ? 'estimate_final' : 'ask_or_estimate';
+
+    if (!productName) {
+      return res.status(400).json({
+        success: false,
+        geminiConfigured: true,
+        error: 'Please enter the Toy name first so AI can search market prices.',
+      });
+    }
+
+    const answers: Array<{ id: string; question: string; answer: string }> = Array.isArray(
+      body.answers
+    )
+      ? body.answers
+          .map((a: any) => ({
+            id: String(a?.id || '').trim().slice(0, 40),
+            question: String(a?.question || '').trim().slice(0, 200),
+            answer: String(a?.answer || '').trim().slice(0, 250),
+          }))
+          .filter((a: any) => a.question && a.answer)
+      : [];
+
+    const catalogSample: Array<{ name: string; category: string; price: number }> = Array.isArray(
+      body.catalogSample
+    )
+      ? body.catalogSample
+          .slice(0, 15)
+          .map((p: any) => ({
+            name: String(p?.name || '').slice(0, 80),
+            category: String(p?.category || 'Other').slice(0, 40),
+            price: Number(p?.price) || 0,
+          }))
+          .filter((p: any) => p.name && p.price > 0)
+      : [];
+
+    // Optional small product photo preview uploaded in the Add Product form
+    let imagePart: { inlineData: { mimeType: string; data: string } } | null = null;
+    if (typeof body.imageDataUrl === 'string' && body.imageDataUrl.startsWith('data:image/')) {
+      const m = body.imageDataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
+      if (m && m[2].length <= 600_000) {
+        imagePart = {
+          inlineData: {
+            mimeType: m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase(),
+            data: m[2],
+          },
+        };
+      }
+    }
+
+    const needsQuestionsStage = answers.length === 0 && mode !== 'estimate_final';
+
+    const instructionText = needsQuestionsStage
+      ? [
+          'You are the Playnix AI Pricing Advisor for an Indian toy & hobby shop (Playnix Shop, prices in Indian Rupees INR ₹).',
+          'Use Google Search to check live online market prices in India (Amazon.in, Flipkart, toy stores, Etsy/3D-print hobby market if collectible) for this product.',
+          'Then inspect what details are MISSING from the owner input that affect the selling price—especially SIZE / SCALE (e.g., cm/inches or 1:64 / 1:32 / 1:24 / 1:18), MATERIAL (diecast metal vs plastic vs 3D-printed PLA/resin vs plush), and KEY FEATURES/CONDITION (e.g., pullback, lights/sound, remote control, official branded box vs generic loose piece).',
+          '',
+          `PRODUCT_NAME: ${productName}`,
+          `CATEGORY: ${category || 'Not specified'}`,
+          `DESCRIPTION: ${description || 'Not provided'}`,
+          catalogSample.length > 0
+            ? `PLAYNIX_SHOP_EXISTING_PRICE_CONTEXT (for store price positioning): ${JSON.stringify(catalogSample)}`
+            : '',
+          '',
+          'TASK: Return ONLY a single valid JSON object (no markdown fences, no extra prose outside JSON) matching this exact structure:',
+          '{',
+          '  "stage": "questions",',
+          '  "marketFindings": "1-2 short sentences summarizing what similar items sell for online in India right now.",',
+          '  "preliminaryRangeINR": { "min": 150, "max": 600 },',
+          '  "questions": [',
+          '    {',
+          '      "id": "size",',
+          '      "question": "What is the approximate size or scale of this toy?",',
+          '      "reason": "Price changes heavily by size/scale (e.g. mini pocket size vs large display size).",',
+          '      "placeholder": "e.g., ~14 cm or 1:32 scale",',
+          '      "quickOptions": ["Mini (~6-8 cm)", "Medium (~12-16 cm)", "Large (~20-25 cm)", "XL (25+ cm)"]',
+          '    }',
+          '  ]',
+          '}',
+          'Rules:',
+          '- Generate 2 to 4 crisp, practical questions tailored specifically to THIS product (ALWAYS include a Size / Scale question first, plus 1-3 key value drivers like Material, Features/Battery/RC, or Brand/Packaging if not already stated).',
+          '- Each question must have 3-5 short tappable quickOptions appropriate for the Indian toy market.',
+          '- All prices must be realistic integer INR numbers.',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : [
+          'You are the Playnix AI Pricing Advisor for an Indian toy & hobby shop (Playnix Shop, prices in Indian Rupees INR ₹).',
+          'Use Google Search to verify live Indian market prices (Amazon.in, Flipkart, Indian toy stores, hobby sellers) matching the EXACT product AND the owner answers below (especially the exact size/scale, material, and features).',
+          '',
+          `PRODUCT_NAME: ${productName}`,
+          `CATEGORY: ${category || 'Not specified'}`,
+          `DESCRIPTION: ${description || 'Not provided'}`,
+          `OWNER_PROVIDED_ANSWERS: ${JSON.stringify(answers)}`,
+          catalogSample.length > 0
+            ? `PLAYNIX_SHOP_EXISTING_PRICE_CONTEXT: ${JSON.stringify(catalogSample)}`
+            : '',
+          '',
+          'TASK: Calculate the best, competitive selling price in INR (₹) for this specific variant/size based on live web prices and shop context.',
+          'Return ONLY a single valid JSON object (no markdown fences, no extra prose outside JSON) matching this exact structure:',
+          '{',
+          '  "stage": "price_ready",',
+          '  "recommendedPriceINR": 299,',
+          '  "priceRangeINR": { "min": 249, "max": 399 },',
+          '  "reasoning": "2 short, straight sentences explaining why this ₹ price fits the exact size/material and current Indian online listings.",',
+          '  "sizeAndSpecSummary": "Size: ~14 cm (1:32) · Material: Diecast Metal · Pullback",',
+          '  "suggestedDescriptionSnippet": "Compact 1:32 (~14 cm) metal diecast model car with pullback action."',
+          '}',
+          'Rules:',
+          '- recommendedPriceINR, priceRangeINR.min, and priceRangeINR.max must be realistic positive integers in INR (₹).',
+          '- Never invent fake brand claims; stick strictly to what the owner stated plus verified market comparisons.',
+          '- Keep reasoning concise and straight to the point.',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+    const contentsPayload = imagePart
+      ? { parts: [imagePart, { text: instructionText }] }
+      : instructionText;
+
+    const isTransientOverload = (e: any) => {
+      const m = String(e?.message || e || '').toLowerCase();
+      return (
+        e?.status === 503 ||
+        e?.name === 'TimeoutError' ||
+        e?.name === 'AbortError' ||
+        m.includes('503') ||
+        m.includes('unavailable') ||
+        m.includes('high demand') ||
+        m.includes('overloaded') ||
+        m.includes('aborted') ||
+        m.includes('timed out')
+      );
+    };
+
+    const isSearchQuotaError = (e: any) => {
+      const m = String(e?.message || e || '').toLowerCase();
+      return (
+        e?.status === 429 ||
+        e?.name === 'TimeoutError' ||
+        e?.name === 'AbortError' ||
+        m.includes('429') ||
+        m.includes('resource_exhausted') ||
+        m.includes('quota') ||
+        m.includes('aborted') ||
+        m.includes('timed out')
+      );
+    };
+
+    const callModelWithRetry = async (withSearch: boolean) => {
+      const runOnce = async (modelName: string, timeoutMs: number) => {
+        const cfg: any = withSearch
+          ? { tools: [{ googleSearch: {} }], abortSignal: AbortSignal.timeout(timeoutMs) }
+          : { responseMimeType: 'application/json', abortSignal: AbortSignal.timeout(timeoutMs) };
+        if (modelName === PLAYNIX_GEMINI_MODEL) {
+          cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        return ai.models.generateContent({
+          model: modelName,
+          contents: contentsPayload,
+          config: cfg,
+        });
+      };
+
+      const primaryModel =
+        Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+
+      try {
+        return {
+          resp: await runOnce(primaryModel, withSearch ? 8500 : 12000),
+          modelUsed: primaryModel,
+        };
+      } catch (firstErr: any) {
+        if (isTransientOverload(firstErr) && primaryModel === PLAYNIX_GEMINI_MODEL) {
+          hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+          return {
+            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 7000 : 10000),
+            modelUsed: 'gemini-3.1-flash-lite',
+          };
+        }
+        throw firstErr;
+      }
+    };
+
+    let response: any;
+    let modelUsed = PLAYNIX_GEMINI_MODEL;
+    let webSearchUsed = true;
+    let webSearchNote = '';
+    const searchAvailableNow = Date.now() >= googleSearchCooldownUntil;
+
+    if (searchAvailableNow) {
+      try {
+        const out = await callModelWithRetry(true);
+        response = out.resp;
+        modelUsed = out.modelUsed;
+      } catch (searchErr: any) {
+        if (!isSearchQuotaError(searchErr)) {
+          throw searchErr;
+        }
+        console.info(
+          'Google Search grounding unavailable on current quota; using standard Gemini toy market pricing estimate.'
+        );
+        googleSearchCooldownUntil = Date.now() + 15 * 60_000;
+        webSearchUsed = false;
+        webSearchNote =
+          'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).';
+        const fallbackOut = await callModelWithRetry(false);
+        response = fallbackOut.resp;
+        modelUsed = fallbackOut.modelUsed;
+      }
+    } else {
+      webSearchUsed = false;
+      webSearchNote =
+        'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).';
+      const fallbackOut = await callModelWithRetry(false);
+      response = fallbackOut.resp;
+      modelUsed = fallbackOut.modelUsed;
+    }
+
+    const parsed = extractJsonObjectFromText(response?.text || '');
+    const webSources = webSearchUsed ? extractGroundingWebSources(response) : [];
+
+    if (!parsed) {
+      throw new Error('Playnix AI could not structure the pricing result. Please try again.');
+    }
+
+    if (needsQuestionsStage && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+      const sanitizedQuestions = parsed.questions
+        .slice(0, 4)
+        .map((q: any, idx: number) => ({
+          id: String(q?.id || `q_${idx + 1}`).trim().slice(0, 40),
+          question: String(q?.question || '').trim().slice(0, 220),
+          reason: String(q?.reason || '').trim().slice(0, 220),
+          placeholder: String(q?.placeholder || 'Type your answer...').trim().slice(0, 100),
+          quickOptions: Array.isArray(q?.quickOptions)
+            ? q.quickOptions.map((o: any) => String(o || '').trim()).filter(Boolean).slice(0, 5)
+            : [],
+        }))
+        .filter((q: any) => q.question);
+
+      const minPrelim = Math.max(10, Math.round(Number(parsed?.preliminaryRangeINR?.min) || 0));
+      const maxPrelim = Math.max(minPrelim, Math.round(Number(parsed?.preliminaryRangeINR?.max) || 0));
+
+      return res.json({
+        success: true,
+        geminiConfigured: true,
+        webSearchUsed,
+        webSearchNote,
+        stage: 'questions',
+        marketFindings: String(parsed.marketFindings || '').trim().slice(0, 500),
+        preliminaryRangeINR:
+          minPrelim > 0 && maxPrelim >= minPrelim
+            ? { min: minPrelim, max: maxPrelim }
+            : null,
+        questions: sanitizedQuestions,
+        webSources,
+        modelUsed,
+      });
+    }
+
+    const recommended = Math.max(10, Math.round(Number(parsed.recommendedPriceINR) || 0));
+    const minPrice = Math.max(10, Math.round(Number(parsed?.priceRangeINR?.min) || Math.round(recommended * 0.85)));
+    const maxPrice = Math.max(minPrice, Math.round(Number(parsed?.priceRangeINR?.max) || Math.round(recommended * 1.2)));
+
+    if (!recommended) {
+      throw new Error('Could not determine a valid INR price. Please try adding more details.');
+    }
+
+    return res.json({
+      success: true,
+      geminiConfigured: true,
+      webSearchUsed,
+      webSearchNote,
+      stage: 'price_ready',
+      recommendedPriceINR: recommended,
+      priceRangeINR: { min: minPrice, max: maxPrice },
+      reasoning: String(parsed.reasoning || '').trim().slice(0, 600),
+      sizeAndSpecSummary: String(parsed.sizeAndSpecSummary || '').trim().slice(0, 240),
+      suggestedDescriptionSnippet: String(parsed.suggestedDescriptionSnippet || '').trim().slice(0, 240),
+      webSources,
+      modelUsed,
+    });
+  } catch (err: any) {
+    console.error('Error in /api/owner/ai/product-price-advisor:', err);
+    let friendlyError = String(err?.message || 'Failed to research product prices. Please try again.');
+    try {
+      const parsedErr = JSON.parse(friendlyError);
+      if (parsedErr?.error?.status === 'RESOURCE_EXHAUSTED' || parsedErr?.error?.code === 429) {
+        friendlyError = 'Gemini API quota limit reached right now. Please wait a minute or check your Gemini API plan/quota.';
+      } else if (parsedErr?.error?.message) {
+        friendlyError = String(parsedErr.error.message);
+      }
+    } catch {}
+    res.status(500).json({
+      success: false,
+      geminiConfigured: getGeminiClient() !== null,
+      error: friendlyError,
     });
   }
 });

@@ -8965,6 +8965,420 @@ footer > button:hover {
   line-height: 1.4;
 }
 
+/* ==========================================================================
+   AI PRODUCT PRICE ADVISOR (ADD/EDIT PRODUCT FORM)
+   ========================================================================== */
+
+.playnix-price-advisor-wrap {
+  margin: -4px 0 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.playnix-price-advisor-trigger-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.playnix-price-advisor-launch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 13px;
+  border-radius: 9px;
+  border: 1.5px solid #5f7946;
+  background: #f2f6ea;
+  color: #273824;
+  font-size: 0.82rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.12s ease;
+}
+
+.playnix-price-advisor-launch-btn:hover:not(:disabled) {
+  background: #e5edd6;
+  border-color: #3f592a;
+}
+
+.playnix-price-advisor-launch-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.playnix-price-advisor-hint {
+  font-size: 0.73rem;
+  color: #67725e;
+  line-height: 1.35;
+}
+
+.playnix-price-advisor-card {
+  border-radius: 12px;
+  border: 1.5px solid #cfd9bc;
+  background: #fbfcf7;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 4px 14px rgba(39, 56, 36, 0.06);
+}
+
+.playnix-price-advisor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.playnix-price-advisor-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #273824;
+  font-size: 0.9rem;
+}
+
+.playnix-price-web-tag {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #e3ecd3;
+  color: #335224;
+}
+
+.playnix-price-close-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid #d5dbc7;
+  background: #fff;
+  color: #4a5543;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.playnix-price-stale-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fef7e0;
+  border: 1px solid #f0d788;
+  font-size: 0.76rem;
+  color: #6b4e09;
+}
+
+.playnix-price-stale-banner button {
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid #b88b1d;
+  background: #fff;
+  color: #5c4005;
+  font-size: 0.73rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.playnix-price-error {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.playnix-price-loading-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f1f5e8;
+  border: 1px solid #d3dfbf;
+  color: #273824;
+}
+
+.playnix-price-loading-box strong {
+  display: block;
+  font-size: 0.84rem;
+  margin-bottom: 2px;
+}
+
+.playnix-price-loading-box p {
+  margin: 0;
+  font-size: 0.76rem;
+  color: #57634f;
+}
+
+.playnix-price-questions-stage,
+.playnix-price-result-stage {
+  display: grid;
+  gap: 11px;
+}
+
+.playnix-price-market-summary {
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: #f3f6ec;
+  border: 1px solid #dbe3ca;
+  display: grid;
+  gap: 5px;
+}
+
+.playnix-price-prelim-badge {
+  display: inline-block;
+  width: fit-content;
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #2f5121;
+  background: #e2edd1;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.playnix-price-market-summary p {
+  margin: 0;
+  font-size: 0.77rem;
+  color: #46513e;
+  line-height: 1.4;
+}
+
+.playnix-price-step-label {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #2f3b2a;
+}
+
+.playnix-price-question-list {
+  display: grid;
+  gap: 10px;
+}
+
+.playnix-price-question-item {
+  padding: 10px;
+  border-radius: 9px;
+  background: #ffffff;
+  border: 1px solid #dfe5d3;
+  display: grid;
+  gap: 7px;
+}
+
+.playnix-price-q-title {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.playnix-price-q-title span {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: #1f2b1e;
+}
+
+.playnix-price-q-title small {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #65705d;
+}
+
+.playnix-price-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.playnix-price-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid #cdd5be;
+  background: #f6f8f1;
+  color: #2b3a26;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.playnix-price-chip:hover {
+  background: #e9f0dc;
+  border-color: #79945d;
+}
+
+.playnix-price-chip.is-selected {
+  background: #3f592a;
+  border-color: #3f592a;
+  color: #ffffff;
+}
+
+.playnix-price-answer-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #cfd6c2;
+  background: #fcfdf9;
+  font-size: 0.82rem;
+  color: #1f2b1e;
+}
+
+.playnix-price-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.playnix-price-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  padding: 9px 13px;
+}
+
+.playnix-price-result-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #eef4e2;
+  border: 1.5px solid #bfd1a1;
+}
+
+.playnix-price-result-eyebrow {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #466131;
+}
+
+.playnix-price-result-amount {
+  font-size: 1.55rem;
+  font-weight: 900;
+  color: #1e3218;
+  line-height: 1.15;
+}
+
+.playnix-price-result-range {
+  display: block;
+  font-size: 0.74rem;
+  color: #4f5e47;
+  margin-top: 2px;
+}
+
+.playnix-price-apply-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  border: none;
+  background: #3f592a;
+  color: #ffffff;
+  font-size: 0.82rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.playnix-price-apply-btn.is-applied {
+  background: #1d6b3a;
+}
+
+.playnix-price-spec-pill {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #f5f7ef;
+  border: 1px solid #dbe2cd;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #2f3e29;
+}
+
+.playnix-price-reasoning {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #3e4937;
+}
+
+.playnix-price-desc-helper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px dashed #c8d2b6;
+  font-size: 0.76rem;
+  color: #47533f;
+}
+
+.playnix-price-desc-helper button {
+  padding: 6px 10px;
+  font-size: 0.74rem;
+}
+
+.playnix-price-sources {
+  padding-top: 9px;
+  border-top: 1px solid #e4e8d8;
+  display: grid;
+  gap: 5px;
+}
+
+.playnix-price-sources > span {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #6a7561;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.playnix-price-sources-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.playnix-price-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #f2f4ec;
+  border: 1px solid #dce1d0;
+  color: #385027;
+  font-size: 0.71rem;
+  font-weight: 600;
+  text-decoration: none;
+  max-width: 100%;
+}
+
+.playnix-price-source-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.playnix-price-source-link:hover {
+  background: #e5ebd9;
+}
+
+
 
 
 

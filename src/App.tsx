@@ -375,6 +375,7 @@ import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown'
 import { ProductQuestionsSection } from './components/ProductQuestionsSection';
 import { OwnerProductQuestionsManager } from './components/OwnerProductQuestionsManager';
 import { OwnerPlaynixAiAssistant } from './components/OwnerPlaynixAiAssistant';
+import { OwnerProductPriceAdvisor } from './components/OwnerProductPriceAdvisor';
 import {
   OrderSuccessCelebration,
   type OrderCelebrationData,
@@ -7267,6 +7268,36 @@ export default function App() {
                       required
                     />
                   </label>
+
+                  <OwnerProductPriceAdvisor
+                    pin={ownerPin.trim() || DEFAULT_OWNER_PIN}
+                    productName={productForm.name}
+                    category={productForm.category}
+                    description={productForm.description}
+                    catalogProducts={products}
+                    firstProductImageFile={productImages[0] || null}
+                    firstExistingImageUrl={editExistingImages[0] || null}
+                    onApplyPrice={(suggestedPrice) =>
+                      setProductForm((prev) => ({
+                        ...prev,
+                        price: String(suggestedPrice),
+                      }))
+                    }
+                    onAppendDescription={(snippet) =>
+                      setProductForm((prev) => {
+                        const existingDesc = prev.description.trim();
+                        if (!snippet) return prev;
+                        if (existingDesc.toLowerCase().includes(snippet.toLowerCase())) {
+                          return prev;
+                        }
+                        const combined = existingDesc ? `${existingDesc} ${snippet}` : snippet;
+                        return {
+                          ...prev,
+                          description: combined.slice(0, 250),
+                        };
+                      })
+                    }
+                  />
                   <label>
                     Category
                     <input
