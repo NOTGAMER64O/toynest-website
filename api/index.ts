@@ -1496,7 +1496,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
   const runSuggestOnce = async (modelName: string) => {
     const cfg: any = {
       ...suggestConfig,
-      abortSignal: AbortSignal.timeout(9000),
+      abortSignal: AbortSignal.timeout(6000),
     };
     if (modelName === PLAYNIX_GEMINI_MODEL) {
       cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
@@ -1702,90 +1702,109 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           .filter((p: any) => p.name && p.price > 0)
       : [];
 
-    // Optional small product photo preview uploaded in the Add Product form
-    let imagePart: { inlineData: { mimeType: string; data: string } } | null = null;
-    if (typeof body.imageDataUrl === 'string' && body.imageDataUrl.startsWith('data:image/')) {
-      const m = body.imageDataUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
-      if (m && m[2].length <= 600_000) {
-        imagePart = {
+    // Review ALL provided product photos (up to 5 small previews) alongside toy name
+    const imageParts: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+    const rawImagesInput: string[] = [];
+    if (Array.isArray(body.imageDataUrls)) {
+      for (const u of body.imageDataUrls.slice(0, 5)) {
+        if (typeof u === 'string') rawImagesInput.push(u);
+      }
+    }
+    if (rawImagesInput.length === 0 && typeof body.imageDataUrl === 'string') {
+      rawImagesInput.push(body.imageDataUrl);
+    }
+
+    let totalImageBytes = 0;
+    for (const rawUrl of rawImagesInput) {
+      if (!rawUrl.startsWith('data:image/')) continue;
+      const m = rawUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
+      if (m && m[2].length <= 450_000 && totalImageBytes + m[2].length <= 1_400_000) {
+        totalImageBytes += m[2].length;
+        imageParts.push({
           inlineData: {
             mimeType: m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase(),
             data: m[2],
           },
-        };
+        });
       }
     }
 
     const needsQuestionsStage = answers.length === 0 && mode !== 'estimate_final';
+    const photoNotice =
+      imageParts.length > 0
+        ? `Attached ${imageParts.length} product photo(s). FIRST carefully inspect ALL attached photos + the product name (look for scale/size cues, material, packaging/box, moving parts, accessories, finish) before estimating.`
+        : 'No product photos attached; rely on product name, category, description, and web lookup.';
 
     const instructionText = needsQuestionsStage
       ? [
-          'You are the Playnix AI Pricing Advisor for an Indian toy & hobby shop (Playnix Shop, prices in Indian Rupees INR ₹).',
-          'Use Google Search to check live online market prices in India (Amazon.in, Flipkart, toy stores, Etsy/3D-print hobby market if collectible) for this product.',
-          'Then inspect what details are MISSING from the owner input that affect the selling price—especially SIZE / SCALE (e.g., cm/inches or 1:64 / 1:32 / 1:24 / 1:18), MATERIAL (diecast metal vs plastic vs 3D-printed PLA/resin vs plush), and KEY FEATURES/CONDITION (e.g., pullback, lights/sound, remote control, official branded box vs generic loose piece).',
+          'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
+          photoNotice,
+          'Use Google Search to quickly check current Indian online prices and product specs (Amazon.in, Flipkart, toy stores).',
+          'Identify what crucial price-affecting details are STILL unclear after inspecting the toy name and photos (especially SIZE / SCALE, MATERIAL, and FEATURES/PACKAGING).',
           '',
           `PRODUCT_NAME: ${productName}`,
           `CATEGORY: ${category || 'Not specified'}`,
-          `DESCRIPTION: ${description || 'Not provided'}`,
+          `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
           catalogSample.length > 0
-            ? `PLAYNIX_SHOP_EXISTING_PRICE_CONTEXT (for store price positioning): ${JSON.stringify(catalogSample)}`
+            ? `SHOP_PRICE_CONTEXT: ${JSON.stringify(catalogSample.slice(0, 8))}`
             : '',
           '',
-          'TASK: Return ONLY a single valid JSON object (no markdown fences, no extra prose outside JSON) matching this exact structure:',
+          'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
           '{',
           '  "stage": "questions",',
-          '  "marketFindings": "1-2 short sentences summarizing what similar items sell for online in India right now.",',
+          '  "imageReviewSummary": "1 concise sentence stating what you observed from reviewing the product name and attached photo(s).",',
+          '  "marketFindings": "1-2 short sentences on current Indian online prices for this item.",',
           '  "preliminaryRangeINR": { "min": 150, "max": 600 },',
           '  "questions": [',
           '    {',
           '      "id": "size",',
           '      "question": "What is the approximate size or scale of this toy?",',
-          '      "reason": "Price changes heavily by size/scale (e.g. mini pocket size vs large display size).",',
+          '      "reason": "Price changes significantly by size/scale.",',
           '      "placeholder": "e.g., ~14 cm or 1:32 scale",',
           '      "quickOptions": ["Mini (~6-8 cm)", "Medium (~12-16 cm)", "Large (~20-25 cm)", "XL (25+ cm)"]',
           '    }',
           '  ]',
           '}',
           'Rules:',
-          '- Generate 2 to 4 crisp, practical questions tailored specifically to THIS product (ALWAYS include a Size / Scale question first, plus 1-3 key value drivers like Material, Features/Battery/RC, or Brand/Packaging if not already stated).',
-          '- Each question must have 3-5 short tappable quickOptions appropriate for the Indian toy market.',
-          '- All prices must be realistic integer INR numbers.',
+          '- Generate 2 to 3 crisp, fast questions (always Size/Scale first unless clearly shown on box/name, plus Material/Features).',
+          '- Keep all text concise.',
         ]
           .filter(Boolean)
           .join('\n')
       : [
-          'You are the Playnix AI Pricing Advisor for an Indian toy & hobby shop (Playnix Shop, prices in Indian Rupees INR ₹).',
-          'Use Google Search to verify live Indian market prices (Amazon.in, Flipkart, Indian toy stores, hobby sellers) matching the EXACT product AND the owner answers below (especially the exact size/scale, material, and features).',
+          'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
+          photoNotice,
+          'Use Google Search to check Indian online prices and specs matching the product name, attached photos, AND owner answers.',
           '',
           `PRODUCT_NAME: ${productName}`,
           `CATEGORY: ${category || 'Not specified'}`,
-          `DESCRIPTION: ${description || 'Not provided'}`,
+          `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
           `OWNER_PROVIDED_ANSWERS: ${JSON.stringify(answers)}`,
           catalogSample.length > 0
-            ? `PLAYNIX_SHOP_EXISTING_PRICE_CONTEXT: ${JSON.stringify(catalogSample)}`
+            ? `SHOP_PRICE_CONTEXT: ${JSON.stringify(catalogSample.slice(0, 8))}`
             : '',
           '',
-          'TASK: Calculate the best, competitive selling price in INR (₹) for this specific variant/size based on live web prices and shop context.',
-          'Return ONLY a single valid JSON object (no markdown fences, no extra prose outside JSON) matching this exact structure:',
+          'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
           '{',
           '  "stage": "price_ready",',
+          '  "imageReviewSummary": "1 concise sentence summarizing what you observed from the toy name & attached photo(s).",',
           '  "recommendedPriceINR": 299,',
           '  "priceRangeINR": { "min": 249, "max": 399 },',
-          '  "reasoning": "2 short, straight sentences explaining why this ₹ price fits the exact size/material and current Indian online listings.",',
-          '  "sizeAndSpecSummary": "Size: ~14 cm (1:32) · Material: Diecast Metal · Pullback",',
-          '  "suggestedDescriptionSnippet": "Compact 1:32 (~14 cm) metal diecast model car with pullback action."',
+          '  "reasoning": "1-2 short, straight sentences explaining why this ₹ price fits the size, visual appearance, and market listings.",',
+          '  "sizeAndSpecSummary": "Size: ~14 cm (1:32) · Material: Diecast Metal",',
+          '  "suggestedDescription": "Clean, customer-ready Playnix Shop description under 220 characters accurately describing what is visible in photos + owner specs."',
           '}',
           'Rules:',
           '- recommendedPriceINR, priceRangeINR.min, and priceRangeINR.max must be realistic positive integers in INR (₹).',
-          '- Never invent fake brand claims; stick strictly to what the owner stated plus verified market comparisons.',
-          '- Keep reasoning concise and straight to the point.',
+          '- suggestedDescription MUST be <= 220 characters, factual (based only on name, visible photo details, and owner answers), and ready for the storefront.',
         ]
           .filter(Boolean)
           .join('\n');
 
-    const contentsPayload = imagePart
-      ? { parts: [imagePart, { text: instructionText }] }
-      : instructionText;
+    const contentsPayload =
+      imageParts.length > 0
+        ? { parts: [...imageParts, { text: instructionText }] }
+        : instructionText;
 
     const isTransientOverload = (e: any) => {
       const m = String(e?.message || e || '').toLowerCase();
@@ -1836,14 +1855,14 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
 
       try {
         return {
-          resp: await runOnce(primaryModel, withSearch ? 8500 : 12000),
+          resp: await runOnce(primaryModel, withSearch ? 5500 : 8000),
           modelUsed: primaryModel,
         };
       } catch (firstErr: any) {
         if (isTransientOverload(firstErr) && primaryModel === PLAYNIX_GEMINI_MODEL) {
           hydrogenOverloadCooldownUntil = Date.now() + 60_000;
           return {
-            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 7000 : 10000),
+            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 5000 : 7500),
             modelUsed: 'gemini-3.1-flash-lite',
           };
         }
@@ -1893,6 +1912,8 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       throw new Error('Playnix AI could not structure the pricing result. Please try again.');
     }
 
+    const imageReviewSummary = String(parsed.imageReviewSummary || '').trim().slice(0, 320);
+
     if (needsQuestionsStage && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
       const sanitizedQuestions = parsed.questions
         .slice(0, 4)
@@ -1915,6 +1936,8 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
         geminiConfigured: true,
         webSearchUsed,
         webSearchNote,
+        reviewedPhotosCount: imageParts.length,
+        imageReviewSummary,
         stage: 'questions',
         marketFindings: String(parsed.marketFindings || '').trim().slice(0, 500),
         preliminaryRangeINR:
@@ -1935,17 +1958,26 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       throw new Error('Could not determine a valid INR price. Please try adding more details.');
     }
 
+    const cleanSuggestedDescription = String(
+      parsed.suggestedDescription || parsed.suggestedDescriptionSnippet || ''
+    )
+      .trim()
+      .slice(0, 240);
+
     return res.json({
       success: true,
       geminiConfigured: true,
       webSearchUsed,
       webSearchNote,
+      reviewedPhotosCount: imageParts.length,
+      imageReviewSummary,
       stage: 'price_ready',
       recommendedPriceINR: recommended,
       priceRangeINR: { min: minPrice, max: maxPrice },
       reasoning: String(parsed.reasoning || '').trim().slice(0, 600),
       sizeAndSpecSummary: String(parsed.sizeAndSpecSummary || '').trim().slice(0, 240),
-      suggestedDescriptionSnippet: String(parsed.suggestedDescriptionSnippet || '').trim().slice(0, 240),
+      suggestedDescription: cleanSuggestedDescription,
+      suggestedDescriptionSnippet: cleanSuggestedDescription,
       webSources,
       modelUsed,
     });

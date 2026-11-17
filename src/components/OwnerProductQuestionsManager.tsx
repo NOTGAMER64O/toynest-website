@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bot,
@@ -80,7 +80,25 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const [aiDecisionByQId, setAiDecisionByQId] = useState<
     Record<string, 'pending_review' | 'approved' | 'edited' | 'rejected'>
   >({});
-  const replyTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const selectedQuestionIdRef = useRef<string | null>(null);
+  const replyDraftRef = useRef<string>('');
+  const hasManualEditRef = useRef<boolean>(false);
+  const autoDraftedIdsRef = useRef<Set<string>>(new Set());
+  const inFlightIdsRef = useRef<Set<string>>(new Set());
+  const questionsRef = useRef<ProductQuestion[]>(questions);
+
+  useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
+
+  useEffect(() => {
+    selectedQuestionIdRef.current = selectedQuestionId;
+  }, [selectedQuestionId]);
+
+  useEffect(() => {
+    replyDraftRef.current = replyDraft;
+  }, [replyDraft]);
 
   const productLookup = useMemo(() => {
     const map = new Map<string, Product>();
@@ -142,41 +160,142 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     return guestLabel;
   };
 
+  const handleGenerateAiSuggestion = async (
+    item: ProductQuestion,
+    autoFillIfEmpty = true,
+    isBackgroundPrefetch = false
+  ) => {
+    if (!onSuggestAiReply) return;
+    if (inFlightIdsRef.current.has(item.id)) return;
+    inFlightIdsRef.current.add(item.id);
+    const liveProd = productLookup.get(item.productId) || null;
+    const showActiveSpinner = !isBackgroundPrefetch || selectedQuestionIdRef.current === item.id;
+    if (showActiveSpinner) {
+      setAiError('');
+      setModalSuccess('');
+      setAiLoading(true);
+    }
+    try {
+      const res = await onSuggestAiReply(item, liveProd);
+      if (!res.success || !res.suggestion) {
+        if (!isBackgroundPrefetch || selectedQuestionIdRef.current === item.id) {
+          setAiError(
+            res.error || 'Could not generate a suggested reply. You can still write a custom answer manually.'
+          );
+        }
+        return;
+      }
+      setAiSuggestionsByQId((prev) => ({ ...prev, [item.id]: res.suggestion! }));
+
+      const shouldAutoFill = autoFillIfEmpty && !(item.answer || '').trim();
+      setAiDecisionByQId((prev) => ({
+        ...prev,
+        [item.id]: shouldAutoFill ? 'approved' : 'pending_review',
+      }));
+
+      const latestItem = questionsRef.current.find((q) => q.id === item.id) || item;
+      const alreadyPublished = Boolean((latestItem.answer || '').trim());
+      if (
+        shouldAutoFill &&
+        !alreadyPublished &&
+        selectedQuestionIdRef.current === item.id &&
+        (!hasManualEditRef.current || !replyDraftRef.current.trim())
+      ) {
+        replyDraftRef.current = res.suggestion.suggestedAnswer;
+        setReplyDraft(res.suggestion.suggestedAnswer);
+        setModalError('');
+        setModalSuccess(
+          'Auto-filled by Playnix AI — review or edit freely, then click "Send & Publish Answer".'
+        );
+      }
+    } catch (err: any) {
+      if (!isBackgroundPrefetch || selectedQuestionIdRef.current === item.id) {
+        setAiError(err?.message || 'Playnix AI suggestion failed. You can still reply manually.');
+      }
+    } finally {
+      inFlightIdsRef.current.delete(item.id);
+      if (showActiveSpinner || selectedQuestionIdRef.current === item.id) {
+        setAiLoading(false);
+      }
+    }
+  };
+
   const openQuestionDetails = (item: ProductQuestion) => {
+    selectedQuestionIdRef.current = item.id;
+    hasManualEditRef.current = false;
     setSelectedQuestionId(item.id);
-    setReplyDraft(item.answer || '');
     setModalError('');
     setModalSuccess('');
     setAiError('');
     setConfirmDeleteId(null);
-  };
 
-  const handleGenerateAiSuggestion = async (item: ProductQuestion) => {
-    if (!onSuggestAiReply) return;
-    const liveProd = productLookup.get(item.productId) || null;
-    setAiError('');
-    setModalSuccess('');
-    setAiLoading(true);
-    try {
-      const res = await onSuggestAiReply(item, liveProd);
-      if (!res.success || !res.suggestion) {
-        setAiError(
-          res.error || 'Could not generate a suggested reply. You can still write a custom answer manually.'
-        );
-        return;
+    if (item.answer && item.answer.trim()) {
+      replyDraftRef.current = item.answer;
+      setReplyDraft(item.answer);
+      return;
+    }
+
+    const cached = aiSuggestionsByQId[item.id];
+    const prevDecision = aiDecisionByQId[item.id];
+    if (cached && prevDecision !== 'rejected') {
+      replyDraftRef.current = cached.suggestedAnswer;
+      setReplyDraft(cached.suggestedAnswer);
+      if (prevDecision !== 'edited') {
+        setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'approved' }));
       }
-      setAiSuggestionsByQId((prev) => ({ ...prev, [item.id]: res.suggestion! }));
-      setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'pending_review' }));
-    } catch (err: any) {
-      setAiError(err?.message || 'Playnix AI suggestion failed. You can still reply manually.');
-    } finally {
-      setAiLoading(false);
+      setModalSuccess(
+        'Auto-filled by Playnix AI — review or edit freely, then click "Send & Publish Answer".'
+      );
+      return;
+    }
+
+    replyDraftRef.current = '';
+    setReplyDraft('');
+    if (aiEnabled && onSuggestAiReply) {
+      setAiLoading(inFlightIdsRef.current.has(item.id));
+      void handleGenerateAiSuggestion(item, true, false);
     }
   };
+
+  // Automatically pre-fill AI suggested answers for pending customer questions in background
+  useEffect(() => {
+    if (!aiEnabled || !onSuggestAiReply) return;
+    const pendingUnanswered = questions
+      .filter(
+        (q) =>
+          q.status === 'Pending' &&
+          !(q.answer || '').trim() &&
+          !aiSuggestionsByQId[q.id] &&
+          !autoDraftedIdsRef.current.has(q.id) &&
+          !inFlightIdsRef.current.has(q.id)
+      )
+      .slice(0, 3);
+
+    if (pendingUnanswered.length === 0) return;
+    let cancelled = false;
+
+    for (const q of pendingUnanswered) {
+      autoDraftedIdsRef.current.add(q.id);
+    }
+
+    void (async () => {
+      for (const q of pendingUnanswered) {
+        if (cancelled) break;
+        await handleGenerateAiSuggestion(q, true, true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questions, aiEnabled]);
 
   const handleApproveAiSuggestion = (item: ProductQuestion) => {
     const sug = aiSuggestionsByQId[item.id];
     if (!sug) return;
+    hasManualEditRef.current = false;
+    replyDraftRef.current = sug.suggestedAnswer;
     setReplyDraft(sug.suggestedAnswer);
     setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'approved' }));
     setModalError('');
@@ -188,6 +307,8 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const handleEditAiSuggestion = (item: ProductQuestion) => {
     const sug = aiSuggestionsByQId[item.id];
     if (!sug) return;
+    hasManualEditRef.current = false;
+    replyDraftRef.current = sug.suggestedAnswer;
     setReplyDraft(sug.suggestedAnswer);
     setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'edited' }));
     setModalError('');
@@ -198,8 +319,11 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   };
 
   const handleRejectAiSuggestion = (item: ProductQuestion) => {
+    hasManualEditRef.current = false;
+    replyDraftRef.current = '';
+    setReplyDraft('');
     setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'rejected' }));
-    setModalSuccess('AI suggestion rejected. Write your own custom answer below.');
+    setModalSuccess('AI suggestion cleared. Write your own custom answer below.');
     window.setTimeout(() => {
       replyTextareaRef.current?.focus();
     }, 30);
@@ -269,7 +393,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
           <span className="eyebrow">CUSTOMER Q&amp;A</span>
           <h2>Product Questions</h2>
           <p className="owner-questions-subtitle">
-            Click any question to view the linked product details, generate a Playnix AI draft (manual approval required), write a custom reply, mark answered, or remove it.
+            Pending customer questions are automatically drafted &amp; pre-filled by Playnix AI for quick review — nothing is published until you click Send &amp; Publish Answer.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -412,11 +536,15 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
 
                   <p className="owner-question-text">{item.question}</p>
 
-                  {item.answer && (
+                  {item.answer ? (
                     <div className="owner-question-reply-preview">
                       <strong>Owner reply:</strong> {item.answer}
                     </div>
-                  )}
+                  ) : aiSuggestionsByQId[item.id] ? (
+                    <div className="owner-question-reply-preview">
+                      <strong>AI Draft Auto-Filled:</strong> {aiSuggestionsByQId[item.id].suggestedAnswer}
+                    </div>
+                  ) : null}
 
                   <div className="owner-question-date">
                     Submitted {formatInIST(item.createdAt)}
@@ -576,7 +704,10 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                       type="button"
                       className="secondary-btn owner-q-action-btn"
                       disabled={aiLoading}
-                      onClick={() => void handleGenerateAiSuggestion(selectedQuestion)}
+                      onClick={() => {
+                        hasManualEditRef.current = false;
+                        void handleGenerateAiSuggestion(selectedQuestion, true, false);
+                      }}
                     >
                       <Bot size={14} className={aiLoading ? 'refresh-spinning' : ''} />
                       {aiLoading
@@ -704,8 +835,16 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                 rows={4}
                 maxLength={2000}
                 value={replyDraft}
-                onChange={(e) => setReplyDraft(e.target.value)}
-                placeholder="Write a custom answer or approve/edit Playnix AI's suggestion above..."
+                onChange={(e) => {
+                  hasManualEditRef.current = true;
+                  replyDraftRef.current = e.target.value;
+                  setReplyDraft(e.target.value);
+                }}
+                placeholder={
+                  aiLoading && !replyDraft
+                    ? 'Playnix AI is auto-filling a suggested answer...'
+                    : 'Write a custom answer or edit the Playnix AI draft...'
+                }
               />
 
               {modalError && <p className="error-msg" style={{ margin: '0' }}>{modalError}</p>}

@@ -7275,27 +7275,19 @@ export default function App() {
                     category={productForm.category}
                     description={productForm.description}
                     catalogProducts={products}
-                    firstProductImageFile={productImages[0] || null}
-                    firstExistingImageUrl={editExistingImages[0] || null}
+                    productImageFiles={productImages}
+                    existingImageUrls={editExistingImages}
                     onApplyPrice={(suggestedPrice) =>
                       setProductForm((prev) => ({
                         ...prev,
                         price: String(suggestedPrice),
                       }))
                     }
-                    onAppendDescription={(snippet) =>
-                      setProductForm((prev) => {
-                        const existingDesc = prev.description.trim();
-                        if (!snippet) return prev;
-                        if (existingDesc.toLowerCase().includes(snippet.toLowerCase())) {
-                          return prev;
-                        }
-                        const combined = existingDesc ? `${existingDesc} ${snippet}` : snippet;
-                        return {
-                          ...prev,
-                          description: combined.slice(0, 250),
-                        };
-                      })
+                    onSetDescription={(descriptionText) =>
+                      setProductForm((prev) => ({
+                        ...prev,
+                        description: descriptionText.slice(0, 250),
+                      }))
                     }
                   />
                   <label>

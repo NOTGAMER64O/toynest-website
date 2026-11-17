@@ -3,6 +3,7 @@ import {
   Check,
   ExternalLink,
   Globe,
+  Image as ImageIcon,
   RefreshCw,
   SlidersHorizontal,
   Sparkles,
@@ -29,13 +30,13 @@ interface OwnerProductPriceAdvisorProps {
   category: string;
   description: string;
   catalogProducts: Product[];
-  firstProductImageFile: File | null;
-  firstExistingImageUrl?: string | null;
+  productImageFiles: File[];
+  existingImageUrls?: string[];
   onApplyPrice: (price: number) => void;
-  onAppendDescription?: (snippet: string) => void;
+  onSetDescription?: (descriptionText: string) => void;
 }
 
-async function fileToSmallJpegDataUrl(file: File, maxDim = 380): Promise<string | null> {
+async function fileToSmallJpegDataUrl(file: File, maxDim = 340): Promise<string | null> {
   return new Promise((resolve) => {
     try {
       const reader = new FileReader();
@@ -52,7 +53,7 @@ async function fileToSmallJpegDataUrl(file: File, maxDim = 380): Promise<string 
             const ctx = canvas.getContext('2d');
             if (!ctx) return resolve(null);
             ctx.drawImage(img, 0, 0, w, h);
-            resolve(canvas.toDataURL('image/jpeg', 0.65));
+            resolve(canvas.toDataURL('image/jpeg', 0.62));
           } catch {
             resolve(null);
           }
@@ -74,10 +75,10 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   category,
   description,
   catalogProducts,
-  firstProductImageFile,
-  firstExistingImageUrl,
+  productImageFiles,
+  existingImageUrls = [],
   onApplyPrice,
-  onAppendDescription,
+  onSetDescription,
 }) => {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -85,6 +86,8 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   const [lastSearchedName, setLastSearchedName] = useState('');
 
   const [stage, setStage] = useState<'idle' | 'questions' | 'price_ready'>('idle');
+  const [imageReviewSummary, setImageReviewSummary] = useState('');
+  const [reviewedPhotosCount, setReviewedPhotosCount] = useState(0);
   const [marketFindings, setMarketFindings] = useState('');
   const [preliminaryRange, setPreliminaryRange] = useState<{ min: number; max: number } | null>(null);
   const [questions, setQuestions] = useState<PriceAdvisorQuestion[]>([]);
@@ -101,8 +104,8 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   const [appliedPriceFeedback, setAppliedPriceFeedback] = useState(false);
   const [appliedDescFeedback, setAppliedDescFeedback] = useState(false);
 
-  // If the user clears the form or switches toy completely after a completed estimate, show subtle stale hint
   const trimmedName = productName.trim();
+  const totalPhotosAttached = productImageFiles.length + existingImageUrls.length;
   const isNameChangedSinceSearch =
     Boolean(lastSearchedName) &&
     trimmedName.toLowerCase() !== lastSearchedName.toLowerCase();
@@ -112,21 +115,27 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   }, [recommendedPrice]);
 
   const buildPayloadBase = async () => {
-    let imageDataUrl: string | undefined;
-    if (firstProductImageFile) {
-      const tiny = await fileToSmallJpegDataUrl(firstProductImageFile);
-      if (tiny) imageDataUrl = tiny;
-    } else if (
-      firstExistingImageUrl &&
-      firstExistingImageUrl.startsWith('data:image/') &&
-      firstExistingImageUrl.length < 400_000
-    ) {
-      imageDataUrl = firstExistingImageUrl;
+    const imageDataUrls: string[] = [];
+
+    for (const url of existingImageUrls.slice(0, 5)) {
+      if (url && url.startsWith('data:image/') && url.length < 400_000) {
+        imageDataUrls.push(url);
+      }
+    }
+
+    const remainingSlots = Math.max(0, 5 - imageDataUrls.length);
+    if (remainingSlots > 0 && productImageFiles.length > 0) {
+      const encoded = await Promise.all(
+        productImageFiles.slice(0, remainingSlots).map((f) => fileToSmallJpegDataUrl(f))
+      );
+      for (const item of encoded) {
+        if (item) imageDataUrls.push(item);
+      }
     }
 
     const catalogSample = catalogProducts
       .filter((p) => p && p.name && p.price > 0)
-      .slice(0, 12)
+      .slice(0, 10)
       .map((p) => ({
         name: p.name,
         category: p.category || 'Other',
@@ -139,14 +148,14 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
       category: category.trim(),
       description: description.trim(),
       catalogSample,
-      ...(imageDataUrl ? { imageDataUrl } : {}),
+      imageDataUrls,
     };
   };
 
   const runInitialSearchAndQuestions = async () => {
     if (!trimmedName) {
       setOpen(true);
-      setErrorMsg('Enter the Toy name first, then tap Re-check so AI can search market prices online.');
+      setErrorMsg('Enter the Toy name first, then tap Re-check so AI can review the name & photos.');
       return;
     }
 
@@ -176,6 +185,8 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
       setWebSources(Array.isArray(data.webSources) ? data.webSources : []);
       setWebSearchUsed(data.webSearchUsed !== false);
       setWebSearchNote(data.webSearchNote || '');
+      setImageReviewSummary(data.imageReviewSummary || '');
+      setReviewedPhotosCount(Number(data.reviewedPhotosCount) || 0);
 
       if (data.stage === 'questions' && Array.isArray(data.questions) && data.questions.length > 0) {
         setQuestions(data.questions);
@@ -189,7 +200,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
         setPriceRange(data.priceRangeINR || null);
         setReasoning(data.reasoning || '');
         setSizeAndSpecSummary(data.sizeAndSpecSummary || '');
-        setSuggestedDesc(data.suggestedDescriptionSnippet || '');
+        setSuggestedDesc(data.suggestedDescription || data.suggestedDescriptionSnippet || '');
         setStage('price_ready');
       }
     } catch (err: any) {
@@ -244,11 +255,15 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
       setLastSearchedName(trimmedName);
       setWebSearchUsed(data.webSearchUsed !== false);
       setWebSearchNote(data.webSearchNote || '');
+      if (data.imageReviewSummary) setImageReviewSummary(data.imageReviewSummary);
+      if (typeof data.reviewedPhotosCount === 'number') {
+        setReviewedPhotosCount(data.reviewedPhotosCount);
+      }
       setRecommendedPrice(Number(data.recommendedPriceINR) || null);
       setPriceRange(data.priceRangeINR || null);
       setReasoning(data.reasoning || '');
       setSizeAndSpecSummary(data.sizeAndSpecSummary || '');
-      setSuggestedDesc(data.suggestedDescriptionSnippet || '');
+      setSuggestedDesc(data.suggestedDescription || data.suggestedDescriptionSnippet || '');
       if (Array.isArray(data.webSources) && data.webSources.length > 0) {
         setWebSources(data.webSources);
       }
@@ -280,21 +295,23 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
           {loading ? (
             <>
               <RefreshCw size={15} className="refresh-spinning" />
-              <span>Searching Internet &amp; Checking Size…</span>
+              <span>
+                Reviewing Name{totalPhotosAttached > 0 ? ` & ${totalPhotosAttached} Photo(s)` : ''}…
+              </span>
             </>
           ) : (
             <>
               <Globe size={15} />
               <span>
                 {open && stage !== 'idle' && !isNameChangedSinceSearch
-                  ? 'Hide AI Price Advisor'
-                  : 'Ask AI Price (Web Search)'}
+                  ? 'Hide AI Price & Description'
+                  : 'Ask AI Price & Description (Name + Photos)'}
               </span>
             </>
           )}
         </button>
         <small className="playnix-price-advisor-hint">
-          AI searches online prices, asks about size &amp; material, and suggests your ₹ price.
+          AI reviews your toy name{totalPhotosAttached > 0 ? ` and ${totalPhotosAttached} attached photo(s)` : ''}, checks prices, asks size details, and suggests both ₹ price &amp; description.
         </small>
       </div>
 
@@ -303,7 +320,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
           <div className="playnix-price-advisor-head">
             <div className="playnix-price-advisor-title">
               <Sparkles size={15} />
-              <strong>AI Web Price Advisor</strong>
+              <strong>AI Product &amp; Price Advisor</strong>
               <span className="playnix-price-web-tag">
                 {webSearchUsed ? 'Live Internet' : 'AI Market Estimate'}
               </span>
@@ -328,7 +345,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
                 onClick={() => void runInitialSearchAndQuestions()}
                 disabled={loading || !trimmedName}
               >
-                Re-search for new toy
+                Re-check Name &amp; Photos
               </button>
             </div>
           )}
@@ -347,15 +364,27 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
               <div>
                 <strong>
                   {stage === 'questions'
-                    ? `Calculating ₹ price for "${trimmedName}" based on your answers...`
-                    : `Searching live Indian market prices for "${trimmedName}"...`}
+                    ? `Calculating ₹ price & description for "${trimmedName}"...`
+                    : `Reviewing "${trimmedName}"${totalPhotosAttached > 0 ? ` + ${totalPhotosAttached} photo(s)` : ''}...`}
                 </strong>
                 <p>
                   {stage === 'questions'
-                    ? 'Comparing online listings matching your exact size and specs.'
-                    : 'Preparing key questions (size, scale, material) to pinpoint the exact price.'}
+                    ? 'Matching online prices and drafting customer description from your answers.'
+                    : 'Inspecting toy details and preparing quick size/material questions.'}
                 </p>
               </div>
+            </div>
+          )}
+
+          {!loading && imageReviewSummary && stage !== 'idle' && (
+            <div className="playnix-price-spec-pill" style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
+              <ImageIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>
+                <strong>
+                  Reviewed Name{reviewedPhotosCount > 0 ? ` + ${reviewedPhotosCount} Photo(s)` : ''}:
+                </strong>{' '}
+                {imageReviewSummary}
+              </span>
             </div>
           )}
 
@@ -375,7 +404,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
               )}
 
               <p className="playnix-price-step-label">
-                Answer these quick details so AI can tell you the exact price ({answeredCount}/
+                Answer these quick details so AI can suggest the exact price &amp; description ({answeredCount}/
                 {questions.length} filled):
               </p>
 
@@ -440,7 +469,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
                   disabled={answeredCount === 0 || loading}
                   onClick={() => void runCalculatePriceFromAnswers(false)}
                 >
-                  <Sparkles size={15} /> Get Exact ₹ Price
+                  <Sparkles size={15} /> Get Price &amp; Description
                 </button>
                 <button
                   type="button"
@@ -454,7 +483,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
             </div>
           )}
 
-          {/* STAGE 2: RECOMMENDED PRICE RESULT */}
+          {/* STAGE 2: RECOMMENDED PRICE & DESCRIPTION RESULT */}
           {!loading && stage === 'price_ready' && recommendedPrice !== null && (
             <div className="playnix-price-result-stage">
               <div className="playnix-price-result-hero">
@@ -494,21 +523,36 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
 
               {reasoning && <p className="playnix-price-reasoning">{reasoning}</p>}
 
-              {suggestedDesc && onAppendDescription && (
+              {suggestedDesc && onSetDescription && (
                 <div className="playnix-price-desc-helper">
                   <span>
-                    <strong>Suggested spec note:</strong> {suggestedDesc}
+                    <strong>Suggested description:</strong> {suggestedDesc}
                   </span>
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() => {
-                      onAppendDescription(suggestedDesc);
-                      setAppliedDescFeedback(true);
-                    }}
-                  >
-                    {appliedDescFeedback ? '✓ Added to Description' : '+ Add to Description'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        onSetDescription(suggestedDesc);
+                        setAppliedDescFeedback(true);
+                      }}
+                    >
+                      {appliedDescFeedback ? '✓ Description Filled' : 'Use This Description'}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      style={{ padding: '6px 11px', fontSize: '0.74rem' }}
+                      onClick={() => {
+                        onApplyPrice(recommendedPrice);
+                        onSetDescription(suggestedDesc);
+                        setAppliedPriceFeedback(true);
+                        setAppliedDescFeedback(true);
+                      }}
+                    >
+                      Apply Both Price &amp; Description
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -530,7 +574,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
                   className="secondary-btn"
                   onClick={() => void runInitialSearchAndQuestions()}
                 >
-                  <RefreshCw size={14} /> Re-search Web
+                  <RefreshCw size={14} /> Re-check Name &amp; Photos
                 </button>
               </div>
             </div>
