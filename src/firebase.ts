@@ -449,12 +449,21 @@ export async function deleteSuggestionFromCloud(id: string): Promise<void> {
 }
 
 // ----------------- PRODUCTS -----------------
+function sanitizeProductHighlights(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((h) => (typeof h === 'string' ? h.trim().slice(0, 160) : ''))
+    .filter((h) => h.length > 0)
+    .slice(0, 6);
+}
+
 function normalizeProductData(data: any, docId: string): Product {
   const imageUrls = Array.isArray(data.imageUrls) && data.imageUrls.length > 0
     ? data.imageUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
     : data.imageUrl
     ? [String(data.imageUrl)]
     : ['/toys/toy-40ba4ba9-1.jpg'];
+  const highlights = sanitizeProductHighlights(data.highlights);
 
   return {
     id: data.id || docId,
@@ -462,6 +471,7 @@ function normalizeProductData(data: any, docId: string): Product {
     price: typeof data.price === 'number' ? data.price : parseFloat(data.price) || 0,
     category: String(data.category || 'Other').trim(),
     description: String(data.description || '').trim(),
+    ...(highlights.length > 0 ? { highlights } : {}),
     imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
     imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
     available: data.available === false ? false : true,
@@ -566,7 +576,10 @@ export function filterAndRankProducts(products: Product[], rawQuery: string): Pr
     const nameLower = (product.name || '').toLowerCase();
     const categoryLower = (product.category || '').toLowerCase();
     const descLower = (product.description || '').toLowerCase();
-    const combined = `${nameLower} ${categoryLower} ${descLower}`;
+    const highlightsLower = Array.isArray(product.highlights)
+      ? product.highlights.join(' ').toLowerCase()
+      : '';
+    const combined = `${nameLower} ${categoryLower} ${descLower} ${highlightsLower}`;
 
     const allTokensMatch = tokens.every((token) => combined.includes(token));
     if (!allTokensMatch) continue;
@@ -580,12 +593,14 @@ export function filterAndRankProducts(products: Product[], rawQuery: string): Pr
     else if (categoryLower.includes(q)) score += 30;
 
     if (descLower.includes(q)) score += 20;
+    if (highlightsLower.includes(q)) score += 18;
 
     for (const token of tokens) {
       if (nameLower.startsWith(token)) score += 12;
       else if (nameLower.includes(token)) score += 8;
       if (categoryLower.includes(token)) score += 6;
       if (descLower.includes(token)) score += 3;
+      if (highlightsLower.includes(token)) score += 4;
     }
 
     scored.push({ product, score });
@@ -644,12 +659,15 @@ export async function saveProductToCloud(product: Product): Promise<void> {
       ? [product.imageUrl]
       : ['/toys/toy-40ba4ba9-1.jpg'];
 
+    const highlights = sanitizeProductHighlights(product.highlights);
+
     const cleanData = {
       id: product.id,
       name: String(product.name || '').trim(),
       price: typeof product.price === 'number' ? product.price : parseFloat(String(product.price)) || 0,
       category: String(product.category || 'Other').trim(),
       description: String(product.description || '').trim(),
+      highlights,
       imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
       imageUrls: imageUrls,
       available: product.available === false ? false : true,

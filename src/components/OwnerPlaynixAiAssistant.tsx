@@ -563,6 +563,21 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     }
   };
 
+  const handleIgnoreGuidanceQuestion = async (questionId: string) => {
+    setGuidanceErrorMsg('');
+    setGuidanceBannerMsg('');
+    setGuidanceSavingId(questionId);
+    try {
+      await onDismissGuidanceQuestion(questionId);
+      setEditingGuidanceId((prev) => (prev === questionId ? null : prev));
+      setGuidanceBannerMsg('Question moved to Ignored — you can answer it and teach Playnix AI anytime later.');
+    } catch (err: any) {
+      setGuidanceErrorMsg(err?.message || 'Could not move question to Ignored.');
+    } finally {
+      setGuidanceSavingId(null);
+    }
+  };
+
   return (
     <section className="playnix-ai-panel" aria-label="Playnix AI Assistant management">
       {/* Header & Global Controls */}
@@ -954,7 +969,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               className={`owner-q-filter-btn ${guidanceFilter === 'dismissed' ? 'active' : ''}`}
               onClick={() => setGuidanceFilter('dismissed')}
             >
-              Dismissed ({dismissedGuidanceQuestions.length})
+              Ignored ({dismissedGuidanceQuestions.length})
             </button>
           </div>
 
@@ -979,11 +994,13 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                   ? 'No open questions from AI right now'
                   : guidanceFilter === 'answered'
                   ? 'No answered guidance questions yet'
-                  : 'No dismissed questions'}
+                  : 'No ignored questions'}
               </h3>
               <p>
                 {guidanceFilter === 'open'
                   ? 'Click "Let AI Ask What It Needs" above to let AI scan your catalog & pending customer questions and ask you anything it needs clarification on.'
+                  : guidanceFilter === 'dismissed'
+                  ? 'When you ignore an AI question, it stays saved here so you can answer it and teach Playnix AI later anytime.'
                   : 'Switch tabs or answer open AI questions to build verified shop knowledge.'}
               </p>
             </div>
@@ -1043,9 +1060,10 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                               type="button"
                               className="secondary-btn"
                               disabled={guidanceSavingId === item.id}
-                              onClick={() => void onDismissGuidanceQuestion(item.id)}
+                              onClick={() => void handleIgnoreGuidanceQuestion(item.id)}
+                              title="Move to Ignored so you can answer this question later"
                             >
-                              Dismiss
+                              {guidanceSavingId === item.id ? 'Ignoring...' : 'Ignore'}
                             </button>
                           ) : (
                             <button
@@ -1066,7 +1084,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                           </p>
                         )}
                         <div className="playnix-ai-guidance-actions">
-                          {item.status === 'answered' && (
+                          {item.status === 'answered' ? (
                             <button
                               type="button"
                               className="secondary-btn owner-q-action-btn"
@@ -1079,6 +1097,20 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                               }}
                             >
                               <Edit3 size={13} /> Edit Answer
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="primary-btn owner-q-action-btn"
+                              onClick={() => {
+                                setGuidanceDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: item.answer || '',
+                                }));
+                                setEditingGuidanceId(item.id);
+                              }}
+                            >
+                              <MessageSquareText size={13} /> Answer Question
                             </button>
                           )}
                           <button

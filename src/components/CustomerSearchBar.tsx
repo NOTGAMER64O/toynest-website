@@ -1,10 +1,11 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   Search,
   X,
   ChevronRight,
   TrendingUp,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 import {
   type Product,
@@ -24,6 +25,25 @@ interface CustomerSearchBarProps {
   onEnsureCloudProducts?: () => void;
   onSelectProduct: (product: Product) => void;
   formatCurrency: (val: number) => string;
+}
+
+interface AiSearchState {
+  query: string;
+  understoodIntent: string;
+  matches: Array<{ id: string; reason: string }>;
+  suggestedRefinements: string[];
+  error?: string;
+}
+
+function isNaturalLanguageSearch(q: string, keywordMatchCount: number): boolean {
+  const clean = q.trim().toLowerCase();
+  if (clean.length < 3) return false;
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return true;
+  if (keywordMatchCount === 0 && clean.length >= 3) return true;
+  return /\b(gift|birthday|under|below|above|cheap|best|kids|kid|boy|girl|toddler|indoor|outdoor|age|year|yrs|car|cars|gadi|puzzle|action)\b/.test(
+    clean
+  );
 }
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
@@ -74,8 +94,12 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
   const [query, setQuery] = useState<string>('');
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
+  const [aiLoading, setAiLoading] = useState<boolean>(false);
+  const [aiResult, setAiResult] = useState<AiSearchState | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const aiCacheRef = useRef<Map<string, AiSearchState>>(new Map());
+  const aiAbortRef = useRef<AbortController | null>(null);
 
   const availableProducts = useMemo(
     () => products.filter((p) => p && p.available !== false),
@@ -94,19 +118,208 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     [popularSearches]
   );
 
-  // Instant case-insensitive search across name, category, and keywords/description
-  const searchResults = useMemo(() => {
+  // Instant case-insensitive search across name, category, highlights, and description
+  const keywordSearchResults = useMemo(() => {
     if (!query.trim()) return [];
     return filterAndRankProducts(availableProducts, query);
   }, [availableProducts, query]);
 
-  // Live search suggestions generated dynamically while typing (matching Firebase popular searches + live product categories/names)
+  const catalogSignature = useMemo(
+    () => `${availableProducts.length}:${availableProducts.map((p) => p.id).slice(0, 10).join(',')}`,
+    [availableProducts]
+  );
+
+  const triggerAiSearch = useCallback(
+    async (rawQuery: string) => {
+      const clean = rawQuery.trim();
+      if (clean.length < 2 || availableProducts.length === 0) {
+        setAiResult(null);
+        setAiLoading(false);
+        return;
+      }
+
+      const cacheKey = `${catalogSignature}::${clean.toLowerCase()}`;
+      const cached = aiCacheRef.current.get(cacheKey);
+      if (cached) {
+        setAiResult(cached);
+        setAiLoading(false);
+        return;
+      }
+
+      if (aiAbortRef.current) {
+        aiAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      aiAbortRef.current = controller;
+      setAiLoading(true);
+
+      try {
+        const compactCatalog = availableProducts.slice(0, 80).map((p) => {
+          const activeOffer = activeOffersByProductId.get(p.id);
+          const campaignDisc = calculateProductDiscount(p, activeDiscountCampaigns);
+          const effectivePrice = activeOffer
+            ? activeOffer.discountedPrice
+            : campaignDisc.isDiscounted
+            ? campaignDisc.discountedPrice
+            : p.price;
+          return {
+            id: p.id,
+            name: p.name,
+            category: p.category || 'Other',
+            price: p.price,
+            effectivePrice,
+            description: p.description || '',
+            highlights: Array.isArray(p.highlights) ? p.highlights : [],
+          };
+        });
+
+        const res = await fetch('/api/customer/ai-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            query: clean,
+            products: compactCatalog,
+          }),
+        });
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+
+        if (!data?.success) {
+          setAiResult({
+            query: clean,
+            understoodIntent: '',
+            matches: [],
+            suggestedRefinements: [],
+            error: data?.error || '',
+          });
+          return;
+        }
+
+        const nextState: AiSearchState = {
+          query: clean,
+          understoodIntent: String(data.understoodIntent || '').trim(),
+          matches: Array.isArray(data.matchedProducts) ? data.matchedProducts : [],
+          suggestedRefinements: Array.isArray(data.suggestedRefinements)
+            ? data.suggestedRefinements
+            : [],
+        };
+        aiCacheRef.current.set(cacheKey, nextState);
+        setAiResult(nextState);
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+        setAiResult(null);
+      } finally {
+        if (!controller.signal.aborted) {
+          setAiLoading(false);
+        }
+      }
+    },
+    [availableProducts, activeOffersByProductId, activeDiscountCampaigns, catalogSignature]
+  );
+
+  // Automatic debounced AI understanding when user pauses on natural-language / zero-hit query
+  useEffect(() => {
+    const clean = query.trim();
+    if (!clean) {
+      if (aiAbortRef.current) aiAbortRef.current.abort();
+      setAiResult(null);
+      setAiLoading(false);
+      return;
+    }
+
+    const cacheKey = `${catalogSignature}::${clean.toLowerCase()}`;
+    const cached = aiCacheRef.current.get(cacheKey);
+    if (cached) {
+      setAiResult(cached);
+      setAiLoading(false);
+      return;
+    }
+
+    if (!isOpen || !isNaturalLanguageSearch(clean, keywordSearchResults.length)) {
+      setAiResult((prev) => (prev && prev.query.toLowerCase() === clean.toLowerCase() ? prev : null));
+      setAiLoading(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void triggerAiSearch(clean);
+    }, 520);
+
+    return () => window.clearTimeout(timer);
+  }, [query, isOpen, keywordSearchResults.length, catalogSignature, triggerAiSearch]);
+
+  useEffect(() => {
+    return () => {
+      if (aiAbortRef.current) aiAbortRef.current.abort();
+    };
+  }, []);
+
+  // Merge AI matches + direct keyword matches (AI order prioritized when query matches AI intent)
+  const activeAiResult = useMemo(() => {
+    const clean = query.trim().toLowerCase();
+    if (!aiResult || aiResult.query.toLowerCase() !== clean) return null;
+    return aiResult;
+  }, [aiResult, query]);
+
+  const aiReasonMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (activeAiResult?.matches) {
+      for (const m of activeAiResult.matches) {
+        if (m.id && m.reason) map.set(m.id, m.reason);
+      }
+    }
+    return map;
+  }, [activeAiResult]);
+
+  const searchResults = useMemo(() => {
+    if (!query.trim()) return [];
+    const byId = new Map(availableProducts.map((p) => [p.id, p]));
+    const merged: Product[] = [];
+    const seen = new Set<string>();
+
+    // When AI matched products for this query, prioritize AI-ranked products first
+    if (activeAiResult && activeAiResult.matches.length > 0) {
+      for (const m of activeAiResult.matches) {
+        const prod = byId.get(m.id);
+        if (prod && !seen.has(prod.id)) {
+          seen.add(prod.id);
+          merged.push(prod);
+        }
+      }
+    }
+
+    // Append direct keyword matches not already included (skip if strict budget query and AI returned strict matches)
+    const isStrictBudgetQuery = /\b(under|below|less\s+than|max|upto|within)\s*₹?\s*\d+/i.test(query);
+    if (!(isStrictBudgetQuery && activeAiResult && activeAiResult.matches.length > 0)) {
+      for (const prod of keywordSearchResults) {
+        if (!seen.has(prod.id)) {
+          seen.add(prod.id);
+          merged.push(prod);
+        }
+      }
+    }
+
+    return merged;
+  }, [query, availableProducts, activeAiResult, keywordSearchResults]);
+
+  // Live search suggestions generated dynamically while typing
   const liveSuggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
 
     const seen = new Set<string>();
-    const list: Array<{ label: string; kind: 'popular' | 'category' | 'product' }> = [];
+    const list: Array<{ label: string; kind: 'popular' | 'category' | 'product' | 'ai' }> = [];
+
+    if (activeAiResult?.suggestedRefinements) {
+      for (const ref of activeAiResult.suggestedRefinements) {
+        const lower = ref.trim().toLowerCase();
+        if (lower && lower !== q && !seen.has(lower)) {
+          seen.add(lower);
+          list.push({ label: ref.trim(), kind: 'ai' });
+        }
+      }
+    }
 
     for (const pop of sortedPopularSearches) {
       const lower = pop.term.trim().toLowerCase();
@@ -133,7 +346,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     }
 
     return list.slice(0, 5);
-  }, [query, sortedPopularSearches, availableProducts, searchResults]);
+  }, [query, activeAiResult, sortedPopularSearches, availableProducts, searchResults]);
 
   useEffect(() => {
     setHighlightedIndex(-1);
@@ -186,13 +399,15 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
         setHighlightedIndex((prev) => (prev <= 0 ? searchResults.length - 1 : prev - 1));
       }
     } else if (e.key === 'Enter') {
+      e.preventDefault();
       if (searchResults.length > 0) {
-        e.preventDefault();
         const target =
           highlightedIndex >= 0 && highlightedIndex < searchResults.length
             ? searchResults[highlightedIndex]
             : searchResults[0];
         handleChooseProduct(target);
+      } else if (query.trim().length >= 2) {
+        void triggerAiSearch(query);
       }
     }
   };
@@ -207,8 +422,8 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
           ref={inputRef}
           type="search"
           className="catalog-search-input"
-          placeholder="Search toys, cars, models..."
-          aria-label="Search toys, cars, models"
+          placeholder="Search toys or describe what you want (e.g. gift under ₹500)..."
+          aria-label="Search toys or ask AI what you want"
           aria-expanded={isOpen}
           aria-autocomplete="list"
           value={query}
@@ -230,6 +445,25 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
             Syncing…
           </span>
         )}
+        {trimmedQuery.length >= 2 && (
+          <button
+            type="button"
+            className="catalog-ai-ask-btn"
+            onClick={() => {
+              setIsOpen(true);
+              void triggerAiSearch(query);
+            }}
+            disabled={aiLoading}
+            title="Let Playnix AI understand your request and match toys"
+          >
+            {aiLoading ? (
+              <RefreshCw size={13} className="refresh-spinning" />
+            ) : (
+              <Sparkles size={13} />
+            )}
+            <span>{aiLoading ? 'Thinking…' : 'AI Match'}</span>
+          </button>
+        )}
         {query && (
           <button
             type="button"
@@ -237,6 +471,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
             aria-label="Clear search"
             onClick={() => {
               setQuery('');
+              setAiResult(null);
               setIsOpen(true);
               inputRef.current?.focus();
             }}
@@ -250,7 +485,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
         <div
           className="catalog-search-dropdown"
           role="listbox"
-          aria-label="Popular searches and live product results"
+          aria-label="Popular searches and smart AI product results"
         >
           {trimmedQuery === '' ? (
             <div className="catalog-search-popular-panel">
@@ -275,13 +510,27 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                 </>
               ) : (
                 <p className="catalog-search-idle-hint">
-                  Start typing to search toys by name, category, or keywords…
+                  Try typing a toy name or ask what you need — like &ldquo;birthday gift under ₹500&rdquo; or &ldquo;car for kids&rdquo;.
                 </p>
               )}
             </div>
           ) : (
             <>
-              {/* Live Search Suggestions Bar while typing */}
+              {/* AI Understanding Status / Intent Strip */}
+              {(aiLoading || (activeAiResult && activeAiResult.understoodIntent)) && (
+                <div className="catalog-ai-search-banner" aria-live="polite">
+                  <Sparkles size={14} className={aiLoading ? 'refresh-spinning' : ''} />
+                  {aiLoading ? (
+                    <span>Playnix AI is understanding what you&apos;re looking for…</span>
+                  ) : (
+                    <span>
+                      <strong>AI Understood:</strong> {activeAiResult?.understoodIntent}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Live Search & AI Refinement Suggestions */}
               {liveSuggestions.length > 0 && (
                 <div className="catalog-live-suggestions">
                   <span className="catalog-live-suggestions-title">
@@ -329,6 +578,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                         ? campaignDiscount.discountedPrice
                         : product.price;
                       const isHighlighted = idx === highlightedIndex;
+                      const aiReason = aiReasonMap.get(product.id);
 
                       return (
                         <button
@@ -362,11 +612,15 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                                 />
                               </span>
                             </div>
-                            {product.description && (
+                            {aiReason ? (
+                              <p className="catalog-ai-match-reason">
+                                <Sparkles size={11} /> {aiReason}
+                              </p>
+                            ) : product.description ? (
                               <p className="catalog-search-result-desc">
                                 <HighlightMatch text={product.description} query={trimmedQuery} />
                               </p>
-                            )}
+                            ) : null}
                           </div>
 
                           <div className="catalog-search-result-price-wrap">
@@ -391,6 +645,15 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                     })}
                   </div>
                 </>
+              ) : aiLoading ? (
+                <div className="catalog-search-empty" role="status">
+                  <div className="catalog-search-empty-icon">✨</div>
+                  <h4>Finding matching toys…</h4>
+                  <p>
+                    Playnix AI is checking our shelf for{' '}
+                    <strong>&ldquo;{trimmedQuery}&rdquo;</strong>.
+                  </p>
+                </div>
               ) : (
                 <div className="catalog-search-empty" role="status">
                   <div className="catalog-search-empty-icon">🔍</div>
@@ -424,6 +687,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                     style={{ marginTop: '12px', padding: '8px 14px', fontSize: '12px' }}
                     onClick={() => {
                       setQuery('');
+                      setAiResult(null);
                       inputRef.current?.focus();
                     }}
                   >

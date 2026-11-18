@@ -31,6 +31,7 @@ interface Product {
   price: number;
   category: string;
   description: string;
+  highlights?: string[];
   imageUrl: string;
   imageUrls: string[];
   available: boolean;
@@ -1010,6 +1011,10 @@ function buildDeterministicWebsiteKnowledge(payload: any) {
       productsMissingDescription.push(cleanName);
     }
 
+    const prodHighlights = Array.isArray(prod.highlights)
+      ? prod.highlights.map((h: any) => String(h || '').trim()).filter(Boolean).slice(0, 6)
+      : [];
+
     const lines = [
       `Product ID: ${prod.id}`,
       `Product Name: ${cleanName}`,
@@ -1020,6 +1025,9 @@ function buildDeterministicWebsiteKnowledge(payload: any) {
       cleanDesc
         ? `Verified Product Description: ${cleanDesc}`
         : `Verified Product Description: Not yet provided in product listing (specs/materials not listed).`,
+      ...(prodHighlights.length > 0
+        ? [`Verified Key Highlights: ${prodHighlights.join(' | ')}`]
+        : []),
     ];
 
     entries.push({
@@ -1739,15 +1747,66 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
         ? `Attached ${imageParts.length} product photo(s). FIRST carefully inspect ALL attached photos + the product name (look for scale/size cues, material, packaging/box, moving parts, accessories, finish) before estimating.`
         : 'No product photos attached; rely on product name, category, description, and web lookup.';
 
+    const rawExistingCats: string[] = Array.isArray(body.existingCategories)
+      ? body.existingCategories.map((c: any) => String(c || '').trim()).filter(Boolean)
+      : [];
+    const existingCategories: string[] = Array.from(
+      new Set([
+        ...rawExistingCats,
+        ...catalogSample.map((p) => p.category).filter(Boolean),
+        'Cars',
+        'Action figure',
+        'Decorative',
+        'Other',
+      ])
+    ).slice(0, 40);
+
+    const resolveExactWebsiteCategory = (rawCat: string): string => {
+      const clean = String(rawCat || '').trim().slice(0, 50);
+      if (!clean) return '';
+      const lower = clean.toLowerCase();
+      const exactExisting = existingCategories.find((c) => c.toLowerCase() === lower);
+      if (exactExisting) return exactExisting;
+      const canonicalMap: Record<string, string> = {
+        fidget: 'Fidget',
+        'fidgets': 'Fidget',
+        'fidget toys': 'Fidget',
+        educational: 'Educational',
+        'toys and figures': 'Toys and Figures',
+        'toys & figures': 'Toys and Figures',
+        'desk accessories': 'Desk Accessories',
+        'home & garden': 'Home & Garden',
+        'home and garden': 'Home & Garden',
+        other: 'Other',
+      };
+      return canonicalMap[lower] || clean;
+    };
+
+    const classificationRulesBlock = [
+      'PRODUCT CLASSIFICATION RULES (FOLLOW STRICTLY):',
+      '1. Understand the ACTUAL PURPOSE and FUNCTIONALITY of the product from its photos, description, and answers — never rely solely on a word or keyword in the name.',
+      '2. Prioritize the MOST SPECIFIC matching category over broad categories.',
+      '3. Fidget products (infinity cubes, spinners, clickers, pop-its, sensory toys, tactile/stress-relief gadgets) MUST be categorized as "Fidget" (never "Educational").',
+      '4. "Educational" must ONLY be suggested for products primarily designed for learning, teaching, STEM/science kits, or demonstrating concepts.',
+      '5. "Toys and Figures" should be used for play objects, action figures, characters, and collectible models (note: if an exact narrower category in EXISTING_WEBSITE_CATEGORIES fits better—such as "Cars" for toy vehicles or "Action figure" for character figures—use that exact existing website category name as primary and optionally "Toys and Figures" as secondary).',
+      '6. "Desk Accessories" includes pen holders, desk organizers, and desk decorations.',
+      '7. "Home & Garden" includes planters, household decorations, and practical home products.',
+      '8. If a product genuinely belongs to multiple categories, suggest 1 primary category ("suggestedCategory") and up to 2 relevant secondary categories ("secondaryCategories"). Never include a category based only on a weak keyword match.',
+      '9. Use EXACT category names from EXISTING_WEBSITE_CATEGORIES whenever an existing category matches the product functionality, otherwise use the exact category names above ("Fidget", "Educational", "Toys and Figures", "Desk Accessories", "Home & Garden").',
+      '10. If product information (name + photos + description) is too vague or ambiguous to know its real purpose/functionality, DO NOT GUESS — set "categoryNeedsClarification": true, leave "suggestedCategory": "" and "secondaryCategories": [], and ask what the product is primarily used for in "questions".',
+    ].join('\n');
+
     const instructionText = needsQuestionsStage
       ? [
           'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
           photoNotice,
           'Use Google Search to quickly check current Indian online prices and product specs (Amazon.in, Flipkart, toy stores).',
-          'Identify what crucial price-affecting details are STILL unclear after inspecting the toy name and photos (especially SIZE / SCALE, MATERIAL, and FEATURES/PACKAGING).',
+          classificationRulesBlock,
+          'Identify what crucial price- or category-affecting details are STILL unclear after inspecting the toy name and photos (especially FUNCTION/PURPOSE if unclear, plus SIZE/SCALE, MATERIAL, and FEATURES/PACKAGING).',
           '',
           `PRODUCT_NAME: ${productName}`,
-          `CATEGORY: ${category || 'Not specified'}`,
+          `CURRENT_CATEGORY: ${category || 'Not specified'}`,
+          `EXISTING_WEBSITE_CATEGORIES: ${JSON.stringify(existingCategories)}`,
           `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
           catalogSample.length > 0
             ? `SHOP_PRICE_CONTEXT: ${JSON.stringify(catalogSample.slice(0, 8))}`
@@ -1756,6 +1815,10 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
           '{',
           '  "stage": "questions",',
+          '  "categoryNeedsClarification": false,',
+          '  "suggestedCategory": "Exact primary category name, or empty string if info is insufficient to avoid guessing",',
+          '  "secondaryCategories": ["Optional secondary category (max 2)"],',
+          '  "categoryReasoning": "1 short sentence explaining why this category fits its actual purpose (or what clarification is needed).",',
           '  "imageReviewSummary": "1 concise sentence stating what you observed from reviewing the product name and attached photo(s).",',
           '  "marketFindings": "1-2 short sentences on current Indian online prices for this item.",',
           '  "preliminaryRangeINR": { "min": 150, "max": 600 },',
@@ -1770,7 +1833,8 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           '  ]',
           '}',
           'Rules:',
-          '- Generate 2 to 3 crisp, fast questions (always Size/Scale first unless clearly shown on box/name, plus Material/Features).',
+          '- Never guess suggestedCategory on weak keyword matches. If unclear, set categoryNeedsClarification=true, suggestedCategory="", and put a functional purpose question first in questions (with quickOptions like "Fidget / Stress relief", "Toy / Collectible figure", "Desk organizer / decoration", "Educational / Learning tool", "Home / Planter / Decor").',
+          '- Generate 2 to 3 crisp, fast questions.',
           '- Keep all text concise.',
         ]
           .filter(Boolean)
@@ -1779,9 +1843,11 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
           photoNotice,
           'Use Google Search to check Indian online prices and specs matching the product name, attached photos, AND owner answers.',
+          classificationRulesBlock,
           '',
           `PRODUCT_NAME: ${productName}`,
-          `CATEGORY: ${category || 'Not specified'}`,
+          `CURRENT_CATEGORY: ${category || 'Not specified'}`,
+          `EXISTING_WEBSITE_CATEGORIES: ${JSON.stringify(existingCategories)}`,
           `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
           `OWNER_PROVIDED_ANSWERS: ${JSON.stringify(answers)}`,
           catalogSample.length > 0
@@ -1791,16 +1857,28 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
           '{',
           '  "stage": "price_ready",',
+          '  "categoryNeedsClarification": false,',
+          '  "suggestedCategory": "Exact primary category matching product purpose",',
+          '  "secondaryCategories": ["Optional secondary category (max 2)"],',
+          '  "categoryReasoning": "1 short sentence explaining why this category matches the product purpose/functionality.",',
           '  "imageReviewSummary": "1 concise sentence summarizing what you observed from the toy name & attached photo(s).",',
           '  "recommendedPriceINR": 299,',
           '  "priceRangeINR": { "min": 249, "max": 399 },',
           '  "reasoning": "1-2 short, straight sentences explaining why this ₹ price fits the size, visual appearance, and market listings.",',
           '  "sizeAndSpecSummary": "Size: ~14 cm (1:32) · Material: Diecast Metal",',
-          '  "suggestedDescription": "Clean, customer-ready Playnix Shop description under 220 characters accurately describing what is visible in photos + owner specs."',
+          '  "suggestedDescription": "Clean, customer-ready Playnix Shop description under 220 characters accurately describing what is visible in photos + owner specs.",',
+          '  "highlights": [',
+          '    "Short bullet point 1 observed from photos/name (max 95 chars)",',
+          '    "Short bullet point 2 (material, finish, or play style visible)",',
+          '    "Short bullet point 3 (size/spec or gift/display appeal)"',
+          '  ]',
           '}',
           'Rules:',
+          '- Apply the PRODUCT CLASSIFICATION RULES strictly (e.g., infinity cube / spinner / clicker / sensory gadget -> "Fidget", NEVER "Educational").',
+          '- Return 1 primary suggestedCategory and up to 2 genuinely relevant secondaryCategories (empty array if only 1 applies).',
           '- recommendedPriceINR, priceRangeINR.min, and priceRangeINR.max must be realistic positive integers in INR (₹).',
           '- suggestedDescription MUST be <= 220 characters, factual (based only on name, visible photo details, and owner answers), and ready for the storefront.',
+          '- highlights MUST be 3 to 5 crisp, scannable bullet points (no leading bullet symbols like "•" or "-"), each <= 110 characters, based ONLY on what is visible in photos, the toy name, or owner answers (never invent battery inclusion or unverified specs).',
         ]
           .filter(Boolean)
           .join('\n');
@@ -1917,6 +1995,32 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
     }
 
     const imageReviewSummary = String(parsed.imageReviewSummary || '').trim().slice(0, 320);
+    const categoryNeedsClarification = Boolean(parsed.categoryNeedsClarification);
+    const combinedEvidenceText = `${productName} ${description} ${answers.map((a) => a.answer).join(' ')}`.toLowerCase();
+    const isClearlyFidget = /\b(fidget|infinity\s*cube|spinner|clicker|pop[\s-]*it|sensory\s*toy|stress[\s-]*relief|stress\s*reliever)\b/i.test(
+      combinedEvidenceText
+    );
+
+    let suggestedCategory = categoryNeedsClarification
+      ? ''
+      : resolveExactWebsiteCategory(String(parsed.suggestedCategory || parsed.category || ''));
+    if (isClearlyFidget && (!suggestedCategory || suggestedCategory.toLowerCase() === 'educational')) {
+      suggestedCategory = resolveExactWebsiteCategory('Fidget');
+    }
+
+    const rawSecondary: string[] = Array.isArray(parsed.secondaryCategories)
+      ? parsed.secondaryCategories
+          .map((c: any) => resolveExactWebsiteCategory(String(c || '')))
+          .filter(Boolean)
+      : [];
+    const secondaryCategories = categoryNeedsClarification
+      ? []
+      : Array.from(new Set(rawSecondary))
+          .filter((c) => c.toLowerCase() !== suggestedCategory.toLowerCase())
+          .filter((c) => !(isClearlyFidget && c.toLowerCase() === 'educational'))
+          .slice(0, 2);
+
+    const categoryReasoning = String(parsed.categoryReasoning || '').trim().slice(0, 240);
 
     if (needsQuestionsStage && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
       const sanitizedQuestions = parsed.questions
@@ -1942,6 +2046,10 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
         webSearchNote,
         reviewedPhotosCount: imageParts.length,
         imageReviewSummary,
+        suggestedCategory,
+        secondaryCategories,
+        categoryNeedsClarification,
+        categoryReasoning,
         stage: 'questions',
         marketFindings: String(parsed.marketFindings || '').trim().slice(0, 500),
         preliminaryRangeINR:
@@ -1968,6 +2076,18 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       .trim()
       .slice(0, 240);
 
+    const cleanHighlights: string[] = Array.isArray(parsed.highlights)
+      ? parsed.highlights
+          .map((h: any) =>
+            String(h || '')
+              .replace(/^[\s•\-\*]+/, '')
+              .trim()
+              .slice(0, 140)
+          )
+          .filter(Boolean)
+          .slice(0, 5)
+      : [];
+
     return res.json({
       success: true,
       geminiConfigured: true,
@@ -1975,6 +2095,10 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       webSearchNote,
       reviewedPhotosCount: imageParts.length,
       imageReviewSummary,
+      suggestedCategory,
+      secondaryCategories,
+      categoryNeedsClarification: !suggestedCategory && categoryNeedsClarification,
+      categoryReasoning,
       stage: 'price_ready',
       recommendedPriceINR: recommended,
       priceRangeINR: { min: minPrice, max: maxPrice },
@@ -1982,6 +2106,7 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       sizeAndSpecSummary: String(parsed.sizeAndSpecSummary || '').trim().slice(0, 240),
       suggestedDescription: cleanSuggestedDescription,
       suggestedDescriptionSnippet: cleanSuggestedDescription,
+      highlights: cleanHighlights,
       webSources,
       modelUsed,
     });
@@ -2000,6 +2125,343 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       success: false,
       geminiConfigured: getGeminiClient() !== null,
       error: friendlyError,
+    });
+  }
+});
+
+// Fast Image-to-Highlights Bullet Points Generator for Owner Product Form
+app.post('/api/owner/ai/product-highlights', async (req, res) => {
+  const { pin } = req.body || {};
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(400).json({
+      success: false,
+      geminiConfigured: false,
+      error:
+        'GEMINI_API_KEY is not configured on the server yet. Add GEMINI_API_KEY in Settings > Secrets.',
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const productName = String(body.productName || '').trim().slice(0, 120);
+    const category = String(body.category || '').trim().slice(0, 60);
+    const description = String(body.description || '').trim().slice(0, 400);
+
+    const imageParts: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+    const rawImagesInput: string[] = Array.isArray(body.imageDataUrls)
+      ? body.imageDataUrls.filter((u: any) => typeof u === 'string').slice(0, 5)
+      : [];
+
+    let totalImageBytes = 0;
+    for (const rawUrl of rawImagesInput) {
+      if (!rawUrl.startsWith('data:image/')) continue;
+      const m = rawUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
+      if (m && m[2].length <= 450_000 && totalImageBytes + m[2].length <= 1_400_000) {
+        totalImageBytes += m[2].length;
+        imageParts.push({
+          inlineData: {
+            mimeType: m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase(),
+            data: m[2],
+          },
+        });
+      }
+    }
+
+    if (!productName && imageParts.length === 0) {
+      return res.status(400).json({
+        success: false,
+        geminiConfigured: true,
+        error: 'Add at least 1 toy photo or enter the Toy name first.',
+      });
+    }
+
+    const promptText = [
+      'You are Playnix AI Catalog Assistant for Playnix Shop (a friendly toy store in India).',
+      imageParts.length > 0
+        ? `Carefully inspect ALL ${imageParts.length} attached toy photo(s) along with the product name and description.`
+        : 'No photos attached yet; use the toy name, category, and description.',
+      'Generate 3 to 5 crisp, scannable, parent-friendly Key Highlight bullet points for the product page.',
+      'Rules:',
+      '- Keep each bullet concise (4 to 14 words, max 110 characters), easy to read, and free of hype.',
+      '- Base points strictly on what is clearly visible in the photos (design, colours, moving parts, accessories, finish, packaging/display look) and stated in the name/description.',
+      '- Do NOT invent exact dimensions in cm, battery counts, age ratings, or safety certifications unless visibly printed in the photo or stated in the owner description.',
+      '- Do NOT include leading bullet symbols ("•", "-", "*") in the strings.',
+      '',
+      `PRODUCT_NAME: ${productName || 'Not entered yet (identify from photos)'}`,
+      `CATEGORY: ${category || 'Not specified'}`,
+      `DESCRIPTION: ${description || 'Not provided'}`,
+    ].join('\n');
+
+    const contentsPayload =
+      imageParts.length > 0 ? { parts: [...imageParts, { text: promptText }] } : promptText;
+
+    const runHighlightsOnce = async (modelName: string, timeoutMs: number) => {
+      const cfg: any = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            imageObservation: { type: Type.STRING },
+            highlights: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ['imageObservation', 'highlights'],
+        },
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      };
+      if (modelName === PLAYNIX_GEMINI_MODEL) {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return ai.models.generateContent({
+        model: modelName,
+        contents: contentsPayload,
+        config: cfg,
+      });
+    };
+
+    const primaryModel =
+      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+
+    let resp: any;
+    let modelUsed = primaryModel;
+    try {
+      resp = await runHighlightsOnce(primaryModel, 6500);
+    } catch (firstErr: any) {
+      const m = String(firstErr?.message || firstErr || '').toLowerCase();
+      if (
+        primaryModel === PLAYNIX_GEMINI_MODEL &&
+        (firstErr?.status === 503 ||
+          firstErr?.name === 'TimeoutError' ||
+          firstErr?.name === 'AbortError' ||
+          m.includes('503') ||
+          m.includes('high demand') ||
+          m.includes('timed out') ||
+          m.includes('aborted'))
+      ) {
+        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+        modelUsed = 'gemini-3.1-flash-lite';
+        resp = await runHighlightsOnce(modelUsed, 6000);
+      } else {
+        throw firstErr;
+      }
+    }
+
+    const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
+    const highlights: string[] = Array.isArray(parsed?.highlights)
+      ? parsed.highlights
+          .map((h: any) =>
+            String(h || '')
+              .replace(/^[\s•\-\*]+/, '')
+              .trim()
+              .slice(0, 140)
+          )
+          .filter(Boolean)
+          .slice(0, 5)
+      : [];
+
+    if (highlights.length === 0) {
+      throw new Error('Could not extract highlight bullets from the provided photo(s)/name.');
+    }
+
+    return res.json({
+      success: true,
+      geminiConfigured: true,
+      reviewedPhotosCount: imageParts.length,
+      imageObservation: String(parsed?.imageObservation || '').trim().slice(0, 260),
+      highlights,
+      modelUsed,
+    });
+  } catch (err: any) {
+    console.error('Error in /api/owner/ai/product-highlights:', err);
+    res.status(500).json({
+      success: false,
+      geminiConfigured: getGeminiClient() !== null,
+      error: err?.message || 'Failed to generate highlights right now.',
+    });
+  }
+});
+
+// Public Customer AI Smart Search — understands natural-language shopper queries & matches real catalog items
+app.post('/api/customer/ai-search', async (req, res) => {
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(200).json({
+      success: false,
+      geminiConfigured: false,
+      error: 'AI smart search is not enabled yet.',
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const query = sanitizeUntrustedCustomerText(body.query, 240);
+    if (!query || query.length < 2) {
+      return res.status(400).json({
+        success: false,
+        geminiConfigured: true,
+        error: 'Search query is too short.',
+      });
+    }
+
+    const rawProducts: any[] = Array.isArray(body.products) ? body.products : [];
+    const catalog = rawProducts
+      .slice(0, 80)
+      .map((p: any) => ({
+        id: String(p?.id || '').trim().slice(0, 128),
+        name: String(p?.name || '').trim().slice(0, 140),
+        category: String(p?.category || 'Other').trim().slice(0, 60),
+        price: Number(p?.effectivePrice ?? p?.price) || 0,
+        originalPrice: Number(p?.price) || 0,
+        description: String(p?.description || '').trim().slice(0, 220),
+        highlights: Array.isArray(p?.highlights)
+          ? p.highlights.map((h: any) => String(h || '').trim().slice(0, 100)).filter(Boolean).slice(0, 5)
+          : [],
+      }))
+      .filter((p) => p.id && p.name);
+
+    if (catalog.length === 0) {
+      return res.json({
+        success: true,
+        geminiConfigured: true,
+        understoodIntent: '',
+        matchedProducts: [],
+        suggestedRefinements: [],
+      });
+    }
+
+    const validIds = new Set(catalog.map((p) => p.id));
+
+    const promptText = [
+      'You are Playnix AI Shopping Search Assistant for Playnix Shop (India, currency INR ₹).',
+      'A customer typed a search request in the storefront search bar. Understand what they actually want—such as:',
+      '- Budget constraints ("under 500", "below ₹300", "budget gift", "cheap cars")',
+      '- Who it is for / age / occasion ("gift for 6 year old", "birthday gift", "toddler", "collector")',
+      '- Play style / features / material / theme ("superhero", "racing car", "wooden puzzle", "indoor game", "action figure", "open box deal")',
+      '- Synonyms, typos, or Hinglish/casual phrasing ("gadi", "khilona", "remote car", "super hero", "dollhouse")',
+      '',
+      'CATALOG (ONLY pick products from this exact list; NEVER invent IDs or specs):',
+      JSON.stringify(catalog),
+      '',
+      `<untrusted_customer_search>${query}</untrusted_customer_search>`,
+      '',
+      'Rules:',
+      '- Return ONLY product IDs from CATALOG that genuinely fit the customer intent.',
+      '- Respect explicit price limits strictly (if user says "under 500", only return products with price <= 500).',
+      '- Rank best matches first (up to 8 products). If nothing fits at all, return an empty matchedProducts array and helpful suggestedRefinements.',
+      '- Keep "understoodIntent" to 1 crisp sentence (max 100 chars), e.g., "Action & superhero toys under ₹500".',
+      '- For each match, give a super short "reason" tag (max 55 chars), e.g., "₹299 · Collectible superhero figure".',
+      '- Provide 2 to 3 short clickable "suggestedRefinements" (2-4 words each) based on what actually exists in CATALOG.',
+    ].join('\n');
+
+    const runSearchOnce = async (modelName: string, timeoutMs: number) => {
+      const cfg: any = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            understoodIntent: { type: Type.STRING },
+            matchedProducts: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  reason: { type: Type.STRING },
+                },
+                required: ['id', 'reason'],
+              },
+            },
+            suggestedRefinements: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ['understoodIntent', 'matchedProducts', 'suggestedRefinements'],
+        },
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      };
+      if (modelName === PLAYNIX_GEMINI_MODEL) {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return ai.models.generateContent({
+        model: modelName,
+        contents: promptText,
+        config: cfg,
+      });
+    };
+
+    const primaryModel =
+      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+
+    let resp: any;
+    let modelUsed = primaryModel;
+    try {
+      resp = await runSearchOnce(primaryModel, 5000);
+    } catch (firstErr: any) {
+      const m = String(firstErr?.message || firstErr || '').toLowerCase();
+      if (
+        primaryModel === PLAYNIX_GEMINI_MODEL &&
+        (firstErr?.status === 503 ||
+          firstErr?.name === 'TimeoutError' ||
+          firstErr?.name === 'AbortError' ||
+          m.includes('503') ||
+          m.includes('high demand') ||
+          m.includes('timed out') ||
+          m.includes('aborted'))
+      ) {
+        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+        modelUsed = 'gemini-3.1-flash-lite';
+        resp = await runSearchOnce(modelUsed, 4500);
+      } else {
+        throw firstErr;
+      }
+    }
+
+    const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
+    const seenIds = new Set<string>();
+    const matchedProducts: Array<{ id: string; reason: string }> = [];
+
+    if (Array.isArray(parsed?.matchedProducts)) {
+      for (const m of parsed.matchedProducts) {
+        const pid = String(m?.id || '').trim();
+        if (!pid || !validIds.has(pid) || seenIds.has(pid)) continue;
+        seenIds.add(pid);
+        matchedProducts.push({
+          id: pid,
+          reason: String(m?.reason || '').trim().slice(0, 70),
+        });
+        if (matchedProducts.length >= 8) break;
+      }
+    }
+
+    const suggestedRefinements: string[] = Array.isArray(parsed?.suggestedRefinements)
+      ? parsed.suggestedRefinements
+          .map((s: any) => String(s || '').trim().slice(0, 40))
+          .filter(Boolean)
+          .slice(0, 3)
+      : [];
+
+    return res.json({
+      success: true,
+      geminiConfigured: true,
+      understoodIntent: String(parsed?.understoodIntent || '').trim().slice(0, 140),
+      matchedProducts,
+      suggestedRefinements,
+      modelUsed,
+    });
+  } catch (err: any) {
+    console.info('Customer AI search fallback:', String(err?.status || err?.message || 'error'));
+    return res.status(200).json({
+      success: false,
+      geminiConfigured: true,
+      error: 'AI search is busy right now — showing instant keyword matches.',
     });
   }
 });

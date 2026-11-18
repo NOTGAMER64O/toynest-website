@@ -1161,7 +1161,10 @@ export default function App() {
     price: '',
     description: '',
     category: '',
+    highlights: [] as string[],
   });
+  const [highlightsAiLoading, setHighlightsAiLoading] = useState<boolean>(false);
+  const [highlightsAiNote, setHighlightsAiNote] = useState<string>('');
   const [productImages, setProductImages] = useState<File[]>([]);
   const [editExistingImages, setEditExistingImages] = useState<string[]>([]);
   const [productSubmitTarget, setProductSubmitTarget] = useState<'published' | 'draft'>('published');
@@ -3667,12 +3670,18 @@ export default function App() {
         // Guarantee payload is safely under Firestore limit
         finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
+        const cleanHighlights = (productForm.highlights || [])
+          .map((h) => h.trim().slice(0, 160))
+          .filter(Boolean)
+          .slice(0, 6);
+
         const updatedItem: Product = {
           id: editingProductId,
           name: cleanName,
           price: cleanPrice,
           description: productForm.description.trim(),
           category: productForm.category.trim() || 'Other',
+          highlights: cleanHighlights,
           imageUrl: finalImageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
           imageUrls: finalImageUrls,
           available: targetAvailable,
@@ -3693,7 +3702,8 @@ export default function App() {
         });
 
         setEditingProductId(null);
-        setProductForm({ name: '', price: '', description: '', category: '' });
+        setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
+        setHighlightsAiNote('');
         setProductImages([]);
         setEditExistingImages([]);
         setProductSubmitTarget('published');
@@ -3720,6 +3730,11 @@ export default function App() {
       }
       finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
+      const cleanNewHighlights = (productForm.highlights || [])
+        .map((h) => h.trim().slice(0, 160))
+        .filter(Boolean)
+        .slice(0, 6);
+
       const productId = `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const newProduct: Product = {
         id: productId,
@@ -3727,6 +3742,7 @@ export default function App() {
         price: cleanPrice,
         description: productForm.description.trim(),
         category: productForm.category.trim() || 'Other',
+        highlights: cleanNewHighlights,
         imageUrl: finalImageUrls[0],
         imageUrls: finalImageUrls,
         available: targetAvailable,
@@ -3745,7 +3761,8 @@ export default function App() {
         return next;
       });
 
-      setProductForm({ name: '', price: '', description: '', category: '' });
+      setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
+      setHighlightsAiNote('');
       setProductImages([]);
       setEditExistingImages([]);
       setProductSubmitTarget('published');
@@ -3806,6 +3823,68 @@ export default function App() {
     }
   };
 
+  const handleGenerateHighlightsFromPhotos = async () => {
+    const hasName = productForm.name.trim().length > 0;
+    const hasPhotos = productImages.length > 0 || editExistingImages.length > 0;
+    if (!hasName && !hasPhotos) {
+      setHighlightsAiNote('Add at least 1 toy photo or enter the Toy name first.');
+      return;
+    }
+
+    setHighlightsAiLoading(true);
+    setHighlightsAiNote('');
+    try {
+      const imageDataUrls: string[] = [];
+      for (const u of editExistingImages.slice(0, 5)) {
+        if (u && u.startsWith('data:image/') && u.length < 400_000) {
+          imageDataUrls.push(u);
+        }
+      }
+      const slots = Math.max(0, 5 - imageDataUrls.length);
+      if (slots > 0 && productImages.length > 0) {
+        const encoded = await Promise.all(
+          productImages.slice(0, slots).map((f) => fileToOptimizedDataUrl(f, 340, 0.62))
+        );
+        for (const dataUrl of encoded) {
+          if (dataUrl) imageDataUrls.push(dataUrl);
+        }
+      }
+
+      const res = await fetch('/api/owner/ai/product-highlights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin: ownerPin.trim() || DEFAULT_OWNER_PIN,
+          productName: productForm.name.trim(),
+          category: productForm.category.trim(),
+          description: productForm.description.trim(),
+          imageDataUrls,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success || !Array.isArray(data?.highlights)) {
+        throw new Error(data?.error || 'Could not generate highlights right now.');
+      }
+      setProductForm((prev) => ({
+        ...prev,
+        highlights: data.highlights.slice(0, 6),
+      }));
+      const photoText =
+        Number(data.reviewedPhotosCount) > 0
+          ? `from ${data.reviewedPhotosCount} photo(s)`
+          : 'from product details';
+      setHighlightsAiNote(
+        data.imageObservation
+          ? `Generated ${data.highlights.length} bullet points ${photoText}: ${data.imageObservation}`
+          : `Generated ${data.highlights.length} bullet points ${photoText}. Review or edit below!`
+      );
+    } catch (err: any) {
+      setHighlightsAiNote(err?.message || 'Could not generate highlight bullets right now.');
+    } finally {
+      setHighlightsAiLoading(false);
+    }
+  };
+
   const startEditProduct = (p: Product) => {
     setEditingProductId(p.id);
     setProductForm({
@@ -3813,7 +3892,9 @@ export default function App() {
       price: String(p.price),
       description: p.description || '',
       category: p.category || 'Other',
+      highlights: Array.isArray(p.highlights) ? [...p.highlights] : [],
     });
+    setHighlightsAiNote('');
     const currentImgs =
       p.imageUrls && p.imageUrls.length > 0
         ? [...p.imageUrls]
@@ -3831,7 +3912,8 @@ export default function App() {
 
   const cancelEditProduct = () => {
     setEditingProductId(null);
-    setProductForm({ name: '', price: '', description: '', category: '' });
+    setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
+    setHighlightsAiNote('');
     setProductImages([]);
     setEditExistingImages([]);
     setProductSubmitTarget('published');
@@ -7610,10 +7692,22 @@ export default function App() {
                         price: String(suggestedPrice),
                       }))
                     }
+                    onSetCategory={(suggestedCat) =>
+                      setProductForm((prev) => ({
+                        ...prev,
+                        category: suggestedCat.slice(0, 50),
+                      }))
+                    }
                     onSetDescription={(descriptionText) =>
                       setProductForm((prev) => ({
                         ...prev,
                         description: descriptionText.slice(0, 250),
+                      }))
+                    }
+                    onSetHighlights={(highlightsList) =>
+                      setProductForm((prev) => ({
+                        ...prev,
+                        highlights: highlightsList.slice(0, 6),
                       }))
                     }
                   />
@@ -7638,6 +7732,96 @@ export default function App() {
                       maxLength={250}
                     />
                   </label>
+
+                  {/* IMAGE-TO-HIGHLIGHTS BULLET POINTS EDITOR */}
+                  <div className="owner-highlights-box">
+                    <div className="owner-highlights-head">
+                      <div>
+                        <strong>Key Highlights (Bullet Points)</strong>
+                        <small>Shown as quick bullet points on the product page</small>
+                      </div>
+                      <button
+                        type="button"
+                        className="owner-highlights-ai-btn"
+                        disabled={highlightsAiLoading}
+                        onClick={() => void handleGenerateHighlightsFromPhotos()}
+                      >
+                        {highlightsAiLoading ? (
+                          <>
+                            <RefreshCw size={13} className="refresh-spinning" />
+                            <span>Inspecting Photos…</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles size={13} />
+                            <span>
+                              Generate from{' '}
+                              {productImages.length + editExistingImages.length > 0
+                                ? `${productImages.length + editExistingImages.length} Photo(s)`
+                                : 'Toy Info'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {highlightsAiNote && (
+                      <p className="owner-highlights-note">{highlightsAiNote}</p>
+                    )}
+
+                    {productForm.highlights.length > 0 && (
+                      <div className="owner-highlights-list">
+                        {productForm.highlights.map((bullet, idx) => (
+                          <div key={idx} className="owner-highlight-row">
+                            <span className="owner-highlight-dot" aria-hidden="true">
+                              •
+                            </span>
+                            <input
+                              type="text"
+                              value={bullet}
+                              maxLength={140}
+                              placeholder={`Highlight #${idx + 1}`}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setProductForm((prev) => ({
+                                  ...prev,
+                                  highlights: prev.highlights.map((h, i) => (i === idx ? val : h)),
+                                }));
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="owner-highlight-remove"
+                              aria-label={`Remove highlight ${idx + 1}`}
+                              onClick={() =>
+                                setProductForm((prev) => ({
+                                  ...prev,
+                                  highlights: prev.highlights.filter((_, i) => i !== idx),
+                                }))
+                              }
+                            >
+                              <X size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {productForm.highlights.length < 6 && (
+                      <button
+                        type="button"
+                        className="owner-highlights-add-btn"
+                        onClick={() =>
+                          setProductForm((prev) => ({
+                            ...prev,
+                            highlights: [...prev.highlights, ''],
+                          }))
+                        }
+                      >
+                        <Plus size={13} /> Add highlight bullet
+                      </button>
+                    )}
+                  </div>
 
                   {/* PHOTO MANAGEMENT (ADD & REMOVE PICTURES) */}
                   {editingProductId ? (
@@ -8200,7 +8384,8 @@ export default function App() {
                     className="primary-btn"
                     onClick={() => {
                       setEditingProductId(null);
-                      setProductForm({ name: '', price: '', description: '', category: '' });
+                      setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
+                      setHighlightsAiNote('');
                       setProductImages([]);
                       setOwnerTab('products');
                       window.scrollTo({ top: 0, behavior: 'smooth' });

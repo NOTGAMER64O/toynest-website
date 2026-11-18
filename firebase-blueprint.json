@@ -43,6 +43,7 @@
         "price": { "type": "number" },
         "category": { "type": "string", "maxLength": 100 },
         "description": { "type": "string", "maxLength": 2000 },
+        "highlights": { "type": "array" },
         "imageUrl": { "type": "string", "maxLength": 1000 },
         "available": { "type": "boolean" },
         "createdAt": { "type": "string", "maxLength": 64 }

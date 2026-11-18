@@ -266,6 +266,20 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
           <div className="product-detail-description">
             <h3>About this toy</h3>
             <p>{product.description || 'A fun new friend for playtime.'}</p>
+
+            {Array.isArray(product.highlights) && product.highlights.length > 0 && (
+              <div className="product-detail-highlights">
+                <h4>Key Highlights</h4>
+                <ul className="product-detail-highlights-list">
+                  {product.highlights.map((bullet, idx) => (
+                    <li key={idx}>
+                      <Check size={14} className="product-detail-hl-check" aria-hidden="true" />
+                      <span>{bullet}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <div className="product-detail-actions">
