@@ -49,6 +49,16 @@ interface OwnerProductQuestionsManagerProps {
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }>;
+  onTeachAiFact?: (
+    question: ProductQuestion,
+    linkedProduct: Product | null,
+    aiAskedQuestion: string,
+    ownerAnswer: string
+  ) => Promise<{
+    success: boolean;
+    error?: string;
+    suggestion?: AiSuggestedReplyResult;
+  }>;
   onOpenAiAssistant?: () => void;
 }
 
@@ -62,6 +72,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   onMarkStatus,
   onDeleteQuestion,
   onSuggestAiReply,
+  onTeachAiFact,
   onOpenAiAssistant,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'Pending' | 'Answered'>('all');
@@ -74,6 +85,8 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const [modalSuccess, setModalSuccess] = useState<string>('');
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string>('');
+  const [teachDraft, setTeachDraft] = useState<string>('');
+  const [teachingAi, setTeachingAi] = useState<boolean>(false);
   const [aiSuggestionsByQId, setAiSuggestionsByQId] = useState<
     Record<string, AiSuggestedReplyResult>
   >({});
@@ -227,6 +240,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     setModalError('');
     setModalSuccess('');
     setAiError('');
+    setTeachDraft('');
     setConfirmDeleteId(null);
 
     if (item.answer && item.answer.trim()) {
@@ -342,7 +356,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     setSavingId(selectedQuestion.id);
     try {
       await onSaveAnswer(selectedQuestion.id, cleanReply, 'Answered');
-      setModalSuccess('Answer saved and published on the product page!');
+      setModalSuccess('Answer saved and visible only to the customer who asked!');
     } catch (err: any) {
       setModalError(err?.message || 'Could not save answer. Please try again.');
     } finally {
@@ -788,6 +802,76 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                         </div>
                       )}
 
+                      {(sug.ownerClarificationQuestion || sug.missingInfoNote) &&
+                        sug.groundingStatus !== 'verified' &&
+                        onTeachAiFact && (
+                          <div className="playnix-ai-inline-teach">
+                            <div className="playnix-ai-inline-teach-q">
+                              <HelpCircle size={14} />
+                              <span>
+                                <strong>AI asks you:</strong>{' '}
+                                {sug.ownerClarificationQuestion ||
+                                  `Can you tell me the missing details for "${selectedQuestion.productName}" so I can answer this accurately?`}
+                              </span>
+                            </div>
+                            <div className="playnix-ai-inline-teach-row">
+                              <input
+                                type="text"
+                                value={teachDraft}
+                                maxLength={500}
+                                onChange={(e) => setTeachDraft(e.target.value)}
+                                placeholder="Type answer to teach AI & update draft..."
+                              />
+                              <button
+                                type="button"
+                                className="primary-btn owner-q-action-btn"
+                                disabled={teachingAi || !teachDraft.trim()}
+                                onClick={async () => {
+                                  const askedQ =
+                                    sug.ownerClarificationQuestion ||
+                                    sug.missingInfoNote ||
+                                    `Missing info for ${selectedQuestion.productName}`;
+                                  setTeachingAi(true);
+                                  setAiError('');
+                                  try {
+                                    const liveProd =
+                                      productLookup.get(selectedQuestion.productId) || null;
+                                    const updated = await onTeachAiFact(
+                                      selectedQuestion,
+                                      liveProd,
+                                      askedQ,
+                                      teachDraft.trim()
+                                    );
+                                    setTeachDraft('');
+                                    if (updated?.success && updated.suggestion) {
+                                      setAiSuggestionsByQId((prev) => ({
+                                        ...prev,
+                                        [selectedQuestion.id]: updated.suggestion!,
+                                      }));
+                                      setAiDecisionByQId((prev) => ({
+                                        ...prev,
+                                        [selectedQuestion.id]: 'approved',
+                                      }));
+                                      hasManualEditRef.current = false;
+                                      replyDraftRef.current = updated.suggestion.suggestedAnswer;
+                                      setReplyDraft(updated.suggestion.suggestedAnswer);
+                                      setModalSuccess(
+                                        'Taught Playnix AI & refreshed your reply draft! Review and click "Send & Publish Answer".'
+                                      );
+                                    }
+                                  } catch (err: any) {
+                                    setAiError(err?.message || 'Could not save guidance to AI.');
+                                  } finally {
+                                    setTeachingAi(false);
+                                  }
+                                }}
+                              >
+                                {teachingAi ? 'Teaching AI...' : 'Teach AI & Re-Draft'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
                       {sug.usedSources.length > 0 && (
                         <div className="playnix-ai-sources-line">
                           <HelpCircle size={13} />
@@ -827,7 +911,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
             {/* Owner Reply Form (Always manual final submission) */}
             <form className="owner-q-reply-form" onSubmit={(e) => void handleSaveReply(e)}>
               <label htmlFor={`owner-reply-${selectedQuestion.id}`}>
-                Final Answer to Publish (visible on product page — sent manually only)
+                Final Answer to Send (visible only to the customer who asked — sent manually only)
               </label>
               <textarea
                 ref={replyTextareaRef}

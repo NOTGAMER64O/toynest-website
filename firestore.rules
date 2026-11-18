@@ -372,5 +372,50 @@ service cloud.firestore {
         && isValidAiTrainingAnswer(request.resource.data);
       allow delete: if isValidId(stepId);
     }
+
+    // Playnix AI Guidance Questions Collection (questions asked by AI when it needs help):
+    function isValidAiGuidanceQuestion(data) {
+      return data.keys().hasAll(['id', 'question', 'category', 'source', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id',
+          'question',
+          'context',
+          'category',
+          'source',
+          'productId',
+          'productName',
+          'customerQuestionId',
+          'answer',
+          'status',
+          'createdAt',
+          'answeredAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.question is string
+        && data.question.size() > 0
+        && data.question.size() <= 500
+        && (!('context' in data) || (data.context is string && data.context.size() <= 600))
+        && data.category in ['catalog', 'product_spec', 'delivery', 'returns', 'payment', 'availability', 'orders', 'support', 'faq', 'policy', 'tone']
+        && data.source in ['scan', 'customer_question', 'ai_audit']
+        && (!('productId' in data) || (data.productId is string && data.productId.size() <= 128))
+        && (!('productName' in data) || (data.productName is string && data.productName.size() <= 200))
+        && (!('customerQuestionId' in data) || (data.customerQuestionId is string && data.customerQuestionId.size() <= 128))
+        && (!('answer' in data) || (data.answer is string && data.answer.size() <= 4000))
+        && data.status in ['open', 'answered', 'dismissed']
+        && data.createdAt is string
+        && data.createdAt.size() <= 64
+        && (!('answeredAt' in data) || (data.answeredAt is string && data.answeredAt.size() <= 64))
+        && data.updatedAt is string
+        && data.updatedAt.size() <= 64;
+    }
+
+    match /aiGuidanceQuestions/{questionId} {
+      allow read: if true;
+      allow create, update: if isValidId(questionId)
+        && request.resource.data.id == questionId
+        && isValidAiGuidanceQuestion(request.resource.data);
+      allow delete: if isValidId(questionId);
+    }
   }
 }

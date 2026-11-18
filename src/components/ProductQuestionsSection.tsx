@@ -72,31 +72,29 @@ export const ProductQuestionsSection: React.FC<ProductQuestionsSectionProps> = (
     }
   }, [externalOpenTrigger]);
 
-  // Real-time Firebase listener scoped strictly to this product ID
+  // Real-time Firebase listener scoped strictly to this customer's own questions for this product
   useEffect(() => {
-    if (!product.id) return;
+    if (!product.id || !customerId) return;
     setQuestions([]);
-    const unsubscribe = subscribeToProductQuestionsByProduct(product.id, (list) => {
+    const unsubscribe = subscribeToProductQuestionsByProduct(product.id, customerId, (list) => {
       setQuestions(list);
     });
     return () => unsubscribe();
-  }, [product.id]);
+  }, [product.id, customerId]);
 
-  // Show all owner-answered Q&As for this product, plus this customer's own pending questions
+  // Show only the questions & owner replies belonging to this customer
   const visibleQuestions = useMemo(() => {
     return questions.filter(
-      (q) =>
-        q.productId === product.id &&
-        ((q.status === 'Answered' && Boolean(q.answer?.trim())) || q.customerId === customerId)
+      (q) => q.productId === product.id && q.customerId === customerId
     );
   }, [questions, product.id, customerId]);
 
   const answeredCount = useMemo(
     () =>
-      questions.filter(
-        (q) => q.productId === product.id && q.status === 'Answered' && Boolean(q.answer?.trim())
+      visibleQuestions.filter(
+        (q) => q.status === 'Answered' && Boolean(q.answer?.trim())
       ).length,
-    [questions, product.id]
+    [visibleQuestions]
   );
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -138,7 +136,7 @@ export const ProductQuestionsSection: React.FC<ProductQuestionsSectionProps> = (
       setQuestionText('');
       setIsFormOpen(false);
       setSubmitSuccess(
-        'Your question has been submitted! Once the shop owner replies, the answer will appear right here.'
+        'Your question has been submitted! Only you and the shop owner can see it — the reply will appear right here.'
       );
     } catch (err: any) {
       console.warn('Could not submit product question:', err);
@@ -163,8 +161,10 @@ export const ProductQuestionsSection: React.FC<ProductQuestionsSectionProps> = (
             <h3>Product Q&amp;A</h3>
             <p>
               {answeredCount > 0
-                ? `${answeredCount} ${answeredCount === 1 ? 'answer' : 'answers'} from the owner`
-                : 'Have a question about size, colours, or playtime?'}
+                ? `${answeredCount} ${answeredCount === 1 ? 'reply' : 'replies'} from the owner (only visible to you)`
+                : visibleQuestions.length > 0
+                ? 'Private to you — awaiting owner reply'
+                : 'Ask privately about size, colours, or playtime — only visible to you'}
             </p>
           </div>
         </div>
@@ -312,7 +312,7 @@ export const ProductQuestionsSection: React.FC<ProductQuestionsSectionProps> = (
       ) : (
         !isFormOpen && (
           <div className="product-qa-empty">
-            No answered questions for this product yet. Be the first to ask!
+            You haven&apos;t asked any questions for this product yet. Questions you ask are private and only visible to you.
           </div>
         )
       )}

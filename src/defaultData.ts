@@ -1137,9 +1137,29 @@ export interface AiSuggestedReplyResult {
   groundingStatus: 'verified' | 'partial' | 'missing_info';
   confidence: 'high' | 'medium' | 'low';
   missingInfoNote: string;
+  ownerClarificationQuestion?: string;
   usedSources: string[];
   modelUsed?: string;
   generatedAt: string;
+}
+
+export type AiGuidanceQuestionStatus = 'open' | 'answered' | 'dismissed';
+export type AiGuidanceQuestionSource = 'scan' | 'customer_question' | 'ai_audit';
+
+export interface AiGuidanceQuestion {
+  id: string;
+  question: string;
+  context?: string;
+  category: AiKnowledgeCategory;
+  source: AiGuidanceQuestionSource;
+  productId?: string;
+  productName?: string;
+  customerQuestionId?: string;
+  answer?: string;
+  status: AiGuidanceQuestionStatus;
+  createdAt: string;
+  answeredAt?: string;
+  updatedAt: string;
 }
 
 export interface AiTrainingQuestionDefinition {
@@ -1329,4 +1349,19 @@ export function saveStoredAiTrainingAnswers(answers: AiTrainingAnswer[]): void {
   } catch {}
 }
 
+export function getStoredAiGuidanceQuestions(): AiGuidanceQuestion[] {
+  try {
+    const raw = localStorage.getItem('playnix_ai_guidance_questions');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
 
+export function saveStoredAiGuidanceQuestions(list: AiGuidanceQuestion[]): void {
+  try {
+    localStorage.setItem('playnix_ai_guidance_questions', JSON.stringify(list));
+  } catch {}
+}

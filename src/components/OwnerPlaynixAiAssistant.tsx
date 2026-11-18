@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import {
   type AiAssistantState,
+  type AiGuidanceQuestion,
   type AiKnowledgeCategory,
   type AiKnowledgeEntry,
   type AiResponseStyleMode,
@@ -36,12 +37,14 @@ import {
   formatInIST,
 } from '../defaultData';
 
-export type PlaynixAiSubView = 'overview' | 'feed' | 'training' | 'knowledge' | 'tester';
+export type PlaynixAiSubView = 'overview' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
 
 interface OwnerPlaynixAiAssistantProps {
   aiState: AiAssistantState;
   knowledgeEntries: AiKnowledgeEntry[];
   trainingAnswers: AiTrainingAnswer[];
+  guidanceQuestions: AiGuidanceQuestion[];
+  guidanceLoading?: boolean;
   products: Product[];
   availableColours: string[];
   pendingQuestionsCount: number;
@@ -70,6 +73,10 @@ interface OwnerPlaynixAiAssistantProps {
     responseStyleMode: AiResponseStyleMode;
     customInstructions: string;
   }) => Promise<void>;
+  onRequestAiGuidance: () => Promise<number>;
+  onAnswerGuidanceQuestion: (questionId: string, answerText: string) => Promise<void>;
+  onDismissGuidanceQuestion: (questionId: string) => Promise<void>;
+  onDeleteGuidanceQuestion: (questionId: string) => Promise<void>;
   onTestAiQuestion: (
     product: Product,
     questionText: string
@@ -100,6 +107,8 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   aiState,
   knowledgeEntries,
   trainingAnswers,
+  guidanceQuestions,
+  guidanceLoading = false,
   products,
   availableColours,
   pendingQuestionsCount,
@@ -114,10 +123,22 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   onSaveKnowledgeEntry,
   onDeleteKnowledgeEntry,
   onSaveBehaviorSettings,
+  onRequestAiGuidance,
+  onAnswerGuidanceQuestion,
+  onDismissGuidanceQuestion,
+  onDeleteGuidanceQuestion,
   onTestAiQuestion,
   onOpenProductQuestions,
 }) => {
   const [subView, setSubView] = useState<PlaynixAiSubView>('overview');
+
+  // Guidance ("AI Needs Help") States
+  const [guidanceFilter, setGuidanceFilter] = useState<'open' | 'answered' | 'dismissed'>('open');
+  const [guidanceDrafts, setGuidanceDrafts] = useState<Record<string, string>>({});
+  const [editingGuidanceId, setEditingGuidanceId] = useState<string | null>(null);
+  const [guidanceSavingId, setGuidanceSavingId] = useState<string | null>(null);
+  const [guidanceBannerMsg, setGuidanceBannerMsg] = useState<string>('');
+  const [guidanceErrorMsg, setGuidanceErrorMsg] = useState<string>('');
 
   // Feed AI Info & Response Style States
   const [styleModeDraft, setStyleModeDraft] = useState<AiResponseStyleMode>(
@@ -487,6 +508,61 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     (answeredCount / PLAYNIX_TRAINING_QUESTIONS.length) * 100
   );
 
+  const openGuidanceQuestions = useMemo(
+    () => guidanceQuestions.filter((g) => g.status === 'open'),
+    [guidanceQuestions]
+  );
+  const answeredGuidanceQuestions = useMemo(
+    () => guidanceQuestions.filter((g) => g.status === 'answered'),
+    [guidanceQuestions]
+  );
+  const dismissedGuidanceQuestions = useMemo(
+    () => guidanceQuestions.filter((g) => g.status === 'dismissed'),
+    [guidanceQuestions]
+  );
+
+  const visibleGuidanceQuestions = useMemo(() => {
+    if (guidanceFilter === 'answered') return answeredGuidanceQuestions;
+    if (guidanceFilter === 'dismissed') return dismissedGuidanceQuestions;
+    return openGuidanceQuestions;
+  }, [guidanceFilter, openGuidanceQuestions, answeredGuidanceQuestions, dismissedGuidanceQuestions]);
+
+  const handleAskAiWhatNeedsHelp = async () => {
+    setGuidanceErrorMsg('');
+    setGuidanceBannerMsg('');
+    try {
+      const added = await onRequestAiGuidance();
+      if (added > 0) {
+        setGuidanceFilter('open');
+        setGuidanceBannerMsg(`Playnix AI asked ${added} new question(s) where it needs your help.`);
+      } else {
+        setGuidanceBannerMsg('Playnix AI checked your store and found no new unasked questions right now.');
+      }
+    } catch (err: any) {
+      setGuidanceErrorMsg(err?.message || 'Could not ask AI for questions right now.');
+    }
+  };
+
+  const handleSubmitGuidanceAnswer = async (item: AiGuidanceQuestion) => {
+    const draftText = (guidanceDrafts[item.id] ?? item.answer ?? '').trim();
+    if (!draftText) {
+      setGuidanceErrorMsg('Please type your answer before saving.');
+      return;
+    }
+    setGuidanceErrorMsg('');
+    setGuidanceBannerMsg('');
+    setGuidanceSavingId(item.id);
+    try {
+      await onAnswerGuidanceQuestion(item.id, draftText);
+      setEditingGuidanceId(null);
+      setGuidanceBannerMsg('Saved & taught Playnix AI! This answer is now in your verified Knowledge Base.');
+    } catch (err: any) {
+      setGuidanceErrorMsg(err?.message || 'Could not save your answer.');
+    } finally {
+      setGuidanceSavingId(null);
+    }
+  };
+
   return (
     <section className="playnix-ai-panel" aria-label="Playnix AI Assistant management">
       {/* Header & Global Controls */}
@@ -658,6 +734,15 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
         <button
           type="button"
           role="tab"
+          aria-selected={subView === 'guidance'}
+          className={`offers-filter-tab-btn ${subView === 'guidance' ? 'active' : ''}`}
+          onClick={() => setSubView('guidance')}
+        >
+          <HelpCircle size={14} /> AI Needs Help ({openGuidanceQuestions.length})
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={subView === 'feed'}
           className={`offers-filter-tab-btn ${subView === 'feed' ? 'active' : ''}`}
           onClick={() => setSubView('feed')}
@@ -797,6 +882,19 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               </div>
             )}
 
+            <div className="playnix-ai-card-footer" style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => setSubView('guidance')}
+              >
+                <HelpCircle size={15} />
+                {openGuidanceQuestions.length > 0
+                  ? `Answer AI's ${openGuidanceQuestions.length} Help Question(s) →`
+                  : 'Open AI Help Questions →'}
+              </button>
+            </div>
+
             <div className="playnix-ai-safety-box">
               <div className="playnix-ai-safety-title">
                 <ShieldAlert size={15} /> Playnix AI Safety Guarantees
@@ -809,6 +907,195 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               </ul>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          VIEW 1A: AI NEEDS HELP / QUESTIONS ASKED BY AI TO THE OWNER
+         ===================================================================== */}
+      {subView === 'guidance' && (
+        <div className="playnix-ai-card">
+          <div className="playnix-ai-card-head">
+            <div>
+              <span className="eyebrow">AI GUIDANCE INBOX</span>
+              <h3>Questions From Playnix AI (Needs Your Help)</h3>
+              <p className="playnix-ai-subtitle">
+                Whenever AI spots missing product info, unclear policies, or gets stuck on a customer question, it asks you directly here. Answering saves the fact straight into AI&apos;s verified Knowledge Base.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="primary-btn"
+              disabled={guidanceLoading}
+              onClick={() => void handleAskAiWhatNeedsHelp()}
+            >
+              <Sparkles size={15} className={guidanceLoading ? 'refresh-spinning' : ''} />
+              {guidanceLoading ? 'Checking Store Gaps...' : 'Let AI Ask What It Needs'}
+            </button>
+          </div>
+
+          <div className="owner-questions-filter-pills" style={{ marginBottom: 14 }}>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${guidanceFilter === 'open' ? 'active' : ''}`}
+              onClick={() => setGuidanceFilter('open')}
+            >
+              Needs Help ({openGuidanceQuestions.length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${guidanceFilter === 'answered' ? 'active' : ''}`}
+              onClick={() => setGuidanceFilter('answered')}
+            >
+              Answered &amp; Learned ({answeredGuidanceQuestions.length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${guidanceFilter === 'dismissed' ? 'active' : ''}`}
+              onClick={() => setGuidanceFilter('dismissed')}
+            >
+              Dismissed ({dismissedGuidanceQuestions.length})
+            </button>
+          </div>
+
+          {guidanceErrorMsg && (
+            <p className="error-msg" style={{ margin: '0 0 10px' }}>
+              {guidanceErrorMsg}
+            </p>
+          )}
+          {guidanceBannerMsg && (
+            <p className="success-msg" style={{ margin: '0 0 10px' }}>
+              {guidanceBannerMsg}
+            </p>
+          )}
+
+          {visibleGuidanceQuestions.length === 0 ? (
+            <div className="empty-state compact">
+              <div className="empty-icon">
+                <HelpCircle size={30} />
+              </div>
+              <h3>
+                {guidanceFilter === 'open'
+                  ? 'No open questions from AI right now'
+                  : guidanceFilter === 'answered'
+                  ? 'No answered guidance questions yet'
+                  : 'No dismissed questions'}
+              </h3>
+              <p>
+                {guidanceFilter === 'open'
+                  ? 'Click "Let AI Ask What It Needs" above to let AI scan your catalog & pending customer questions and ask you anything it needs clarification on.'
+                  : 'Switch tabs or answer open AI questions to build verified shop knowledge.'}
+              </p>
+            </div>
+          ) : (
+            <div className="playnix-ai-guidance-list">
+              {visibleGuidanceQuestions.map((item) => {
+                const isEditingThis = item.status === 'open' || editingGuidanceId === item.id;
+                const draftVal = guidanceDrafts[item.id] ?? item.answer ?? '';
+                const sourceLabel =
+                  item.source === 'customer_question'
+                    ? 'Customer Question Gap'
+                    : item.source === 'ai_audit'
+                    ? 'AI Store Audit'
+                    : 'Catalog Scan';
+
+                return (
+                  <article key={item.id} className={`playnix-ai-guidance-card status-${item.status}`}>
+                    <div className="playnix-ai-know-top">
+                      <div className="playnix-ai-know-badges">
+                        <span className="playnix-ai-source-badge owner">{sourceLabel}</span>
+                        <span className="playnix-ai-cat-badge">{item.category}</span>
+                      </div>
+                      {item.productName && (
+                        <span className="playnix-ai-prod-tag">Toy: {item.productName}</span>
+                      )}
+                    </div>
+
+                    <h4>{item.question}</h4>
+                    {item.context && <p className="playnix-ai-guidance-ctx">{item.context}</p>}
+
+                    {isEditingThis ? (
+                      <div className="playnix-ai-guidance-reply-box">
+                        <textarea
+                          rows={3}
+                          maxLength={4000}
+                          value={draftVal}
+                          onChange={(e) =>
+                            setGuidanceDrafts((prev) => ({
+                              ...prev,
+                              [item.id]: e.target.value,
+                            }))
+                          }
+                          placeholder="Type the answer or guidance for Playnix AI..."
+                        />
+                        <div className="playnix-ai-guidance-actions">
+                          <button
+                            type="button"
+                            className="primary-btn"
+                            disabled={guidanceSavingId === item.id || !draftVal.trim()}
+                            onClick={() => void handleSubmitGuidanceAnswer(item)}
+                          >
+                            <CheckCircle2 size={14} />
+                            {guidanceSavingId === item.id ? 'Saving...' : 'Save Answer & Teach AI'}
+                          </button>
+                          {item.status === 'open' ? (
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              disabled={guidanceSavingId === item.id}
+                              onClick={() => void onDismissGuidanceQuestion(item.id)}
+                            >
+                              Dismiss
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              onClick={() => setEditingGuidanceId(null)}
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="playnix-ai-guidance-answered">
+                        {item.answer && (
+                          <p className="playnix-ai-guidance-saved-ans">
+                            <strong>Your Guidance:</strong> {item.answer}
+                          </p>
+                        )}
+                        <div className="playnix-ai-guidance-actions">
+                          {item.status === 'answered' && (
+                            <button
+                              type="button"
+                              className="secondary-btn owner-q-action-btn"
+                              onClick={() => {
+                                setGuidanceDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: item.answer || '',
+                                }));
+                                setEditingGuidanceId(item.id);
+                              }}
+                            >
+                              <Edit3 size={13} /> Edit Answer
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="secondary-btn owner-q-action-btn danger-text"
+                            onClick={() => void onDeleteGuidanceQuestion(item.id)}
+                          >
+                            <Trash2 size={13} /> Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1610,6 +1897,16 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                   <span>
                     <strong>Note to Owner:</strong> {testResult.suggestion.missingInfoNote}
                   </span>
+                </div>
+              )}
+              {testResult.suggestion.ownerClarificationQuestion && (
+                <div className="playnix-ai-inline-teach" style={{ marginTop: 8 }}>
+                  <div className="playnix-ai-inline-teach-q">
+                    <HelpCircle size={14} />
+                    <span>
+                      <strong>AI asks you:</strong> {testResult.suggestion.ownerClarificationQuestion}
+                    </span>
+                  </div>
                 </div>
               )}
               {testResult.suggestion.usedSources.length > 0 && (

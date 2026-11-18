@@ -1451,6 +1451,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
     '6. If required information is missing from the verified data:',
     '   - Set groundingStatus to "missing_info" (or "partial" if part of the question can be answered safely from verified data).',
     '   - Set missingInfoNote to a clear, helpful message for the OWNER naming the exact missing detail(s) (e.g., "Verified material/dimensions are not listed for this product yet.").',
+    '   - Set ownerClarificationQuestion to ONE direct, plain question asking the OWNER for the missing fact AI needs (e.g., "What material, dimensions, and age suitability should customers know for Supra MK4?"). When groundingStatus is "verified", set ownerClarificationQuestion to "".',
     '   - In suggestedAnswer, NEVER make up or guess the missing fact; either share ONLY the verified portion and clearly note the remaining question for the owner to confirm, OR follow the owner training unknown_fallback & communication_style preference to draft an honest holding response (or state clearly what needs owner input).',
     `7. Follow OWNER_RESPONSE_STYLE_RULE (${styleDirective})${
       ownerCustomInstructions
@@ -1476,6 +1477,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
           enum: ['high', 'medium', 'low'],
         },
         missingInfoNote: { type: Type.STRING },
+        ownerClarificationQuestion: { type: Type.STRING },
         usedSources: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
@@ -1486,6 +1488,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
         'groundingStatus',
         'confidence',
         'missingInfoNote',
+        'ownerClarificationQuestion',
         'usedSources',
       ],
     },
@@ -1554,6 +1557,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
           ? parsed.confidence
           : 'medium',
       missingInfoNote: String(parsed.missingInfoNote || '').trim().slice(0, 600),
+      ownerClarificationQuestion: String(parsed.ownerClarificationQuestion || '').trim().slice(0, 480),
       usedSources: Array.isArray(parsed.usedSources)
         ? parsed.usedSources.map((s: any) => String(s || '').trim()).filter(Boolean).slice(0, 12)
         : [],
@@ -1996,6 +2000,278 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       success: false,
       geminiConfigured: getGeminiClient() !== null,
       error: friendlyError,
+    });
+  }
+});
+
+app.post('/api/owner/ai/ask-guidance', async (req, res) => {
+  const { pin } = req.body || {};
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  try {
+    const body = req.body || {};
+    const products: any[] = Array.isArray(body.products) ? body.products : [];
+    const pendingQuestions: any[] = Array.isArray(body.pendingQuestions) ? body.pendingQuestions : [];
+    const knowledgeEntries: any[] = Array.isArray(body.knowledgeEntries) ? body.knowledgeEntries : [];
+    const trainingAnswers: any[] = Array.isArray(body.trainingAnswers) ? body.trainingAnswers : [];
+    const existingQuestions: any[] = Array.isArray(body.existingGuidanceQuestions)
+      ? body.existingGuidanceQuestions
+      : [];
+
+    const existingNormalized = new Set(
+      existingQuestions.map((g: any) => String(g?.question || '').trim().toLowerCase())
+    );
+    const existingProductSpecGapIds = new Set(
+      existingQuestions
+        .filter((g: any) => g?.productId && g?.status !== 'dismissed')
+        .map((g: any) => `${String(g.productId)}::${String(g.category || '')}`)
+    );
+
+    const allowedCats = new Set([
+      'catalog',
+      'product_spec',
+      'delivery',
+      'returns',
+      'payment',
+      'availability',
+      'orders',
+      'support',
+      'faq',
+      'policy',
+      'tone',
+    ]);
+
+    const generated: Array<{
+      id: string;
+      question: string;
+      context: string;
+      category: string;
+      source: 'scan' | 'customer_question' | 'ai_audit';
+      productId?: string;
+      productName?: string;
+      customerQuestionId?: string;
+    }> = [];
+
+    const pushUniqueQuestion = (item: {
+      id: string;
+      question: string;
+      context: string;
+      category: string;
+      source: 'scan' | 'customer_question' | 'ai_audit';
+      productId?: string;
+      productName?: string;
+      customerQuestionId?: string;
+    }) => {
+      const qClean = item.question.trim().slice(0, 480);
+      if (!qClean) return;
+      const norm = qClean.toLowerCase();
+      if (existingNormalized.has(norm)) return;
+      if (generated.some((g) => g.question.toLowerCase() === norm)) return;
+      existingNormalized.add(norm);
+      generated.push({
+        ...item,
+        question: qClean,
+        context: item.context.trim().slice(0, 550),
+        category: allowedCats.has(item.category) ? item.category : 'product_spec',
+      });
+    };
+
+    const ownerKnowledgeTextByProduct = new Map<string, string>();
+    for (const k of knowledgeEntries) {
+      if (k?.productId && k?.source === 'owner' && k?.content) {
+        ownerKnowledgeTextByProduct.set(
+          String(k.productId),
+          `${ownerKnowledgeTextByProduct.get(String(k.productId)) || ''} ${String(k.content)}`
+        );
+      }
+    }
+
+    // 1. Deterministic audit for live products missing descriptions/specs
+    for (const p of products) {
+      if (p?.available === false) continue;
+      const pid = String(p?.id || '').trim();
+      const pname = String(p?.name || '').trim();
+      const desc = String(p?.description || '').trim();
+      if (!pid || !pname) continue;
+      const hasOwnerNotes = Boolean(ownerKnowledgeTextByProduct.get(pid)?.trim());
+      if (!desc && !hasOwnerNotes && !existingProductSpecGapIds.has(`${pid}::product_spec`)) {
+        pushUniqueQuestion({
+          id: `guide_prod_${sanitizeKnowledgeId('p', pid).slice(0, 90)}`,
+          question: `What are the size, material, and key features of "${pname}"?`,
+          context: `This live product currently has no description or owner notes, so AI needs your help to answer customer questions about it.`,
+          category: 'product_spec',
+          source: 'scan',
+          productId: pid,
+          productName: pname,
+        });
+      }
+      if (generated.length >= 4) break;
+    }
+
+    // 2. Gemini-powered deep audit across pending customer questions, products & training policies
+    const ai = getGeminiClient();
+    let usedGemini = false;
+    if (ai) {
+      const compactProducts = products
+        .filter((p) => p && p.available !== false)
+        .slice(0, 18)
+        .map((p) => ({
+          id: String(p.id || ''),
+          name: String(p.name || ''),
+          category: String(p.category || 'Other'),
+          price: Number(p.price) || 0,
+          hasDescription: Boolean(String(p.description || '').trim()),
+          description: String(p.description || '').trim().slice(0, 180),
+        }));
+
+    const compactPending = pendingQuestions.slice(0, 10).map((q) => ({
+      id: String(q.id || ''),
+      productId: String(q.productId || ''),
+      productName: String(q.productName || ''),
+      customerQuestion: String(q.question || '').slice(0, 220),
+    }));
+
+      const compactKnowledge = knowledgeEntries.slice(0, 25).map((k) => ({
+        title: String(k.title || ''),
+        category: String(k.category || ''),
+        productId: k.productId ? String(k.productId) : undefined,
+        content: String(k.content || '').slice(0, 200),
+      }));
+
+      const answeredTopics = trainingAnswers
+        .filter((t) => t?.status === 'answered' && t?.answer?.trim())
+        .map((t) => String(t.stepKey));
+
+      const auditPrompt = [
+        'You are Playnix AI Assistant asking the Playnix Shop owner for help or clarification where your verified knowledge is incomplete.',
+        'Review the live products, unanswered customer questions, existing knowledge entries, and already-asked guidance questions.',
+        'Generate up to 5 crisp, practical questions that AI genuinely needs the owner to answer so AI can reply accurately to customers in the future.',
+        'Rules:',
+        '- Do NOT repeat questions already present in EXISTING_GUIDANCE_QUESTIONS or already answered in EXISTING_KNOWLEDGE.',
+        '- Prioritize unanswered customer questions that lack product/policy facts, popular products with unclear size/material/battery/age specs, or missing store handling rules.',
+        '- Keep every question short, direct, and easy for the shop owner to answer in 1-2 lines.',
+        '',
+        `LIVE_PRODUCTS: ${JSON.stringify(compactProducts)}`,
+        `PENDING_CUSTOMER_QUESTIONS: ${JSON.stringify(compactPending)}`,
+        `EXISTING_KNOWLEDGE: ${JSON.stringify(compactKnowledge)}`,
+        `ANSWERED_TRAINING_TOPICS: ${JSON.stringify(answeredTopics)}`,
+        `EXISTING_GUIDANCE_QUESTIONS: ${JSON.stringify(Array.from(existingNormalized).slice(0, 25))}`,
+      ].join('\n');
+
+      const cfgSchema: any = {
+        systemInstruction:
+          'Generate practical clarification questions from Playnix AI to the Playnix Shop owner when verified data has gaps.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  question: { type: Type.STRING },
+                  context: { type: Type.STRING },
+                  category: {
+                    type: Type.STRING,
+                    enum: [
+                      'catalog',
+                      'product_spec',
+                      'delivery',
+                      'returns',
+                      'payment',
+                      'availability',
+                      'orders',
+                      'support',
+                      'faq',
+                      'policy',
+                      'tone',
+                    ],
+                  },
+                  productId: { type: Type.STRING },
+                  productName: { type: Type.STRING },
+                  customerQuestionId: { type: Type.STRING },
+                },
+                required: ['question', 'context', 'category'],
+              },
+            },
+          },
+          required: ['questions'],
+        },
+        abortSignal: AbortSignal.timeout(7000),
+      };
+
+      const runAuditOnce = async (modelName: string) => {
+        const c = { ...cfgSchema };
+        if (modelName === PLAYNIX_GEMINI_MODEL) {
+          c.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        return ai.models.generateContent({
+          model: modelName,
+          contents: auditPrompt,
+          config: c,
+        });
+      };
+
+      try {
+        const primaryModel =
+          Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+        let resp: any;
+        try {
+          resp = await runAuditOnce(primaryModel);
+        } catch (err: any) {
+          const m = String(err?.message || '').toLowerCase();
+          if (
+            primaryModel === PLAYNIX_GEMINI_MODEL &&
+            (err?.status === 503 || err?.name === 'TimeoutError' || err?.name === 'AbortError' || m.includes('503') || m.includes('high demand'))
+          ) {
+            hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+            resp = await runAuditOnce('gemini-3.1-flash-lite');
+          } else {
+            throw err;
+          }
+        }
+        const parsed = resp?.text ? JSON.parse(resp.text) : null;
+        if (Array.isArray(parsed?.questions)) {
+          usedGemini = true;
+          parsed.questions.slice(0, 5).forEach((q: any, idx: number) => {
+            const qText = String(q?.question || '').trim();
+            if (!qText) return;
+            const pid = q?.productId ? String(q.productId).trim().slice(0, 128) : undefined;
+            const pname = q?.productName ? String(q.productName).trim().slice(0, 200) : undefined;
+            const cqid = q?.customerQuestionId
+              ? String(q.customerQuestionId).trim().slice(0, 128)
+              : undefined;
+            pushUniqueQuestion({
+              id: `guide_ai_${Date.now().toString(36)}_${idx}`,
+              question: qText,
+              context: String(q?.context || 'AI noticed a helpful detail missing from verified store data.').trim(),
+              category: String(q?.category || 'product_spec'),
+              source: cqid ? 'customer_question' : 'ai_audit',
+              productId: pid || undefined,
+              productName: pname || undefined,
+              customerQuestionId: cqid || undefined,
+            });
+          });
+        }
+      } catch (err: any) {
+        console.info('AI guidance audit used deterministic checks:', String(err?.status || err?.name || 'fallback'));
+      }
+    }
+
+    res.json({
+      success: true,
+      geminiConfigured: ai !== null,
+      usedGemini,
+      questions: generated.slice(0, 8),
+    });
+  } catch (err: any) {
+    console.error('Error in /api/owner/ai/ask-guidance:', err);
+    res.status(500).json({
+      success: false,
+      error: err?.message || 'Could not generate AI guidance questions right now.',
     });
   }
 });

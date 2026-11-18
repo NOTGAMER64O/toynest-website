@@ -246,6 +246,7 @@ import {
   type AiTrainingAnswer,
   type AiTrainingStepKey,
   type AiSuggestedReplyResult,
+  type AiGuidanceQuestion,
   DEFAULT_RESCUE_DEALS,
   DEFAULT_AI_ASSISTANT_STATE,
   PLAYNIX_TRAINING_QUESTIONS,
@@ -268,6 +269,8 @@ import {
   saveStoredAiState,
   getStoredAiKnowledge,
   saveStoredAiKnowledge,
+  getStoredAiGuidanceQuestions,
+  saveStoredAiGuidanceQuestions,
   getStoredAiTrainingAnswers,
   saveStoredAiTrainingAnswers,
   computeOfferStatus,
@@ -364,6 +367,10 @@ import {
   fetchAiTrainingAnswersFromCloud,
   subscribeToAiTrainingAnswers,
   saveAiTrainingAnswerToCloud,
+  fetchAiGuidanceQuestionsFromCloud,
+  subscribeToAiGuidanceQuestions,
+  saveAiGuidanceQuestionToCloud,
+  deleteAiGuidanceQuestionFromCloud,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
@@ -926,6 +933,10 @@ export default function App() {
   const [aiTrainingAnswers, setAiTrainingAnswers] = useState<AiTrainingAnswer[]>(() =>
     getStoredAiTrainingAnswers()
   );
+  const [aiGuidanceQuestions, setAiGuidanceQuestions] = useState<AiGuidanceQuestion[]>(() =>
+    getStoredAiGuidanceQuestions()
+  );
+  const [aiGuidanceLoading, setAiGuidanceLoading] = useState<boolean>(false);
   const [aiScanning, setAiScanning] = useState<boolean>(false);
   const [aiScanFeedback, setAiScanFeedback] = useState<{
     message: string;
@@ -1401,10 +1412,11 @@ export default function App() {
   const loadOwnerAiData = async () => {
     if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
     try {
-      const [cloudState, cloudKnowledge, cloudTraining] = await Promise.all([
+      const [cloudState, cloudKnowledge, cloudTraining, cloudGuidance] = await Promise.all([
         fetchAiAssistantStateFromCloud(),
         fetchAiKnowledgeFromCloud(),
         fetchAiTrainingAnswersFromCloud(),
+        fetchAiGuidanceQuestionsFromCloud(),
       ]);
       setAiState(cloudState);
       saveStoredAiState(cloudState);
@@ -1412,6 +1424,8 @@ export default function App() {
       saveStoredAiKnowledge(cloudKnowledge);
       setAiTrainingAnswers(cloudTraining);
       saveStoredAiTrainingAnswers(cloudTraining);
+      setAiGuidanceQuestions(cloudGuidance);
+      saveStoredAiGuidanceQuestions(cloudGuidance);
     } catch (err) {
       console.warn('Could not load Playnix AI data from Firebase:', err);
     }
@@ -1532,6 +1546,9 @@ export default function App() {
           : `Website scanned factually — ${websiteEntries.length} verified entries saved. ${data.geminiStatusNote || ''}`.trim(),
         isError: false,
       });
+
+      // Automatically generate any open help/guidance questions AI needs from the owner
+      void handleRequestAiGuidance(true);
     } catch (err: any) {
       setAiScanFeedback({
         message:
@@ -1708,12 +1725,288 @@ export default function App() {
     await saveAiAssistantStateToCloud(nextState);
   };
 
+  const recordAiGuidanceQuestion = async (input: {
+    id?: string;
+    question: string;
+    context?: string;
+    category?: AiKnowledgeEntry['category'];
+    source: AiGuidanceQuestion['source'];
+    productId?: string;
+    productName?: string;
+    customerQuestionId?: string;
+  }) => {
+    const cleanQuestion = String(input.question || '').trim().slice(0, 500);
+    if (!cleanQuestion) return null;
+    const norm = cleanQuestion.toLowerCase();
+    const existing = aiGuidanceQuestions.find(
+      (g) =>
+        g.question.trim().toLowerCase() === norm ||
+        (input.customerQuestionId &&
+          g.customerQuestionId === input.customerQuestionId &&
+          g.status !== 'dismissed')
+    );
+    if (existing) return existing;
+
+    const nowIso = new Date().toISOString();
+    const safeId = (
+      input.id ||
+      `guide_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+    )
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 128);
+
+    const newEntry: AiGuidanceQuestion = {
+      id: safeId,
+      question: cleanQuestion,
+      context: input.context ? String(input.context).trim().slice(0, 600) : undefined,
+      category: input.category || 'product_spec',
+      source: input.source,
+      productId: input.productId || undefined,
+      productName: input.productName || undefined,
+      customerQuestionId: input.customerQuestionId || undefined,
+      status: 'open',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setAiGuidanceQuestions((prev) => {
+      if (prev.some((g) => g.id === newEntry.id || g.question.trim().toLowerCase() === norm)) {
+        return prev;
+      }
+      const next = [newEntry, ...prev];
+      saveStoredAiGuidanceQuestions(next);
+      return next;
+    });
+    await saveAiGuidanceQuestionToCloud(newEntry);
+    return newEntry;
+  };
+
+  const handleRequestAiGuidance = async (silent = false) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return 0;
+    if (!silent) setAiGuidanceLoading(true);
+    try {
+      const pendingQs = ownerProductQuestions
+        .filter((q) => q.status === 'Pending')
+        .map((q) => ({
+          id: q.id,
+          productId: q.productId,
+          productName: q.productName,
+          question: q.question,
+        }));
+      const res = await ownerPost('/api/owner/ai/ask-guidance', {
+        products: products.map((p) => ({
+          id: p.id,
+          name: p.name,
+          category: p.category,
+          price: p.price,
+          available: p.available,
+          description: p.description,
+        })),
+        pendingQuestions: pendingQs,
+        knowledgeEntries: aiKnowledge.slice(0, 40),
+        trainingAnswers: aiTrainingAnswers,
+        existingGuidanceQuestions: aiGuidanceQuestions.slice(0, 40),
+      });
+      const list = Array.isArray(res.data?.questions) ? res.data.questions : [];
+      let addedCount = 0;
+      for (const item of list) {
+        const created = await recordAiGuidanceQuestion({
+          id: item.id,
+          question: item.question,
+          context: item.context,
+          category: item.category,
+          source: item.source || 'ai_audit',
+          productId: item.productId,
+          productName: item.productName,
+          customerQuestionId: item.customerQuestionId,
+        });
+        if (created) addedCount++;
+      }
+      return addedCount;
+    } catch (err) {
+      if (!silent) console.warn('Could not ask AI for guidance questions:', err);
+      return 0;
+    } finally {
+      if (!silent) setAiGuidanceLoading(false);
+    }
+  };
+
+  const handleAnswerAiGuidanceQuestion = async (questionId: string, answerText: string) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const cleanAnswer = answerText.trim();
+    if (!cleanAnswer) throw new Error('Please type your answer before saving.');
+    const target = aiGuidanceQuestions.find((g) => g.id === questionId);
+    if (!target) return;
+
+    const nowIso = new Date().toISOString();
+    const updatedItem: AiGuidanceQuestion = {
+      ...target,
+      answer: cleanAnswer.slice(0, 4000),
+      status: 'answered',
+      answeredAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    await handleSaveAiKnowledgeEntry({
+      id: `know_guide_${target.id}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128),
+      title: target.question.slice(0, 200),
+      content: `AI Question: ${target.question}\nOwner Guidance: ${cleanAnswer}`,
+      category: target.category || 'product_spec',
+      source: 'owner',
+      productId: target.productId,
+      productName: target.productName,
+      verified: true,
+    });
+
+    await saveAiGuidanceQuestionToCloud(updatedItem);
+    setAiGuidanceQuestions((prev) => {
+      const next = [updatedItem, ...prev.filter((g) => g.id !== questionId)].sort(
+        (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+      );
+      saveStoredAiGuidanceQuestions(next);
+      return next;
+    });
+  };
+
+  const handleDismissAiGuidanceQuestion = async (questionId: string) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const target = aiGuidanceQuestions.find((g) => g.id === questionId);
+    if (!target) return;
+    const updatedItem: AiGuidanceQuestion = {
+      ...target,
+      status: 'dismissed',
+      updatedAt: new Date().toISOString(),
+    };
+    await saveAiGuidanceQuestionToCloud(updatedItem);
+    setAiGuidanceQuestions((prev) => {
+      const next = prev.map((g) => (g.id === questionId ? updatedItem : g));
+      saveStoredAiGuidanceQuestions(next);
+      return next;
+    });
+  };
+
+  const handleDeleteAiGuidanceQuestion = async (questionId: string) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    await deleteAiGuidanceQuestionFromCloud(questionId);
+    setAiGuidanceQuestions((prev) => {
+      const next = prev.filter((g) => g.id !== questionId);
+      saveStoredAiGuidanceQuestions(next);
+      return next;
+    });
+  };
+
+  const handleTeachAiFromProductQuestion = async (
+    questionObj: ProductQuestion,
+    linkedProduct: Product | null,
+    aiAskedQuestion: string,
+    ownerAnswerText: string
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const cleanAnswer = ownerAnswerText.trim();
+    if (!cleanAnswer) throw new Error('Enter the detail you want to teach Playnix AI.');
+    const nowIso = new Date().toISOString();
+    const guideId = `guide_cq_${questionObj.id}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+    const guideDoc: AiGuidanceQuestion = {
+      id: guideId,
+      question: aiAskedQuestion.trim().slice(0, 500) || `Details for "${questionObj.productName}"`,
+      context: `Customer asked: "${questionObj.question.slice(0, 200)}"`,
+      category: 'product_spec',
+      source: 'customer_question',
+      productId: linkedProduct?.id || questionObj.productId,
+      productName: linkedProduct?.name || questionObj.productName,
+      customerQuestionId: questionObj.id,
+      answer: cleanAnswer.slice(0, 4000),
+      status: 'answered',
+      createdAt: nowIso,
+      answeredAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    const knowEntryId = `know_guide_${guideId}`.slice(0, 128);
+    await handleSaveAiKnowledgeEntry({
+      id: knowEntryId,
+      title: guideDoc.question.slice(0, 200),
+      content: `Owner Note for ${guideDoc.productName}: ${cleanAnswer}`,
+      category: 'product_spec',
+      source: 'owner',
+      productId: guideDoc.productId,
+      productName: guideDoc.productName,
+      verified: true,
+    });
+    await saveAiGuidanceQuestionToCloud(guideDoc);
+    setAiGuidanceQuestions((prev) => {
+      const next = [guideDoc, ...prev.filter((g) => g.id !== guideId)];
+      saveStoredAiGuidanceQuestions(next);
+      return next;
+    });
+
+    // Re-run suggestion immediately using the newly taught verified knowledge entry
+    const enrichedKnowledge: AiKnowledgeEntry[] = [
+      {
+        id: knowEntryId,
+        title: guideDoc.question.slice(0, 200),
+        content: `Owner Note for ${guideDoc.productName}: ${cleanAnswer}`,
+        category: 'product_spec',
+        source: 'owner',
+        productId: guideDoc.productId,
+        productName: guideDoc.productName,
+        verified: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+      ...aiKnowledge.filter((k) => k.id !== knowEntryId),
+    ];
+
+    let effectivePrice: number | undefined = linkedProduct?.price;
+    let activeOfferLabel: string | undefined;
+    if (linkedProduct) {
+      const discount = calculateProductDiscount(linkedProduct, activeDiscountCampaigns);
+      if (discount.hasDiscount) {
+        effectivePrice = discount.discountedPrice;
+        activeOfferLabel = discount.discountLabel || discount.campaignName;
+      }
+    }
+    const res = await ownerPost('/api/owner/ai/suggest-answer', {
+      product: linkedProduct
+        ? {
+            id: linkedProduct.id,
+            name: linkedProduct.name,
+            category: linkedProduct.category,
+            price: linkedProduct.price,
+            available: linkedProduct.available,
+            description: linkedProduct.description,
+            imageCount: Array.isArray(linkedProduct.imageUrls)
+              ? linkedProduct.imageUrls.length
+              : linkedProduct.imageUrl
+              ? 1
+              : 0,
+          }
+        : null,
+      productId: linkedProduct?.id || questionObj.productId,
+      productName: linkedProduct?.name || questionObj.productName,
+      effectivePrice,
+      activeOfferLabel,
+      availableColours,
+      question: questionObj.question,
+      knowledgeEntries: enrichedKnowledge,
+      trainingAnswers: aiTrainingAnswers,
+      responseStyleMode: aiState.responseStyleMode || 'balanced',
+      customInstructions: aiState.customInstructions || '',
+    });
+    return res.data;
+  };
+
   const runGroundedAiSuggestion = async (
     product: Product | null,
     questionText: string,
     endpoint: '/api/owner/ai/suggest-answer' | '/api/owner/ai/test-question',
     fallbackProductId?: string,
-    fallbackProductName?: string
+    fallbackProductName?: string,
+    customerQuestionId?: string
   ): Promise<{
     success: boolean;
     geminiConfigured?: boolean;
@@ -1773,6 +2066,33 @@ export default function App() {
         }));
       }
 
+      // If AI detected missing info on a customer question, automatically log a help question for the owner
+      const sug: AiSuggestedReplyResult | undefined = res.data?.suggestion;
+      if (
+        endpoint === '/api/owner/ai/suggest-answer' &&
+        res.data?.success &&
+        sug &&
+        sug.groundingStatus !== 'verified'
+      ) {
+        const helpQ =
+          (sug.ownerClarificationQuestion || '').trim() ||
+          (sug.missingInfoNote
+            ? `Missing info for "${product?.name || fallbackProductName || 'Product'}": ${sug.missingInfoNote}`
+            : '');
+        if (helpQ) {
+          void recordAiGuidanceQuestion({
+            id: customerQuestionId ? `guide_cq_${customerQuestionId}` : undefined,
+            question: helpQ,
+            context: `Customer asked on "${product?.name || fallbackProductName || 'Product'}": "${questionText.slice(0, 180)}"`,
+            category: 'product_spec',
+            source: 'customer_question',
+            productId: product?.id || fallbackProductId,
+            productName: product?.name || fallbackProductName,
+            customerQuestionId,
+          });
+        }
+      }
+
       return res.data;
     } catch (err: any) {
       return {
@@ -1795,7 +2115,8 @@ export default function App() {
       questionObj.question,
       '/api/owner/ai/suggest-answer',
       questionObj.productId,
-      questionObj.productName
+      questionObj.productName,
+      questionObj.id
     );
   };
 
@@ -2786,6 +3107,7 @@ export default function App() {
       let unsubAiState = () => {};
       let unsubAiKnowledge = () => {};
       let unsubAiTraining = () => {};
+      let unsubAiGuidance = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -2816,6 +3138,10 @@ export default function App() {
           setAiTrainingAnswers(answers);
           saveStoredAiTrainingAnswers(answers);
         });
+        unsubAiGuidance = subscribeToAiGuidanceQuestions((list) => {
+          setAiGuidanceQuestions(list);
+          saveStoredAiGuidanceQuestions(list);
+        });
         void checkAiServerStatus();
       } else {
         setAllCartItems([]);
@@ -2831,6 +3157,7 @@ export default function App() {
         unsubAiState();
         unsubAiKnowledge();
         unsubAiTraining();
+        unsubAiGuidance();
       };
     } else {
       setAllCartItems([]);
@@ -8486,6 +8813,7 @@ export default function App() {
                 onMarkStatus={handleMarkQuestionStatus}
                 onDeleteQuestion={handleDeleteQuestion}
                 onSuggestAiReply={handleSuggestAiReplyForQuestion}
+                onTeachAiFact={handleTeachAiFromProductQuestion}
                 onOpenAiAssistant={() => {
                   setOwnerTab('aiAssistant');
                   void loadOwnerAiData();
@@ -8500,6 +8828,8 @@ export default function App() {
                 aiState={aiState}
                 knowledgeEntries={aiKnowledge}
                 trainingAnswers={aiTrainingAnswers}
+                guidanceQuestions={aiGuidanceQuestions}
+                guidanceLoading={aiGuidanceLoading}
                 products={products}
                 availableColours={availableColours}
                 pendingQuestionsCount={pendingQuestionsCount}
@@ -8514,6 +8844,10 @@ export default function App() {
                 onSaveKnowledgeEntry={handleSaveAiKnowledgeEntry}
                 onDeleteKnowledgeEntry={handleDeleteAiKnowledgeEntry}
                 onSaveBehaviorSettings={handleSaveAiBehaviorSettings}
+                onRequestAiGuidance={() => handleRequestAiGuidance(false)}
+                onAnswerGuidanceQuestion={handleAnswerAiGuidanceQuestion}
+                onDismissGuidanceQuestion={handleDismissAiGuidanceQuestion}
+                onDeleteGuidanceQuestion={handleDeleteAiGuidanceQuestion}
                 onTestAiQuestion={handleTestAiQuestion}
                 onOpenProductQuestions={() => {
                   setOwnerTab('questions');

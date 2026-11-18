@@ -45,6 +45,7 @@ import {
   type AiKnowledgeEntry,
   type AiTrainingAnswer,
   type AiTrainingStepKey,
+  type AiGuidanceQuestion,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   DEFAULT_AI_ASSISTANT_STATE,
@@ -2412,19 +2413,25 @@ export async function submitProductQuestionToCloud(questionObj: ProductQuestion)
 
 export function subscribeToProductQuestionsByProduct(
   productId: string,
+  customerId: string,
   callback: (questions: ProductQuestion[]) => void
 ): () => void {
-  if (!productId) return () => {};
-  const path = `productQuestions?productId=${productId}`;
+  if (!productId || !customerId) return () => {};
+  const path = `productQuestions?customerId=${customerId}&productId=${productId}`;
   try {
-    const q = query(collection(db, 'productQuestions'), where('productId', '==', productId));
+    const q = query(collection(db, 'productQuestions'), where('customerId', '==', customerId));
     return onSnapshot(
       q,
       (snapshot) => {
         const list: ProductQuestion[] = [];
         snapshot.forEach((d) => {
           const data = d.data() as any;
-          if (data && data.question) {
+          if (
+            data &&
+            data.question &&
+            data.productId === productId &&
+            data.customerId === customerId
+          ) {
             list.push(normalizeProductQuestion(data, d.id));
           }
         });
@@ -2960,5 +2967,152 @@ export async function saveAiTrainingAnswerToCloud(answerObj: AiTrainingAnswer): 
   }
 }
 
+function normalizeAiGuidanceQuestion(data: any, docId: string): AiGuidanceQuestion {
+  const validCategories = new Set([
+    'catalog',
+    'product_spec',
+    'delivery',
+    'returns',
+    'payment',
+    'availability',
+    'orders',
+    'support',
+    'faq',
+    'policy',
+    'tone',
+  ]);
+  const cat = validCategories.has(data?.category) ? data.category : 'product_spec';
+  const source =
+    data?.source === 'customer_question' || data?.source === 'ai_audit'
+      ? data.source
+      : 'scan';
+  const status =
+    data?.status === 'answered' || data?.status === 'dismissed' ? data.status : 'open';
+  return {
+    id: String(data?.id || docId).slice(0, 128),
+    question: String(data?.question || '').trim().slice(0, 500),
+    context: data?.context ? String(data.context).trim().slice(0, 600) : undefined,
+    category: cat,
+    source,
+    productId: data?.productId ? String(data.productId).slice(0, 128) : undefined,
+    productName: data?.productName ? String(data.productName).trim().slice(0, 200) : undefined,
+    customerQuestionId: data?.customerQuestionId
+      ? String(data.customerQuestionId).slice(0, 128)
+      : undefined,
+    answer: data?.answer ? String(data.answer).trim().slice(0, 4000) : undefined,
+    status,
+    createdAt: String(data?.createdAt || new Date().toISOString()).slice(0, 64),
+    answeredAt: data?.answeredAt ? String(data.answeredAt).slice(0, 64) : undefined,
+    updatedAt: String(data?.updatedAt || new Date().toISOString()).slice(0, 64),
+  };
+}
 
+export async function fetchAiGuidanceQuestionsFromCloud(): Promise<AiGuidanceQuestion[]> {
+  const path = 'aiGuidanceQuestions';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'aiGuidanceQuestions'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'aiGuidanceQuestions'));
+    }
+    const list: AiGuidanceQuestion[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.question) {
+        list.push(normalizeAiGuidanceQuestion(data, d.id));
+      }
+    });
+    return list.sort(
+      (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+    );
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI guidance questions fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
 
+export function subscribeToAiGuidanceQuestions(
+  callback: (list: AiGuidanceQuestion[]) => void
+): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'aiGuidanceQuestions'),
+      (snapshot) => {
+        const list: AiGuidanceQuestion[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.question) {
+            list.push(normalizeAiGuidanceQuestion(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('AI guidance questions subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveAiGuidanceQuestionToCloud(item: AiGuidanceQuestion): Promise<void> {
+  const safeId = String(item.id || `guide_${Date.now().toString(36)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 128);
+  const path = `aiGuidanceQuestions/${safeId}`;
+  try {
+    const nowIso = new Date().toISOString();
+    const payload = sanitizeForFirestore({
+      id: safeId,
+      question: String(item.question || '').trim().slice(0, 500),
+      context: item.context ? String(item.context).trim().slice(0, 600) : undefined,
+      category: item.category || 'product_spec',
+      source:
+        item.source === 'customer_question' || item.source === 'ai_audit'
+          ? item.source
+          : 'scan',
+      productId: item.productId ? String(item.productId).slice(0, 128) : undefined,
+      productName: item.productName ? String(item.productName).trim().slice(0, 200) : undefined,
+      customerQuestionId: item.customerQuestionId
+        ? String(item.customerQuestionId).slice(0, 128)
+        : undefined,
+      answer: item.answer ? String(item.answer).trim().slice(0, 4000) : undefined,
+      status:
+        item.status === 'answered' || item.status === 'dismissed' ? item.status : 'open',
+      createdAt: (item.createdAt || nowIso).slice(0, 64),
+      answeredAt: item.answeredAt ? String(item.answeredAt).slice(0, 64) : undefined,
+      updatedAt: (item.updatedAt || nowIso).slice(0, 64),
+    });
+    await setDoc(doc(db, 'aiGuidanceQuestions', safeId), payload);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI guidance question save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function deleteAiGuidanceQuestionFromCloud(questionId: string): Promise<void> {
+  const path = `aiGuidanceQuestions/${questionId}`;
+  try {
+    await deleteDoc(doc(db, 'aiGuidanceQuestions', questionId));
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI guidance question delete deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
