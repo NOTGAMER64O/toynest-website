@@ -15,6 +15,10 @@ import {
   calculateProductDiscount,
 } from '../defaultData';
 import { filterAndRankProducts } from '../firebase';
+import {
+  smartSearchProducts,
+  doesPriceSatisfyConstraint,
+} from '../utils/smartSearch';
 
 interface CustomerSearchBarProps {
   products: Product[];
@@ -33,17 +37,6 @@ interface AiSearchState {
   matches: Array<{ id: string; reason: string }>;
   suggestedRefinements: string[];
   error?: string;
-}
-
-function isNaturalLanguageSearch(q: string, keywordMatchCount: number): boolean {
-  const clean = q.trim().toLowerCase();
-  if (clean.length < 3) return false;
-  const words = clean.split(/\s+/).filter(Boolean);
-  if (words.length >= 2) return true;
-  if (keywordMatchCount === 0 && clean.length >= 3) return true;
-  return /\b(gift|birthday|under|below|above|cheap|best|kids|kid|boy|girl|toddler|indoor|outdoor|age|year|yrs|car|cars|gadi|puzzle|action)\b/.test(
-    clean
-  );
 }
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
@@ -106,6 +99,17 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     [products]
   );
 
+  const getProductEffectivePrice = useCallback(
+    (product: Product): number => {
+      const activeOffer = activeOffersByProductId.get(product.id);
+      if (activeOffer) return Number(activeOffer.discountedPrice) || product.price;
+      const campaignDisc = calculateProductDiscount(product, activeDiscountCampaigns);
+      if (campaignDisc.isDiscounted) return Number(campaignDisc.discountedPrice) || product.price;
+      return Number(product.price) || 0;
+    },
+    [activeOffersByProductId, activeDiscountCampaigns]
+  );
+
   // Sorted popular searches loaded dynamically from Firebase
   const sortedPopularSearches = useMemo(
     () =>
@@ -118,11 +122,21 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     [popularSearches]
   );
 
-  // Instant case-insensitive search across name, category, highlights, and description
+  // Fast deterministic smart search: numerical price filters, relative price sorting, fuzzy spelling, and domain synonyms
+  const smartSearch = useMemo(() => {
+    if (!query.trim()) {
+      return smartSearchProducts(availableProducts, '', getProductEffectivePrice);
+    }
+    return smartSearchProducts(availableProducts, query, getProductEffectivePrice);
+  }, [availableProducts, query, getProductEffectivePrice]);
+
   const keywordSearchResults = useMemo(() => {
     if (!query.trim()) return [];
+    if (smartSearch.products.length > 0) return smartSearch.products;
+    // If an explicit price filter yielded 0 matches, NEVER fall back to loose keyword results
+    if (smartSearch.parsed.hasExplicitNumericPrice) return [];
     return filterAndRankProducts(availableProducts, query);
-  }, [availableProducts, query]);
+  }, [availableProducts, query, smartSearch]);
 
   const catalogSignature = useMemo(
     () => `${availableProducts.length}:${availableProducts.map((p) => p.id).slice(0, 10).join(',')}`,
@@ -133,6 +147,28 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     async (rawQuery: string) => {
       const clean = rawQuery.trim();
       if (clean.length < 2 || availableProducts.length === 0) {
+        setAiResult(null);
+        setAiLoading(false);
+        return;
+      }
+
+      // Skip Gemini completely when an explicit numerical price query has 0 matching products in the catalog
+      const localEval = smartSearchProducts(availableProducts, clean, getProductEffectivePrice);
+      if (localEval.parsed.hasExplicitNumericPrice && localEval.priceEligibleCatalogCount === 0) {
+        if (aiAbortRef.current) aiAbortRef.current.abort();
+        setAiResult({
+          query: clean,
+          understoodIntent: localEval.emptyReason,
+          matches: [],
+          suggestedRefinements: [],
+        });
+        setAiLoading(false);
+        return;
+      }
+
+      // Avoid burning Gemini calls when deterministic pure-price search already resolved cleanly
+      if (localEval.parsed.isPurePriceQuery) {
+        if (aiAbortRef.current) aiAbortRef.current.abort();
         setAiResult(null);
         setAiLoading(false);
         return;
@@ -154,24 +190,15 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
       setAiLoading(true);
 
       try {
-        const compactCatalog = availableProducts.slice(0, 80).map((p) => {
-          const activeOffer = activeOffersByProductId.get(p.id);
-          const campaignDisc = calculateProductDiscount(p, activeDiscountCampaigns);
-          const effectivePrice = activeOffer
-            ? activeOffer.discountedPrice
-            : campaignDisc.isDiscounted
-            ? campaignDisc.discountedPrice
-            : p.price;
-          return {
-            id: p.id,
-            name: p.name,
-            category: p.category || 'Other',
-            price: p.price,
-            effectivePrice,
-            description: p.description || '',
-            highlights: Array.isArray(p.highlights) ? p.highlights : [],
-          };
-        });
+        const compactCatalog = availableProducts.slice(0, 120).map((p) => ({
+          id: p.id,
+          name: p.name,
+          category: p.category || 'Other',
+          price: p.price,
+          effectivePrice: getProductEffectivePrice(p),
+          description: p.description || '',
+          highlights: Array.isArray(p.highlights) ? p.highlights : [],
+        }));
 
         const res = await fetch('/api/customer/ai-search', {
           method: 'POST',
@@ -215,10 +242,10 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
         }
       }
     },
-    [availableProducts, activeOffersByProductId, activeDiscountCampaigns, catalogSignature]
+    [availableProducts, getProductEffectivePrice, catalogSignature]
   );
 
-  // Automatic debounced AI understanding when user pauses on natural-language / zero-hit query
+  // Only invoke Gemini AI for descriptive / natural-language queries that deterministic search cannot already answer cleanly
   useEffect(() => {
     const clean = query.trim();
     if (!clean) {
@@ -236,7 +263,8 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
       return;
     }
 
-    if (!isOpen || !isNaturalLanguageSearch(clean, keywordSearchResults.length)) {
+    if (!isOpen || !smartSearch.shouldCallAi) {
+      if (aiAbortRef.current) aiAbortRef.current.abort();
       setAiResult((prev) => (prev && prev.query.toLowerCase() === clean.toLowerCase() ? prev : null));
       setAiLoading(false);
       return;
@@ -244,10 +272,10 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
 
     const timer = window.setTimeout(() => {
       void triggerAiSearch(clean);
-    }, 520);
+    }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [query, isOpen, keywordSearchResults.length, catalogSignature, triggerAiSearch]);
+  }, [query, isOpen, smartSearch.shouldCallAi, catalogSignature, triggerAiSearch]);
 
   useEffect(() => {
     return () => {
@@ -255,7 +283,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     };
   }, []);
 
-  // Merge AI matches + direct keyword matches (AI order prioritized when query matches AI intent)
+  // Merge AI matches + deterministic smart matches, always enforcing numerical price rules strictly
   const activeAiResult = useMemo(() => {
     const clean = query.trim().toLowerCase();
     if (!aiResult || aiResult.query.toLowerCase() !== clean) return null;
@@ -272,36 +300,57 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
     return map;
   }, [activeAiResult]);
 
+  const localBadgeMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of smartSearch.matches) {
+      if (m.product?.id && m.matchBadge) {
+        map.set(m.product.id, m.matchBadge);
+      }
+    }
+    return map;
+  }, [smartSearch.matches]);
+
   const searchResults = useMemo(() => {
     if (!query.trim()) return [];
     const byId = new Map(availableProducts.map((p) => [p.id, p]));
     const merged: Product[] = [];
     const seen = new Set<string>();
 
-    // When AI matched products for this query, prioritize AI-ranked products first
+    const passesNumericalPrice = (prod: Product): boolean => {
+      if (!smartSearch.parsed.hasExplicitNumericPrice) return true;
+      return doesPriceSatisfyConstraint(
+        prod.price,
+        getProductEffectivePrice(prod),
+        smartSearch.parsed
+      );
+    };
+
+    // Prioritize deterministic smart matches when found cleanly; augment with price-verified AI matches if any
+    for (const prod of keywordSearchResults) {
+      if (passesNumericalPrice(prod) && !seen.has(prod.id)) {
+        seen.add(prod.id);
+        merged.push(prod);
+      }
+    }
+
     if (activeAiResult && activeAiResult.matches.length > 0) {
       for (const m of activeAiResult.matches) {
         const prod = byId.get(m.id);
-        if (prod && !seen.has(prod.id)) {
+        if (prod && passesNumericalPrice(prod) && !seen.has(prod.id)) {
           seen.add(prod.id);
           merged.push(prod);
         }
       }
     }
 
-    // Append direct keyword matches not already included (skip if strict budget query and AI returned strict matches)
-    const isStrictBudgetQuery = /\b(under|below|less\s+than|max|upto|within)\s*₹?\s*\d+/i.test(query);
-    if (!(isStrictBudgetQuery && activeAiResult && activeAiResult.matches.length > 0)) {
-      for (const prod of keywordSearchResults) {
-        if (!seen.has(prod.id)) {
-          seen.add(prod.id);
-          merged.push(prod);
-        }
-      }
+    if (smartSearch.parsed.priceSort === 'asc') {
+      merged.sort((a, b) => getProductEffectivePrice(a) - getProductEffectivePrice(b));
+    } else if (smartSearch.parsed.priceSort === 'desc') {
+      merged.sort((a, b) => getProductEffectivePrice(b) - getProductEffectivePrice(a));
     }
 
     return merged;
-  }, [query, availableProducts, activeAiResult, keywordSearchResults]);
+  }, [query, availableProducts, keywordSearchResults, activeAiResult, smartSearch.parsed, getProductEffectivePrice]);
 
   // Live search suggestions generated dynamically while typing
   const liveSuggestions = useMemo(() => {
@@ -413,6 +462,9 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
   };
 
   const trimmedQuery = query.trim();
+  const highlightQuery = smartSearch.parsed.residualTerms.join(' ');
+  const activeBannerText =
+    activeAiResult?.understoodIntent || smartSearch.intentSummary;
 
   return (
     <div className="catalog-search-wrap" ref={containerRef}>
@@ -516,15 +568,16 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
             </div>
           ) : (
             <>
-              {/* AI Understanding Status / Intent Strip */}
-              {(aiLoading || (activeAiResult && activeAiResult.understoodIntent)) && (
+              {/* AI / Smart Search Understanding Status Strip */}
+              {(aiLoading || Boolean(activeBannerText)) && (
                 <div className="catalog-ai-search-banner" aria-live="polite">
                   <Sparkles size={14} className={aiLoading ? 'refresh-spinning' : ''} />
                   {aiLoading ? (
                     <span>Playnix AI is understanding what you&apos;re looking for…</span>
                   ) : (
                     <span>
-                      <strong>AI Understood:</strong> {activeAiResult?.understoodIntent}
+                      <strong>{activeAiResult?.understoodIntent ? 'AI Understood:' : 'Smart Search:'}</strong>{' '}
+                      {activeBannerText}
                     </span>
                   )}
                 </div>
@@ -579,6 +632,7 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                         : product.price;
                       const isHighlighted = idx === highlightedIndex;
                       const aiReason = aiReasonMap.get(product.id);
+                      const localBadge = localBadgeMap.get(product.id);
 
                       return (
                         <button
@@ -603,12 +657,12 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                           <div className="catalog-search-result-body">
                             <div className="catalog-search-result-top">
                               <span className="catalog-search-result-name">
-                                <HighlightMatch text={product.name} query={trimmedQuery} />
+                                <HighlightMatch text={product.name} query={highlightQuery} />
                               </span>
                               <span className="catalog-search-result-cat">
                                 <HighlightMatch
                                   text={product.category || 'Other'}
-                                  query={trimmedQuery}
+                                  query={highlightQuery}
                                 />
                               </span>
                             </div>
@@ -618,7 +672,11 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                               </p>
                             ) : product.description ? (
                               <p className="catalog-search-result-desc">
-                                <HighlightMatch text={product.description} query={trimmedQuery} />
+                                <HighlightMatch text={product.description} query={highlightQuery} />
+                              </p>
+                            ) : localBadge ? (
+                              <p className="catalog-ai-match-reason">
+                                <Sparkles size={11} /> {localBadge}
                               </p>
                             ) : null}
                           </div>
@@ -659,8 +717,12 @@ export const CustomerSearchBar: React.FC<CustomerSearchBarProps> = ({
                   <div className="catalog-search-empty-icon">🔍</div>
                   <h4>No products found</h4>
                   <p>
-                    We couldn&apos;t find any toys matching{' '}
-                    <strong>&ldquo;{trimmedQuery}&rdquo;</strong>.
+                    {smartSearch.emptyReason || (
+                      <>
+                        We couldn&apos;t find any toys matching{' '}
+                        <strong>&ldquo;{trimmedQuery}&rdquo;</strong>.
+                      </>
+                    )}
                   </p>
 
                   {sortedPopularSearches.length > 0 && (

@@ -57,6 +57,7 @@ import {
   getGuestShortCode,
   isRegisteredCustomerId,
 } from './defaultData';
+import { smartSearchProducts } from './utils/smartSearch';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
@@ -565,53 +566,10 @@ export function subscribeToProducts(callback: (products: Product[]) => void): ()
 }
 
 export function filterAndRankProducts(products: Product[], rawQuery: string): Product[] {
-  const q = rawQuery.trim().toLowerCase();
+  const q = rawQuery.trim();
   const availableProducts = products.filter((p) => p && p.available !== false);
   if (!q) return availableProducts;
-
-  const tokens = q.split(/\s+/).filter(Boolean);
-  const scored: Array<{ product: Product; score: number }> = [];
-
-  for (const product of availableProducts) {
-    const nameLower = (product.name || '').toLowerCase();
-    const categoryLower = (product.category || '').toLowerCase();
-    const descLower = (product.description || '').toLowerCase();
-    const highlightsLower = Array.isArray(product.highlights)
-      ? product.highlights.join(' ').toLowerCase()
-      : '';
-    const combined = `${nameLower} ${categoryLower} ${descLower} ${highlightsLower}`;
-
-    const allTokensMatch = tokens.every((token) => combined.includes(token));
-    if (!allTokensMatch) continue;
-
-    let score = 0;
-    if (nameLower === q) score += 120;
-    else if (nameLower.startsWith(q)) score += 75;
-    else if (nameLower.includes(q)) score += 50;
-
-    if (categoryLower === q) score += 45;
-    else if (categoryLower.includes(q)) score += 30;
-
-    if (descLower.includes(q)) score += 20;
-    if (highlightsLower.includes(q)) score += 18;
-
-    for (const token of tokens) {
-      if (nameLower.startsWith(token)) score += 12;
-      else if (nameLower.includes(token)) score += 8;
-      if (categoryLower.includes(token)) score += 6;
-      if (descLower.includes(token)) score += 3;
-      if (highlightsLower.includes(token)) score += 4;
-    }
-
-    scored.push({ product, score });
-  }
-
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return (a.product.name || '').localeCompare(b.product.name || '');
-  });
-
-  return scored.map((entry) => entry.product);
+  return smartSearchProducts(availableProducts, q).products;
 }
 
 export async function searchProductsFromCloud(rawQuery: string): Promise<Product[]> {

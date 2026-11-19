@@ -2288,6 +2288,152 @@ app.post('/api/owner/ai/product-highlights', async (req, res) => {
   }
 });
 
+interface ServerPriceConstraint {
+  exactPrice?: number;
+  minPrice?: number;
+  exclusiveMin: boolean;
+  maxPrice?: number;
+  exclusiveMax: boolean;
+  priceSort: 'asc' | 'desc' | null;
+  priceDescription: string;
+}
+
+function parseServerPriceConstraint(rawQuery: string): ServerPriceConstraint {
+  let working = rawQuery.trim().toLowerCase().replace(/\b1\s*:\s*\d+\b/g, (m) => m.replace(':', 'scale'));
+  let exactPrice: number | undefined;
+  let minPrice: number | undefined;
+  let exclusiveMin = false;
+  let maxPrice: number | undefined;
+  let exclusiveMax = false;
+  let priceSort: 'asc' | 'desc' | null = null;
+
+  const standalone = working.match(
+    /^\s*(?:priced?\s+at|price\s+(?:is|of)?|for|at)?\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?\s*$/i
+  );
+  if (standalone) {
+    const v = Number(standalone[1]);
+    if (Number.isFinite(v) && v > 0) exactPrice = v;
+  }
+
+  if (exactPrice === undefined) {
+    const betweenMatch =
+      working.match(
+        /\b(?:between|betwen|from)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr)?\s*(?:and|to|-|–|—)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?\b/i
+      ) ||
+      working.match(
+        /(?:^|\s)(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr)?\s*(?:to|-|–|—)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?(?:\s|$)/i
+      );
+    if (betweenMatch) {
+      const a = Number(betweenMatch[1]);
+      const b = Number(betweenMatch[2]);
+      if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
+        minPrice = Math.min(a, b);
+        maxPrice = Math.max(a, b);
+        working = working.replace(betweenMatch[0], ' ');
+      }
+    }
+  }
+
+  if (exactPrice === undefined) {
+    const upperKeyword = working.match(
+      /\b(?:under|undre|below|belw|bellow|less\s+than|lesser\s+than|cheaper\s+than|lower\s+than|upto|up\s+to|within|max|maximum|not\s+more\s+than|at\s*most)\s*(?:of|than)?\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?\b/i
+    );
+    const upperSym =
+      !upperKeyword && working.match(/(?:<=|<)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\b/i);
+    const upperMatch = upperKeyword || upperSym;
+    if (upperMatch) {
+      const v = Number(upperMatch[1]);
+      if (Number.isFinite(v) && v > 0) {
+        maxPrice = v;
+        exclusiveMax = Boolean(upperSym && upperSym[0].trim().startsWith('<') && !upperSym[0].includes('<='));
+        working = working.replace(upperMatch[0], ' ');
+      }
+    }
+  }
+
+  if (exactPrice === undefined) {
+    const strictLower = working.match(
+      /\b(?:above|abov|over|more\s+than|greater\s+than|higher\s+than|costlier\s+than|pricier\s+than)\s*(?:of|than)?\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?\b/i
+    );
+    const incLower =
+      !strictLower &&
+      working.match(
+        /\b(?:at\s*least|atleast|min|minimum|starting\s+(?:at|from)?|from)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr|only)?\b/i
+      );
+    const suffixLower =
+      !strictLower &&
+      !incLower &&
+      working.match(/(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:\+|\s+(?:and|or)\s+(?:above|more|up))\b/i);
+    const symLower =
+      !strictLower &&
+      !incLower &&
+      !suffixLower &&
+      working.match(/(?:>=|>)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\b/i);
+    const lowerMatch = strictLower || incLower || suffixLower || symLower;
+    if (lowerMatch) {
+      const v = Number(lowerMatch[1]);
+      if (Number.isFinite(v) && v >= 0) {
+        minPrice = v;
+        exclusiveMin = Boolean(
+          strictLower ||
+            (symLower && symLower[0].trim().startsWith('>') && !symLower[0].includes('>=')) ||
+            (suffixLower && /\band\s+above\b/i.test(suffixLower[0]))
+        );
+        working = working.replace(lowerMatch[0], ' ');
+      }
+    }
+  }
+
+  if (exactPrice === undefined && minPrice === undefined && maxPrice === undefined) {
+    const unitSafeWorking = working.replace(
+      /\b\d+(?:\.\d+)?\s*(?:year|yr|yrs|years|month|months|yo|kid|kids|boy|boys|girl|girls|pcs|piece|pieces|pack|cm|mm|inch|inches)\b/gi,
+      ' '
+    );
+    const taggedExact = unitSafeWorking.match(
+      /(?:\b(?:priced?\s+at|price\s+(?:is|of)?|costing|exact(?:ly)?|equals?)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\b|\b(?:for|at)\s*(?:₹|rs\.?|inr)\s*(\d+(?:\.\d+)?)\b|(?:₹|rs\.?|inr)\s*(\d+(?:\.\d+)?)\b|\b(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|inr)\b)/i
+    );
+    if (taggedExact) {
+      const v = Number(taggedExact[1] || taggedExact[2] || taggedExact[3] || taggedExact[4]);
+      if (Number.isFinite(v) && v > 0) exactPrice = v;
+    }
+  }
+
+  if (/\b(?:cheap|cheep|cheaper|cheapest|affordable|afordable|budget|inexpensive|lowest\s*price|low\s*price|low\s*cost)\b/i.test(working)) {
+    priceSort = 'asc';
+  } else if (/\b(?:expensive|costly|premium|luxury|highest\s*price|most\s*expensive)\b/i.test(working)) {
+    priceSort = 'desc';
+  }
+
+  let priceDescription = '';
+  if (exactPrice !== undefined) priceDescription = `priced at ₹${exactPrice}`;
+  else if (minPrice !== undefined && maxPrice !== undefined) priceDescription = `between ₹${minPrice} and ₹${maxPrice}`;
+  else if (maxPrice !== undefined) priceDescription = exclusiveMax ? `below ₹${maxPrice}` : `₹${maxPrice} or less`;
+  else if (minPrice !== undefined) priceDescription = exclusiveMin ? `above ₹${minPrice}` : `₹${minPrice} or more`;
+
+  return {
+    exactPrice,
+    minPrice,
+    exclusiveMin,
+    maxPrice,
+    exclusiveMax,
+    priceSort,
+    priceDescription,
+  };
+}
+
+function serverPriceMatches(price: number, originalPrice: number, c: ServerPriceConstraint): boolean {
+  if (c.exactPrice !== undefined) {
+    return Math.abs(price - c.exactPrice) < 0.01 || Math.abs(originalPrice - c.exactPrice) < 0.01;
+  }
+  if (c.minPrice !== undefined) {
+    if (c.exclusiveMin ? !(price > c.minPrice) : !(price >= c.minPrice)) return false;
+  }
+  if (c.maxPrice !== undefined) {
+    if (c.exclusiveMax ? !(price < c.maxPrice) : !(price <= c.maxPrice)) return false;
+  }
+  return true;
+}
+
 // Public Customer AI Smart Search — understands natural-language shopper queries & matches real catalog items
 app.post('/api/customer/ai-search', async (req, res) => {
   const ai = getGeminiClient();
@@ -2311,8 +2457,8 @@ app.post('/api/customer/ai-search', async (req, res) => {
     }
 
     const rawProducts: any[] = Array.isArray(body.products) ? body.products : [];
-    const catalog = rawProducts
-      .slice(0, 80)
+    const fullCatalog = rawProducts
+      .slice(0, 120)
       .map((p: any) => ({
         id: String(p?.id || '').trim().slice(0, 128),
         name: String(p?.name || '').trim().slice(0, 140),
@@ -2326,38 +2472,46 @@ app.post('/api/customer/ai-search', async (req, res) => {
       }))
       .filter((p) => p.id && p.name);
 
+    const priceConstraint = parseServerPriceConstraint(query);
+    const catalog = fullCatalog.filter((p) => serverPriceMatches(p.price, p.originalPrice, priceConstraint));
+
+    // Deterministic empty return if NO catalog product passes explicit numerical price bounds
     if (catalog.length === 0) {
       return res.json({
         success: true,
         geminiConfigured: true,
-        understoodIntent: '',
+        understoodIntent: priceConstraint.priceDescription
+          ? `No available products found ${priceConstraint.priceDescription}.`
+          : '',
         matchedProducts: [],
         suggestedRefinements: [],
       });
     }
 
+    const catalogMap = new Map(catalog.map((p) => [p.id, p]));
     const validIds = new Set(catalog.map((p) => p.id));
 
     const promptText = [
       'You are Playnix AI Shopping Search Assistant for Playnix Shop (India, currency INR ₹).',
-      'A customer typed a search request in the storefront search bar. Understand what they actually want—such as:',
-      '- Budget constraints ("under 500", "below ₹300", "budget gift", "cheap cars")',
-      '- Who it is for / age / occasion ("gift for 6 year old", "birthday gift", "toddler", "collector")',
-      '- Play style / features / material / theme ("superhero", "racing car", "wooden puzzle", "indoor game", "action figure", "open box deal")',
-      '- Synonyms, typos, or Hinglish/casual phrasing ("gadi", "khilona", "remote car", "super hero", "dollhouse")',
+      'A customer typed a natural-language search request in the storefront search bar.',
+      'NOTE: Numerical price limits have ALREADY been pre-filtered in CATALOG below.',
+      priceConstraint.priceDescription
+        ? `DETECTED PRICE CONSTRAINT: ${priceConstraint.priceDescription}. Every item in CATALOG satisfies this price limit.`
+        : 'Understand what the shopper means (gift recipient, age, play style, theme, synonyms, spelling mistakes, Hinglish/casual words).',
       '',
-      'CATALOG (ONLY pick products from this exact list; NEVER invent IDs or specs):',
-      JSON.stringify(catalog),
+      'CATALOG (ONLY pick products from this exact list; NEVER invent IDs, products, prices, or availability):',
+      JSON.stringify(catalog.slice(0, 80)),
       '',
       `<untrusted_customer_search>${query}</untrusted_customer_search>`,
       '',
-      'Rules:',
-      '- Return ONLY product IDs from CATALOG that genuinely fit the customer intent.',
-      '- Respect explicit price limits strictly (if user says "under 500", only return products with price <= 500).',
-      '- Rank best matches first (up to 8 products). If nothing fits at all, return an empty matchedProducts array and helpful suggestedRefinements.',
-      '- Keep "understoodIntent" to 1 crisp sentence (max 100 chars), e.g., "Action & superhero toys under ₹500".',
-      '- For each match, give a super short "reason" tag (max 55 chars), e.g., "₹299 · Collectible superhero figure".',
-      '- Provide 2 to 3 short clickable "suggestedRefinements" (2-4 words each) based on what actually exists in CATALOG.',
+      'STRICT RULES:',
+      '- Return ONLY product IDs from CATALOG that genuinely match what the customer actually asked for.',
+      '- CRITICAL EMPTY-RESULTS RULE: If nothing in CATALOG genuinely matches the requested product type, theme, or intent (e.g. customer asked for "helicopter", "lego", "ps5", or something not in CATALOG), you MUST return matchedProducts: []! NEVER force-fit or return unrelated toys.',
+      '- Do NOT recalculate prices or include products outside the catalog.',
+      '- Rank best matches first (up to 8 products).' + (priceConstraint.priceSort === 'asc' ? ' Prefer lower-priced affordable options first.' : priceConstraint.priceSort === 'desc' ? ' Prefer higher-priced premium options first.' : ''),
+      '- Keep "understoodIntent" to 1 crisp sentence (max 100 chars).',
+      '- For each match, give a super short "reason" tag (max 55 chars), e.g., "₹49 · Compact stress-relief fidget".',
+      '- Provide 2 to 3 short clickable "suggestedRefinements" (2-4 words each) based strictly on items that actually exist in the store.',
     ].join('\n');
 
     const runSearchOnce = async (modelName: string, timeoutMs: number) => {
@@ -2426,19 +2580,28 @@ app.post('/api/customer/ai-search', async (req, res) => {
 
     const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
     const seenIds = new Set<string>();
-    const matchedProducts: Array<{ id: string; reason: string }> = [];
+    const matchedProducts: Array<{ id: string; reason: string; price: number }> = [];
 
     if (Array.isArray(parsed?.matchedProducts)) {
       for (const m of parsed.matchedProducts) {
         const pid = String(m?.id || '').trim();
         if (!pid || !validIds.has(pid) || seenIds.has(pid)) continue;
+        const item = catalogMap.get(pid);
+        if (!item || !serverPriceMatches(item.price, item.originalPrice, priceConstraint)) continue;
         seenIds.add(pid);
         matchedProducts.push({
           id: pid,
           reason: String(m?.reason || '').trim().slice(0, 70),
+          price: item.price,
         });
         if (matchedProducts.length >= 8) break;
       }
+    }
+
+    if (priceConstraint.priceSort === 'asc') {
+      matchedProducts.sort((a, b) => a.price - b.price);
+    } else if (priceConstraint.priceSort === 'desc') {
+      matchedProducts.sort((a, b) => b.price - a.price);
     }
 
     const suggestedRefinements: string[] = Array.isArray(parsed?.suggestedRefinements)
@@ -2452,7 +2615,7 @@ app.post('/api/customer/ai-search', async (req, res) => {
       success: true,
       geminiConfigured: true,
       understoodIntent: String(parsed?.understoodIntent || '').trim().slice(0, 140),
-      matchedProducts,
+      matchedProducts: matchedProducts.map(({ id, reason }) => ({ id, reason })),
       suggestedRefinements,
       modelUsed,
     });
