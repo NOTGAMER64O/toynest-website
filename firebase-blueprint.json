@@ -29,7 +29,8 @@
         "ownerNote": { "type": "string", "maxLength": 500 },
         "queuePosition": { "type": "number" },
         "peopleAhead": { "type": "number" },
-        "colour": { "type": "string", "maxLength": 100 }
+        "colour": { "type": "string", "maxLength": 100 },
+        "aiVerification": { "type": "object", "description": "Playnix AI order risk inspection summary, flagged fields, owner decisions, and audit trail" }
       },
       "required": ["id", "orderNumber", "customerId", "mode", "productId", "productName", "price", "name", "status", "createdAt"]
     },

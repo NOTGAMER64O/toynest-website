@@ -38,6 +38,7 @@ import {
   BarChart3,
   HelpCircle,
   Bot,
+  ShieldAlert,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -247,6 +248,8 @@ import {
   type AiTrainingStepKey,
   type AiSuggestedReplyResult,
   type AiGuidanceQuestion,
+  type OrderAiVerification,
+  type OrderAuditEntry,
   DEFAULT_RESCUE_DEALS,
   DEFAULT_AI_ASSISTANT_STATE,
   PLAYNIX_TRAINING_QUESTIONS,
@@ -295,6 +298,7 @@ import {
   subscribeToAllOrders,
   subscribeToCustomerOrders,
   updateOrderStatusInCloud,
+  submitCustomerOrderClarificationInCloud,
   updateCustomerOrderNoteInCloud,
   deleteOrderFromCloud,
   markOrderDeletedByCustomerInCloud,
@@ -382,6 +386,8 @@ import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown'
 import { ProductQuestionsSection } from './components/ProductQuestionsSection';
 import { OwnerProductQuestionsManager } from './components/OwnerProductQuestionsManager';
 import { OwnerPlaynixAiAssistant } from './components/OwnerPlaynixAiAssistant';
+import { OrderVerificationCard } from './components/OrderVerificationCard';
+import { runDeterministicOrderInspection } from './utils/orderVerification';
 import { OwnerProductPriceAdvisor } from './components/OwnerProductPriceAdvisor';
 import {
   OrderSuccessCelebration,
@@ -1115,9 +1121,46 @@ export default function App() {
   const [customerSuggestion, setCustomerSuggestion] = useState<string>('');
   const [submittingSuggestion, setSubmittingSuggestion] = useState<boolean>(false);
   const [suggestionSuccess, setSuggestionSuccess] = useState<string>('');
-  const [orderStatusFilter, setOrderStatusFilter] = useState<'Pending' | 'Completed' | 'Cancelled'>('Pending');
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'Pending' | 'Flagged' | 'Completed' | 'Cancelled'>('Pending');
   const [orderSearchQuery, setOrderSearchQuery] = useState<string>('');
   const [highlightedOwnerOrderId, setHighlightedOwnerOrderId] = useState<string | null>(null);
+  const [inspectingOrderId, setInspectingOrderId] = useState<string | null>(null);
+  const [orderDecisionSavingId, setOrderDecisionSavingId] = useState<string | null>(null);
+  const [clarifyingCustomerOrderId, setClarifyingCustomerOrderId] = useState<string | null>(null);
+  const [customerClarifyReplyDraft, setCustomerClarifyReplyDraft] = useState<string>('');
+  const [customerClarifyPhoneDraft, setCustomerClarifyPhoneDraft] = useState<string>('');
+  const [customerClarifyAddressDraft, setCustomerClarifyAddressDraft] = useState<string>('');
+  const [customerClarifyClassDraft, setCustomerClarifyClassDraft] = useState<string>('');
+  const [customerClarifySectionDraft, setCustomerClarifySectionDraft] = useState<string>('');
+  const [savingCustomerClarifyId, setSavingCustomerClarifyId] = useState<string | null>(null);
+
+  const isOrderFlaggedForOwner = (o: Order): boolean => {
+    const v = o.aiVerification;
+    if (!v) return false;
+    if (v.decisionStatus === 'approved' || v.decisionStatus === 'rejected') return false;
+    if (v.riskLevel === 'HIGH' || v.riskLevel === 'MEDIUM') return true;
+    if (v.decisionStatus === 'pending_review' || v.decisionStatus === 'clarification_requested') return true;
+    if (
+      o.status === 'On Hold (AI Review)' ||
+      o.status === 'Awaiting Clarification' ||
+      o.status === 'Clarification Submitted'
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const flaggedOrdersForOwner = useMemo(() => {
+    return ownerOrders
+      .filter(isOrderFlaggedForOwner)
+      .sort((a, b) => {
+        const rank = (o: Order) =>
+          o.aiVerification?.riskLevel === 'HIGH' ? 0 : o.aiVerification?.riskLevel === 'MEDIUM' ? 1 : 2;
+        const rDiff = rank(a) - rank(b);
+        if (rDiff !== 0) return rDiff;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+  }, [ownerOrders]);
 
   const filteredOwnerOrders = useMemo(() => {
     const q = orderSearchQuery.trim().toLowerCase();
@@ -1125,6 +1168,8 @@ export default function App() {
       const matchesStatus =
         orderStatusFilter === 'Pending'
           ? !['Completed', 'Delivered', 'Collected', 'Cancelled'].includes(o.status)
+          : orderStatusFilter === 'Flagged'
+          ? isOrderFlaggedForOwner(o)
           : orderStatusFilter === 'Completed'
           ? ['Completed', 'Delivered', 'Collected'].includes(o.status)
           : o.status === orderStatusFilter;
@@ -4669,7 +4714,7 @@ export default function App() {
       !selectedDealForBuy && !selectedOfferForBuy && productDiscountInfo.isDiscounted
     );
 
-    const orderData: Order = {
+    const orderDataBase: Order = {
       id: orderId,
       orderNumber,
       customerId,
@@ -4717,8 +4762,29 @@ export default function App() {
         : {}),
     };
 
+    const linkedProdForInspection = products.find((p) => p.id === orderDataBase.productId);
+    const seenRecentIds = new Set<string>();
+    const recentOrdersPool = [...ownerOrders, ...myOrders, ...getStoredOrders()].filter((ord) => {
+      if (!ord?.id || seenRecentIds.has(ord.id)) return false;
+      seenRecentIds.add(ord.id);
+      return true;
+    });
+    const ruleInspection = runDeterministicOrderInspection(
+      orderDataBase,
+      linkedProdForInspection,
+      recentOrdersPool
+    );
+    const initialVerification = ruleInspection.verification;
+    const orderData: Order = {
+      ...orderDataBase,
+      status: initialVerification.riskLevel === 'HIGH' ? 'On Hold (AI Review)' : 'New',
+      aiVerification: initialVerification,
+    };
+
     try {
       let confirmedOrderNumber = orderNumber;
+      let finalSavedOrder: Order = orderData;
+
       if (selectedDealForBuy) {
         // ATOMIC TRANSACTION:
         // Reads the deal in Firestore, checks that claimed === false,
@@ -4771,15 +4837,24 @@ export default function App() {
             quantity: validatedQuantity,
             unitPrice: unitPrice,
             price: totalPrice,
+            status: orderData.status,
+            aiVerification: orderData.aiVerification,
           });
           if (res.data?.order) {
             createdOrder = res.data.order;
           }
         } catch {}
 
-        const finalOrder = createdOrder || orderData;
-        confirmedOrderNumber = finalOrder.orderNumber || orderNumber;
-        await saveOrderToCloud(finalOrder);
+        finalSavedOrder = createdOrder
+          ? {
+              ...orderData,
+              ...createdOrder,
+              status: createdOrder.status || orderData.status,
+              aiVerification: createdOrder.aiVerification || orderData.aiVerification,
+            }
+          : orderData;
+        confirmedOrderNumber = finalSavedOrder.orderNumber || orderNumber;
+        await saveOrderToCloud(finalSavedOrder);
 
         // Record metrics for the festival campaign
         if (isCampaignEligible && productDiscountInfo.campaignId) {
@@ -4787,8 +4862,8 @@ export default function App() {
         }
       }
 
-      const allExisting = getStoredOrders().filter((o) => o.id !== orderData.id);
-      const updatedList = computeLocalQueuePositions([orderData, ...allExisting]);
+      const allExisting = getStoredOrders().filter((o) => o.id !== finalSavedOrder.id);
+      const updatedList = computeLocalQueuePositions([finalSavedOrder, ...allExisting]);
       saveStoredOrders(updatedList);
 
       void syncAnalyticsCustomerOrderProfile(
@@ -4814,6 +4889,15 @@ export default function App() {
       setSelectedDealForBuy(null);
       setSelectedOfferForBuy(null);
       setOrderQuantity(1);
+
+      if (ruleInspection.needsAiContextCheck) {
+        void runAsyncGeminiOrderInspection(
+          finalSavedOrder,
+          linkedProdForInspection,
+          recentOrdersPool,
+          initialVerification
+        );
+      }
     } catch (saveErr: any) {
       console.error('Error completing order:', saveErr);
       const msg = saveErr?.message || String(saveErr);
@@ -4835,6 +4919,344 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const syncOrderUpdateLocally = (orderId: string, patch: Partial<Order>) => {
+    setOwnerOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...patch } : o)));
+    setMyOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...patch } : o)));
+    const stored = getStoredOrders().map((o) => (o.id === orderId ? { ...o, ...patch } : o));
+    saveStoredOrders(stored);
+  };
+
+  const runAsyncGeminiOrderInspection = async (
+    targetOrder: Order,
+    linkedProd: Product | undefined,
+    recentPool: Order[],
+    baseline: OrderAiVerification
+  ) => {
+    try {
+      const res = await api.post('/api/orders/inspect', {
+        order: targetOrder,
+        product: linkedProd
+          ? {
+              id: linkedProd.id,
+              name: linkedProd.name,
+              category: linkedProd.category,
+              description: linkedProd.description,
+              price: linkedProd.price,
+            }
+          : undefined,
+        recentOrders: recentPool.slice(0, 12),
+        availableColours,
+        ruleBaseline: baseline,
+      });
+
+      const nextVerification = res.data?.verification as OrderAiVerification | undefined;
+      if (!nextVerification) return;
+
+      const nextStatus =
+        nextVerification.riskLevel === 'HIGH' ? 'On Hold (AI Review)' : 'New';
+
+      try {
+        await updateOrderStatusInCloud(targetOrder.id, {
+          status: nextStatus,
+          aiVerification: nextVerification,
+        });
+      } catch {}
+
+      syncOrderUpdateLocally(targetOrder.id, {
+        status: nextStatus,
+        aiVerification: nextVerification,
+      });
+    } catch {
+      // Safe fallback: order & deterministic rule baseline are already persisted
+    }
+  };
+
+  const persistOwnerVerificationDecision = async (
+    order: Order,
+    nextStatus: string,
+    nextVerification: OrderAiVerification,
+    nextOwnerNote?: string
+  ) => {
+    setOrderDecisionSavingId(order.id);
+    setErrorMessage('');
+    const resolvedOwnerNote = nextOwnerNote !== undefined ? nextOwnerNote : order.ownerNote || '';
+
+    try {
+      await updateOrderStatusInCloud(order.id, {
+        status: nextStatus,
+        paymentRecipientName: order.paymentRecipientName || '',
+        paymentRecipientClass: order.paymentRecipientClass || '',
+        paymentRecipientSection: order.paymentRecipientSection || '',
+        ownerNote: resolvedOwnerNote,
+        aiVerification: nextVerification,
+      });
+    } catch {}
+
+    try {
+      await ownerPost('/api/owner/orders/status', {
+        id: order.id,
+        status: nextStatus,
+        paymentRecipientName: order.paymentRecipientName || '',
+        paymentRecipientClass: order.paymentRecipientClass || '',
+        paymentRecipientSection: order.paymentRecipientSection || '',
+        ownerNote: resolvedOwnerNote,
+        aiVerification: nextVerification,
+      });
+    } catch {}
+
+    syncOrderUpdateLocally(order.id, {
+      status: nextStatus,
+      ownerNote: resolvedOwnerNote,
+      aiVerification: nextVerification,
+    });
+    setOrderDecisionSavingId(null);
+  };
+
+  const handleApproveOrder = async (order: Order, ownerNote?: string) => {
+    const nowIso = new Date().toISOString();
+    const prev = order.aiVerification;
+    const auditEntry: OrderAuditEntry = {
+      at: nowIso,
+      actor: 'Owner',
+      action: 'approved',
+      note: ownerNote || 'Owner confirmed order is legitimate and resumed processing.',
+    };
+    const nextVerification: OrderAiVerification = {
+      riskLevel: prev?.riskLevel || 'LOW',
+      decisionStatus: 'approved',
+      recommendedAction: 'Approve',
+      confidence: prev?.confidence ?? 90,
+      summaryReason: prev?.summaryReason || 'Reviewed and approved by owner.',
+      flaggedFields: prev?.flaggedFields || [],
+      inspectedAt: prev?.inspectedAt || nowIso,
+      inspectedBy: prev?.inspectedBy || 'rules',
+      modelUsed: prev?.modelUsed,
+      clarificationMessage: prev?.clarificationMessage,
+      customerClarificationReply: prev?.customerClarificationReply,
+      customerClarifiedAt: prev?.customerClarifiedAt,
+      ownerDecisionAt: nowIso,
+      ownerDecisionNote: ownerNote || 'Approved by owner',
+      auditHistory: [...(prev?.auditHistory || []), auditEntry].slice(-20),
+    };
+    const nextStatus = ['On Hold (AI Review)', 'Awaiting Clarification', 'Clarification Submitted'].includes(order.status)
+      ? 'New'
+      : order.status;
+    await persistOwnerVerificationDecision(order, nextStatus, nextVerification);
+    setSuccessMessage(`Order ${order.orderNumber || order.id} approved and ready for processing.`);
+  };
+
+  const handleRequestOrderClarification = async (order: Order, clarificationMessage: string) => {
+    const nowIso = new Date().toISOString();
+    const prev = order.aiVerification;
+    const cleanMsg = clarificationMessage.trim();
+    const auditEntry: OrderAuditEntry = {
+      at: nowIso,
+      actor: 'Owner',
+      action: 'clarification_requested',
+      note: cleanMsg,
+    };
+    const nextVerification: OrderAiVerification = {
+      riskLevel: prev?.riskLevel || 'MEDIUM',
+      decisionStatus: 'clarification_requested',
+      recommendedAction: 'Verify Details',
+      confidence: prev?.confidence ?? 80,
+      summaryReason: prev?.summaryReason || 'Clarification requested by owner.',
+      flaggedFields: prev?.flaggedFields || [],
+      inspectedAt: prev?.inspectedAt || nowIso,
+      inspectedBy: prev?.inspectedBy || 'rules',
+      modelUsed: prev?.modelUsed,
+      clarificationMessage: cleanMsg,
+      customerClarificationReply: prev?.customerClarificationReply,
+      customerClarifiedAt: prev?.customerClarifiedAt,
+      ownerDecisionAt: nowIso,
+      ownerDecisionNote: 'Clarification requested from customer',
+      auditHistory: [...(prev?.auditHistory || []), auditEntry].slice(-20),
+    };
+    await persistOwnerVerificationDecision(order, 'Awaiting Clarification', nextVerification, cleanMsg);
+    setSuccessMessage(`Clarification request sent to ${order.name || 'customer'} for order ${order.orderNumber || order.id}.`);
+  };
+
+  const handleRejectOrder = async (order: Order, reason?: string) => {
+    const nowIso = new Date().toISOString();
+    const prev = order.aiVerification;
+    const cleanReason = (reason || 'Rejected & cancelled by owner after verification review.').trim();
+    const auditEntry: OrderAuditEntry = {
+      at: nowIso,
+      actor: 'Owner',
+      action: 'rejected',
+      note: cleanReason,
+    };
+    const nextVerification: OrderAiVerification = {
+      riskLevel: prev?.riskLevel || 'HIGH',
+      decisionStatus: 'rejected',
+      recommendedAction: 'Hold & Review',
+      confidence: prev?.confidence ?? 95,
+      summaryReason: prev?.summaryReason || cleanReason,
+      flaggedFields: prev?.flaggedFields || [],
+      inspectedAt: prev?.inspectedAt || nowIso,
+      inspectedBy: prev?.inspectedBy || 'rules',
+      modelUsed: prev?.modelUsed,
+      clarificationMessage: prev?.clarificationMessage,
+      customerClarificationReply: prev?.customerClarificationReply,
+      customerClarifiedAt: prev?.customerClarifiedAt,
+      ownerDecisionAt: nowIso,
+      ownerDecisionNote: cleanReason,
+      auditHistory: [...(prev?.auditHistory || []), auditEntry].slice(-20),
+    };
+    await persistOwnerVerificationDecision(order, 'Cancelled', nextVerification, cleanReason);
+    setSuccessMessage(`Order ${order.orderNumber || order.id} cancelled (record & audit log preserved).`);
+  };
+
+  const handleReinspectOrder = async (order: Order) => {
+    setInspectingOrderId(order.id);
+    setErrorMessage('');
+    try {
+      const linkedProd = products.find((p) => p.id === order.productId);
+      const recentPool = ownerOrders.filter((o) => o.id !== order.id);
+      const ruleRes = runDeterministicOrderInspection(order, linkedProd, recentPool);
+      let nextVerification = ruleRes.verification;
+
+      try {
+        const res = await api.post('/api/orders/inspect', {
+          order,
+          product: linkedProd
+            ? {
+                id: linkedProd.id,
+                name: linkedProd.name,
+                category: linkedProd.category,
+                description: linkedProd.description,
+                price: linkedProd.price,
+              }
+            : undefined,
+          recentOrders: recentPool.slice(0, 12),
+          availableColours,
+          ruleBaseline: ruleRes.verification,
+        });
+        if (res.data?.verification) {
+          nextVerification = res.data.verification;
+        }
+      } catch {}
+
+      const prev = order.aiVerification;
+      const reinspectAudit: OrderAuditEntry = {
+        at: new Date().toISOString(),
+        actor: 'Playnix AI',
+        action: 'reinspected',
+        riskLevel: nextVerification.riskLevel,
+        note: `Re-inspected (${nextVerification.riskLevel} risk · ${nextVerification.confidence}% confidence)`,
+      };
+      const mergedAudit: OrderAuditEntry[] = [
+        ...(prev?.auditHistory || []),
+        reinspectAudit,
+      ].slice(-20);
+
+      const finalVerification: OrderAiVerification = {
+        ...nextVerification,
+        clarificationMessage: prev?.clarificationMessage,
+        customerClarificationReply: prev?.customerClarificationReply,
+        customerClarifiedAt: prev?.customerClarifiedAt,
+        auditHistory: mergedAudit,
+      };
+
+      const isFinalOrInProgress = [
+        'Confirmed',
+        'Preparing',
+        'Dispatched',
+        'Ready for pickup',
+        'Completed',
+        'Delivered',
+        'Collected',
+        'Cancelled',
+      ].includes(order.status);
+
+      const nextStatus = isFinalOrInProgress
+        ? order.status
+        : finalVerification.riskLevel === 'HIGH'
+        ? 'On Hold (AI Review)'
+        : order.status === 'On Hold (AI Review)'
+        ? 'New'
+        : order.status;
+
+      await persistOwnerVerificationDecision(order, nextStatus, finalVerification);
+      setSuccessMessage(`Playnix AI re-inspected order ${order.orderNumber || order.id} (${finalVerification.riskLevel} RISK).`);
+    } finally {
+      setInspectingOrderId(null);
+    }
+  };
+
+  const handleCustomerSubmitClarification = async (order: Order) => {
+    const reply = customerClarifyReplyDraft.trim();
+    if (!reply) {
+      setMyOrdersError('Please write a short message verifying or updating your order details.');
+      return;
+    }
+    setMyOrdersError('');
+    setSavingCustomerClarifyId(order.id);
+    const nowIso = new Date().toISOString();
+    const prev = order.aiVerification;
+    const auditEntry: OrderAuditEntry = {
+      at: nowIso,
+      actor: 'Customer',
+      action: 'customer_clarified',
+      note: reply,
+    };
+    const nextVerification: OrderAiVerification = {
+      riskLevel: prev?.riskLevel || 'MEDIUM',
+      decisionStatus: 'pending_review',
+      recommendedAction: 'Approve',
+      confidence: prev?.confidence ?? 80,
+      summaryReason: prev?.summaryReason || 'Customer submitted clarification for owner review.',
+      flaggedFields: prev?.flaggedFields || [],
+      inspectedAt: prev?.inspectedAt || nowIso,
+      inspectedBy: prev?.inspectedBy || 'rules',
+      modelUsed: prev?.modelUsed,
+      clarificationMessage: prev?.clarificationMessage,
+      customerClarificationReply: reply,
+      customerClarifiedAt: nowIso,
+      ownerDecisionAt: prev?.ownerDecisionAt,
+      ownerDecisionNote: prev?.ownerDecisionNote,
+      auditHistory: [...(prev?.auditHistory || []), auditEntry].slice(-20),
+    };
+
+    const contactPatch: {
+      phone?: string;
+      address?: string;
+      studentClass?: string;
+      section?: string;
+    } = {};
+    if (order.mode === 'Adult') {
+      if (customerClarifyPhoneDraft.trim()) contactPatch.phone = customerClarifyPhoneDraft.trim();
+      if (customerClarifyAddressDraft.trim()) contactPatch.address = customerClarifyAddressDraft.trim();
+    } else {
+      if (customerClarifyClassDraft.trim()) contactPatch.studentClass = customerClarifyClassDraft.trim();
+      if (customerClarifySectionDraft.trim()) contactPatch.section = customerClarifySectionDraft.trim();
+    }
+
+    try {
+      await submitCustomerOrderClarificationInCloud(
+        order.id,
+        reply,
+        nextVerification,
+        contactPatch
+      );
+    } catch (err) {
+      console.warn('Could not save clarification to Firestore:', err);
+    }
+
+    syncOrderUpdateLocally(order.id, {
+      status: 'Clarification Submitted',
+      ...contactPatch,
+      aiVerification: nextVerification,
+    });
+    setSavingCustomerClarifyId(null);
+    setClarifyingCustomerOrderId(null);
+    setCustomerClarifyReplyDraft('');
+    setCustomerClarifyPhoneDraft('');
+    setCustomerClarifyAddressDraft('');
+    setCustomerClarifyClassDraft('');
+    setCustomerClarifySectionDraft('');
   };
 
   const updateOrderStatus = async (order: Order, newStatus: string) => {
@@ -7274,6 +7696,124 @@ export default function App() {
                         <strong>Order completed! 🎉</strong>
                         <p>Thank you for shopping with Playnix!</p>
                       </div>
+                    ) : o.status === 'Awaiting Clarification' ||
+                      o.aiVerification?.decisionStatus === 'clarification_requested' ? (
+                      <div
+                        className="queue-status"
+                        style={{
+                          background: '#fffbeb',
+                          borderColor: '#fcd34d',
+                          color: '#92400e',
+                        }}
+                      >
+                        <strong>Quick Verification Needed</strong>
+                        <p>
+                          {o.aiVerification?.clarificationMessage ||
+                            o.ownerNote ||
+                            'The shop owner requested a quick verification of your order details so preparation can begin smoothly.'}
+                        </p>
+                        {clarifyingCustomerOrderId === o.id ? (
+                          <div
+                            style={{
+                              marginTop: 10,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 8,
+                            }}
+                          >
+                            {o.mode === 'Adult' ? (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                <input
+                                  type="tel"
+                                  value={customerClarifyPhoneDraft}
+                                  onChange={(e) => setCustomerClarifyPhoneDraft(e.target.value)}
+                                  placeholder="Updated phone number (optional)"
+                                  maxLength={20}
+                                  style={{ flex: '1 1 180px', padding: '7px 10px', borderRadius: 8, border: '1px solid #d1d5db' }}
+                                />
+                                <input
+                                  type="text"
+                                  value={customerClarifyAddressDraft}
+                                  onChange={(e) => setCustomerClarifyAddressDraft(e.target.value)}
+                                  placeholder="Updated delivery address (optional)"
+                                  maxLength={180}
+                                  style={{ flex: '2 1 220px', padding: '7px 10px', borderRadius: 8, border: '1px solid #d1d5db' }}
+                                />
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                <input
+                                  type="text"
+                                  value={customerClarifyClassDraft}
+                                  onChange={(e) => setCustomerClarifyClassDraft(e.target.value)}
+                                  placeholder="Class (optional)"
+                                  maxLength={20}
+                                  style={{ flex: '1 1 120px', padding: '7px 10px', borderRadius: 8, border: '1px solid #d1d5db' }}
+                                />
+                                <input
+                                  type="text"
+                                  value={customerClarifySectionDraft}
+                                  onChange={(e) => setCustomerClarifySectionDraft(e.target.value)}
+                                  placeholder="Section (optional)"
+                                  maxLength={20}
+                                  style={{ flex: '1 1 120px', padding: '7px 10px', borderRadius: 8, border: '1px solid #d1d5db' }}
+                                />
+                              </div>
+                            )}
+                            <textarea
+                              rows={2}
+                              maxLength={400}
+                              value={customerClarifyReplyDraft}
+                              onChange={(e) => setCustomerClarifyReplyDraft(e.target.value)}
+                              placeholder="Type your confirmation or corrected order details here…"
+                              style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #d1d5db' }}
+                            />
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                className="primary-btn"
+                                disabled={savingCustomerClarifyId === o.id}
+                                onClick={() => void handleCustomerSubmitClarification(o)}
+                              >
+                                {savingCustomerClarifyId === o.id ? 'Sending…' : 'Send Clarification'}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                onClick={() => setClarifyingCustomerOrderId(null)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="primary-btn"
+                            style={{ marginTop: 8, padding: '7px 12px', fontSize: 12.5 }}
+                            onClick={() => {
+                              setClarifyingCustomerOrderId(o.id);
+                              setCustomerClarifyReplyDraft(o.aiVerification?.customerClarificationReply || '');
+                              setCustomerClarifyPhoneDraft(o.phone || '');
+                              setCustomerClarifyAddressDraft(o.address || '');
+                              setCustomerClarifyClassDraft(o.studentClass || '');
+                              setCustomerClarifySectionDraft(o.section || '');
+                            }}
+                          >
+                            Verify / Reply to Owner
+                          </button>
+                        )}
+                      </div>
+                    ) : o.status === 'Clarification Submitted' ? (
+                      <div className="queue-status">
+                        <strong>Clarification submitted</strong>
+                        <p>Thank you! Your updated details have been sent to the shop owner for confirmation.</p>
+                      </div>
+                    ) : o.status === 'On Hold (AI Review)' ? (
+                      <div className="queue-status">
+                        <strong>Order saved · Quick verification in progress</strong>
+                        <p>Your order has been received safely and is undergoing a quick check by the shop owner.</p>
+                      </div>
                     ) : o.queuePosition !== null && o.queuePosition !== undefined && o.queuePosition > 0 ? (
                       <div className="queue-status">
                         <strong>
@@ -7496,6 +8036,76 @@ export default function App() {
                 <Store size={20} />
               </div>
             </div>
+
+            {flaggedOrdersForOwner.length > 0 && (
+              <div
+                style={{
+                  background: flaggedOrdersForOwner.some((o) => o.aiVerification?.riskLevel === 'HIGH')
+                    ? '#fef2f2'
+                    : '#fffbeb',
+                  border: `1.5px solid ${
+                    flaggedOrdersForOwner.some((o) => o.aiVerification?.riskLevel === 'HIGH')
+                      ? '#fca5a5'
+                      : '#fcd34d'
+                  }`,
+                  borderRadius: 12,
+                  padding: '12px 16px',
+                  marginBottom: 16,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <ShieldAlert
+                    size={20}
+                    style={{
+                      color: flaggedOrdersForOwner.some((o) => o.aiVerification?.riskLevel === 'HIGH')
+                        ? '#b91c1c'
+                        : '#b45309',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <div>
+                    <strong style={{ display: 'block', fontSize: 13.5, color: '#1f2937' }}>
+                      Playnix AI Order Guard Alert · {flaggedOrdersForOwner.length}{' '}
+                      {flaggedOrdersForOwner.length === 1 ? 'order needs' : 'orders need'} verification
+                    </strong>
+                    <span style={{ fontSize: 12, color: '#4b5563' }}>
+                      {flaggedOrdersForOwner[0].orderNumber || flaggedOrdersForOwner[0].id} (
+                      {flaggedOrdersForOwner[0].name} — {flaggedOrdersForOwner[0].productName}):{' '}
+                      {flaggedOrdersForOwner[0].aiVerification?.summaryReason}
+                    </span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    style={{ padding: '7px 13px', fontSize: 12.5 }}
+                    onClick={() => {
+                      setOwnerTab('orders');
+                      setOrderStatusFilter('Flagged');
+                    }}
+                  >
+                    Review Flagged Orders ({flaggedOrdersForOwner.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    style={{ padding: '7px 12px', fontSize: 12.5 }}
+                    onClick={() => {
+                      setOwnerTab('aiAssistant');
+                      void loadOwnerAiData();
+                    }}
+                  >
+                    Open AI Order Guard
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="dashboard-tabs">
               <button
@@ -8495,6 +9105,17 @@ export default function App() {
                     >
                       Cancelled ({ownerOrders.filter((o) => o.status === 'Cancelled').length})
                     </button>
+                    <button
+                      className={orderStatusFilter === 'Flagged' ? 'active' : ''}
+                      onClick={() => setOrderStatusFilter('Flagged')}
+                      style={
+                        flaggedOrdersForOwner.length > 0 && orderStatusFilter !== 'Flagged'
+                          ? { borderColor: '#f59e0b', color: '#92400e', fontWeight: 700 }
+                          : undefined
+                      }
+                    >
+                      AI Review ({flaggedOrdersForOwner.length})
+                    </button>
                   </div>
 
                   <div className="orders-search-wrapper">
@@ -8705,6 +9326,16 @@ export default function App() {
                             </div>
                           )}
 
+                          <OrderVerificationCard
+                            order={o}
+                            inspecting={inspectingOrderId === o.id}
+                            savingDecision={orderDecisionSavingId === o.id}
+                            onApproveOrder={handleApproveOrder}
+                            onRequestClarification={handleRequestOrderClarification}
+                            onRejectOrder={handleRejectOrder}
+                            onReinspectOrder={handleReinspectOrder}
+                          />
+
                           <label className="status-select">
                             Order status
                             <select
@@ -8718,6 +9349,9 @@ export default function App() {
                               onChange={(e) => void updateOrderStatus(o, e.target.value)}
                             >
                               <option>New</option>
+                              <option>On Hold (AI Review)</option>
+                              <option>Awaiting Clarification</option>
+                              <option>Clarification Submitted</option>
                               <option>Confirmed</option>
                               <option>Preparing</option>
                               <option>Dispatched</option>
@@ -9038,6 +9672,22 @@ export default function App() {
                   setOwnerTab('questions');
                   void loadOwnerProductQuestions();
                   window.scrollTo({ top: 320, behavior: 'smooth' });
+                }}
+                orders={ownerOrders}
+                inspectingOrderId={inspectingOrderId}
+                orderDecisionSavingId={orderDecisionSavingId}
+                onApproveOrder={handleApproveOrder}
+                onRequestOrderClarification={handleRequestOrderClarification}
+                onRejectOrder={handleRejectOrder}
+                onReinspectOrder={handleReinspectOrder}
+                onOpenOrderInDashboard={(ord) => {
+                  setOwnerTab('orders');
+                  setOrderStatusFilter(isOrderFlaggedForOwner(ord) ? 'Flagged' : 'Pending');
+                  setHighlightedOwnerOrderId(ord.id);
+                  setTimeout(() => {
+                    const el = document.getElementById(`owner-order-card-${ord.id}`);
+                    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }, 120);
                 }}
               />
             )}

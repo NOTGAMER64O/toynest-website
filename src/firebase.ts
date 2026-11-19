@@ -374,10 +374,39 @@ export function subscribeToAllOrders(callback: (orders: Order[]) => void): () =>
 export async function updateOrderStatusInCloud(orderId: string, updates: Partial<Order>): Promise<void> {
   const path = `orders/${orderId}`;
   try {
-    await updateDoc(doc(db, 'orders', orderId), {
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    });
+    await updateDoc(
+      doc(db, 'orders', orderId),
+      sanitizeForFirestore({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function submitCustomerOrderClarificationInCloud(
+  orderId: string,
+  clarificationText: string,
+  nextAiVerification: Order['aiVerification'],
+  optionalContactUpdates?: { phone?: string; address?: string; studentClass?: string; section?: string }
+): Promise<void> {
+  const path = `orders/${orderId}`;
+  try {
+    await updateDoc(
+      doc(db, 'orders', orderId),
+      sanitizeForFirestore({
+        note: clarificationText.trim(),
+        status: 'Clarification Submitted',
+        ...(optionalContactUpdates?.phone !== undefined ? { phone: optionalContactUpdates.phone.trim() } : {}),
+        ...(optionalContactUpdates?.address !== undefined ? { address: optionalContactUpdates.address.trim() } : {}),
+        ...(optionalContactUpdates?.studentClass !== undefined ? { studentClass: optionalContactUpdates.studentClass } : {}),
+        ...(optionalContactUpdates?.section !== undefined ? { section: optionalContactUpdates.section.trim() } : {}),
+        aiVerification: nextAiVerification,
+        updatedAt: new Date().toISOString(),
+      })
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }

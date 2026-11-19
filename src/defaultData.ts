@@ -11,6 +11,50 @@ export interface Product {
   createdAt: string;
 }
 
+export type OrderRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export type OrderVerificationDecision =
+  | 'auto_approved'
+  | 'pending_review'
+  | 'approved'
+  | 'clarification_requested'
+  | 'rejected';
+
+export type OrderRecommendedAction = 'Approve' | 'Verify Details' | 'Hold & Review';
+
+export interface OrderFlaggedField {
+  field: string;
+  suspiciousValue: string;
+  reason: string;
+  severity: 'info' | 'warning' | 'critical';
+}
+
+export interface OrderAuditEntry {
+  action: string;
+  actor: 'Playnix AI' | 'Owner' | 'Customer';
+  riskLevel?: OrderRiskLevel;
+  note?: string;
+  at: string;
+}
+
+export interface OrderAiVerification {
+  riskLevel: OrderRiskLevel;
+  decisionStatus: OrderVerificationDecision;
+  confidence: number;
+  recommendedAction: OrderRecommendedAction;
+  summaryReason: string;
+  flaggedFields: OrderFlaggedField[];
+  inspectedBy: 'rules' | 'gemini_ai';
+  modelUsed?: string;
+  inspectedAt: string;
+  ownerDecisionAt?: string;
+  ownerDecisionNote?: string;
+  clarificationMessage?: string;
+  customerClarificationReply?: string;
+  customerClarifiedAt?: string;
+  auditHistory?: OrderAuditEntry[];
+}
+
 export interface Order {
   id: string;
   orderNumber: string;
@@ -48,6 +92,7 @@ export interface Order {
   campaignName?: string;
   originalPrice?: number;
   discountSaved?: number;
+  aiVerification?: OrderAiVerification;
 }
 
 export interface Suggestion {

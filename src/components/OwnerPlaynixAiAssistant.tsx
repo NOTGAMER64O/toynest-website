@@ -32,12 +32,14 @@ import {
   type AiSuggestedReplyResult,
   type AiTrainingAnswer,
   type AiTrainingStepKey,
+  type Order,
   type Product,
   PLAYNIX_TRAINING_QUESTIONS,
   formatInIST,
 } from '../defaultData';
+import { OrderVerificationCard } from './OrderVerificationCard';
 
-export type PlaynixAiSubView = 'overview' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
+export type PlaynixAiSubView = 'overview' | 'orderGuard' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
 
 interface OwnerPlaynixAiAssistantProps {
   aiState: AiAssistantState;
@@ -87,6 +89,14 @@ interface OwnerPlaynixAiAssistantProps {
     suggestion?: AiSuggestedReplyResult;
   }>;
   onOpenProductQuestions: () => void;
+  orders?: Order[];
+  inspectingOrderId?: string | null;
+  orderDecisionSavingId?: string | null;
+  onApproveOrder?: (order: Order, ownerNote?: string) => Promise<void>;
+  onRequestOrderClarification?: (order: Order, clarificationMessage: string) => Promise<void>;
+  onRejectOrder?: (order: Order, reason?: string) => Promise<void>;
+  onReinspectOrder?: (order: Order) => Promise<void>;
+  onOpenOrderInDashboard?: (order: Order) => void;
 }
 
 const KNOWLEDGE_CATEGORIES: Array<{ value: AiKnowledgeCategory; label: string }> = [
@@ -129,8 +139,17 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   onDeleteGuidanceQuestion,
   onTestAiQuestion,
   onOpenProductQuestions,
+  orders = [],
+  inspectingOrderId = null,
+  orderDecisionSavingId = null,
+  onApproveOrder,
+  onRequestOrderClarification,
+  onRejectOrder,
+  onReinspectOrder,
+  onOpenOrderInDashboard,
 }) => {
   const [subView, setSubView] = useState<PlaynixAiSubView>('overview');
+  const [orderGuardFilter, setOrderGuardFilter] = useState<'review' | 'clarification' | 'approved' | 'rejected' | 'all'>('review');
 
   // Guidance ("AI Needs Help") States
   const [guidanceFilter, setGuidanceFilter] = useState<'open' | 'answered' | 'dismissed'>('open');
@@ -527,6 +546,52 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     return openGuidanceQuestions;
   }, [guidanceFilter, openGuidanceQuestions, answeredGuidanceQuestions, dismissedGuidanceQuestions]);
 
+  const isOrderNeedingReview = (o: Order) => {
+    const v = o.aiVerification;
+    if (!v) return false;
+    if (v.decisionStatus === 'approved' || v.decisionStatus === 'rejected') return false;
+    return (
+      v.riskLevel === 'HIGH' ||
+      v.riskLevel === 'MEDIUM' ||
+      v.decisionStatus === 'pending_review' ||
+      v.decisionStatus === 'clarification_requested' ||
+      o.status === 'On Hold (AI Review)' ||
+      o.status === 'Awaiting Clarification' ||
+      o.status === 'Clarification Submitted'
+    );
+  };
+
+  const flaggedOrdersForGuard = useMemo(
+    () => orders.filter(isOrderNeedingReview),
+    [orders]
+  );
+
+  const visibleOrderGuardList = useMemo(() => {
+    const inspected = orders.filter((o) => Boolean(o.aiVerification));
+    const list =
+      orderGuardFilter === 'review'
+        ? flaggedOrdersForGuard
+        : orderGuardFilter === 'clarification'
+        ? inspected.filter(
+            (o) =>
+              o.aiVerification?.decisionStatus === 'clarification_requested' ||
+              Boolean(o.aiVerification?.customerClarificationReply)
+          )
+        : orderGuardFilter === 'approved'
+        ? inspected.filter((o) => o.aiVerification?.decisionStatus === 'approved')
+        : orderGuardFilter === 'rejected'
+        ? inspected.filter((o) => o.aiVerification?.decisionStatus === 'rejected')
+        : inspected;
+
+    return [...list].sort((a, b) => {
+      const rank = (o: Order) =>
+        o.aiVerification?.riskLevel === 'HIGH' ? 0 : o.aiVerification?.riskLevel === 'MEDIUM' ? 1 : 2;
+      const rDiff = rank(a) - rank(b);
+      if (rDiff !== 0) return rDiff;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+  }, [orders, orderGuardFilter, flaggedOrdersForGuard]);
+
   const handleAskAiWhatNeedsHelp = async () => {
     setGuidanceErrorMsg('');
     setGuidanceBannerMsg('');
@@ -749,6 +814,15 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
         <button
           type="button"
           role="tab"
+          aria-selected={subView === 'orderGuard'}
+          className={`offers-filter-tab-btn ${subView === 'orderGuard' ? 'active' : ''}`}
+          onClick={() => setSubView('orderGuard')}
+        >
+          <ShieldAlert size={14} /> Order Guard ({flaggedOrdersForGuard.length})
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={subView === 'guidance'}
           className={`offers-filter-tab-btn ${subView === 'guidance' ? 'active' : ''}`}
           onClick={() => setSubView('guidance')}
@@ -922,6 +996,94 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               </ul>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          VIEW 1-GUARD: PLAYNIX AI ORDER VERIFICATION & SUSPICIOUS ORDER GUARD
+         ===================================================================== */}
+      {subView === 'orderGuard' && (
+        <div className="playnix-ai-card">
+          <div className="playnix-ai-card-head">
+            <div>
+              <span className="eyebrow">PLAYNIX AI · AUTOMATIC ORDER INSPECTION</span>
+              <h3>Order Guard &amp; Verification Log</h3>
+              <p className="playnix-ai-subtitle">
+                Inspects every submitted order for gibberish names, meaningless addresses, invalid contact info, category/request mismatches, suspicious bulk quantities, and rapid spam bursts—without ever auto-rejecting or deleting orders.
+              </p>
+            </div>
+          </div>
+
+          <div className="owner-questions-filter-pills" style={{ marginBottom: 14 }}>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${orderGuardFilter === 'review' ? 'active' : ''}`}
+              onClick={() => setOrderGuardFilter('review')}
+            >
+              Needs Review ({flaggedOrdersForGuard.length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${orderGuardFilter === 'clarification' ? 'active' : ''}`}
+              onClick={() => setOrderGuardFilter('clarification')}
+            >
+              Clarification ({orders.filter((o) => o.aiVerification?.decisionStatus === 'clarification_requested' || Boolean(o.aiVerification?.customerClarificationReply)).length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${orderGuardFilter === 'approved' ? 'active' : ''}`}
+              onClick={() => setOrderGuardFilter('approved')}
+            >
+              Approved ({orders.filter((o) => o.aiVerification?.decisionStatus === 'approved').length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${orderGuardFilter === 'rejected' ? 'active' : ''}`}
+              onClick={() => setOrderGuardFilter('rejected')}
+            >
+              Rejected ({orders.filter((o) => o.aiVerification?.decisionStatus === 'rejected').length})
+            </button>
+            <button
+              type="button"
+              className={`owner-q-filter-btn ${orderGuardFilter === 'all' ? 'active' : ''}`}
+              onClick={() => setOrderGuardFilter('all')}
+            >
+              All Inspected ({orders.filter((o) => Boolean(o.aiVerification)).length})
+            </button>
+          </div>
+
+          {visibleOrderGuardList.length === 0 ? (
+            <div className="empty-state compact">
+              <div className="empty-icon">
+                <ShieldCheck size={30} />
+              </div>
+              <h3>
+                {orderGuardFilter === 'review'
+                  ? 'No suspicious or held orders right now'
+                  : 'No orders in this verification filter'}
+              </h3>
+              <p>
+                New orders are automatically inspected upon submission. Low-risk orders proceed normally, while Medium/High-risk orders appear here for your decision.
+              </p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {visibleOrderGuardList.map((ord) => (
+                <OrderVerificationCard
+                  key={ord.id}
+                  order={ord}
+                  compactSummary
+                  inspecting={inspectingOrderId === ord.id}
+                  savingDecision={orderDecisionSavingId === ord.id}
+                  onApproveOrder={onApproveOrder || (async () => {})}
+                  onRequestClarification={onRequestOrderClarification || (async () => {})}
+                  onRejectOrder={onRejectOrder || (async () => {})}
+                  onReinspectOrder={onReinspectOrder}
+                  onJumpToOrder={onOpenOrderInDashboard}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 

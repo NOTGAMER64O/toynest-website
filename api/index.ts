@@ -63,6 +63,7 @@ interface Order {
   ownerNote?: string;
   colour?: string;
   customerDeleted?: boolean;
+  aiVerification?: any;
 }
 
 interface Suggestion {
@@ -486,6 +487,8 @@ app.post('/api/orders', (req, res) => {
     paymentRecipientSection: '',
     ownerNote: '',
     colour: (colour || '').trim(),
+    ...(req.body.aiVerification ? { aiVerification: req.body.aiVerification } : {}),
+    ...(req.body.status ? { status: String(req.body.status).trim() } : {}),
   };
 
   db.orders.unshift(newOrder);
@@ -743,6 +746,7 @@ app.post('/api/owner/orders/status', (req, res) => {
   if (paymentRecipientClass !== undefined) order.paymentRecipientClass = paymentRecipientClass;
   if (paymentRecipientSection !== undefined) order.paymentRecipientSection = paymentRecipientSection;
   if (ownerNote !== undefined) order.ownerNote = ownerNote;
+  if (req.body.aiVerification !== undefined) order.aiVerification = req.body.aiVerification;
 
   saveDB(db);
   res.json({ success: true, order });
@@ -2897,6 +2901,234 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
     res.status(500).json({
       success: false,
       error: err?.message || 'Could not generate AI guidance questions right now.',
+    });
+  }
+});
+
+// Intelligent Order Verification — context-aware inspection using Gemini AI (with safe fallback)
+app.post('/api/orders/inspect', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const order = body.order || {};
+    const product = body.product || {};
+    const availableColours: string[] = Array.isArray(body.availableColours)
+      ? body.availableColours.map((c: any) => String(c || '').trim()).filter(Boolean).slice(0, 30)
+      : [];
+    const ruleBaseline = body.ruleBaseline || null;
+
+    const ai = getGeminiClient();
+    const nowIso = new Date().toISOString();
+
+    if (!ai) {
+      return res.json({
+        success: true,
+        geminiConfigured: false,
+        usedGemini: false,
+        verification: ruleBaseline || null,
+      });
+    }
+
+    // Privacy safeguard: avoid sending raw valid personal phone numbers to LLM; pass format summary instead
+    const rawPhone = String(order.phone || '').trim();
+    const phoneDigits = rawPhone.replace(/\D/g, '');
+    const phoneIsRepeated = /^(\d)\1{6,}$/.test(phoneDigits) || /^(\d)\1{9}$/.test(phoneDigits.slice(-10));
+    const phoneIsSequential = ['1234567890', '0123456789', '9876543210'].includes(phoneDigits.slice(-10));
+    const privacySafePhoneSummary =
+      order.mode !== 'Adult'
+        ? 'Not required (Child/School order)'
+        : !phoneDigits
+        ? 'Missing'
+        : phoneIsRepeated
+        ? `Invalid repeated digits (${phoneDigits.length} same digits)`
+        : phoneIsSequential
+        ? 'Sequential dummy number (e.g. 1234567890)'
+        : phoneDigits.length < 7 || phoneDigits.length > 15
+        ? `Invalid length (${phoneDigits.length} digits)`
+        : `Valid ${phoneDigits.length}-digit phone format (number redacted for customer privacy)`;
+
+    const promptText = [
+      'You are Playnix AI – Intelligent Order Verification Assistant for Playnix Shop.',
+      'Your job is to inspect newly submitted customer orders for spam, keyboard mashing, contradictions, or incomplete delivery details while STRICTLY protecting genuine customers.',
+      '',
+      'CRITICAL ETHICAL & CONTEXT RULES:',
+      '1. NEVER reject or cancel orders automatically — only classify risk and recommend an action for the store owner.',
+      '2. NEVER judge or flag customers based on ethnicity, cultural names, short names ("John"), regional spellings, or casual English grammar.',
+      '3. Understand context before flagging:',
+      '   - Random keyboard smash like customer name "dafuststidtsgigsigs" -> HIGH risk ("Hold & Review").',
+      '   - Normal short or diverse names like "John", "Aarav", "Thirumalai", "Sanyukta" -> LOW risk.',
+      '   - Customization special request like "Make the dragon blue instead of red" when shop colours/notes exist -> LOW risk (Accept!).',
+      '   - Category vs product description contradiction (e.g. Category "Fidget" with description "Educational mathematical calculator") -> MEDIUM risk (flag inconsistency).',
+      '   - Unusually high quantity (e.g. "100" requested in quantity or note) -> MEDIUM risk (recommend owner review, NEVER auto-reject).',
+      '   - Empty/meaningless delivery address or fake sequential/repeated phone or duplicate rapid spam bursts -> HIGH risk ("Hold & Review").',
+      '',
+      'ORDER DETAILS TO INSPECT:',
+      JSON.stringify({
+        orderNumber: String(order.orderNumber || '').slice(0, 32),
+        mode: order.mode === 'Adult' ? 'Adult (Home Delivery)' : 'Child (BCS School Pickup)',
+        customerName: sanitizeUntrustedCustomerText(order.name, 100),
+        productName: String(order.productName || product.name || '').slice(0, 140),
+        productCategory: String(product.category || 'Unknown').slice(0, 60),
+        productDescription: String(product.description || '').slice(0, 260),
+        availableStoreColours: availableColours,
+        selectedColour: String(order.colour || '').slice(0, 60),
+        quantity: Number(order.quantity || 1),
+        priceINR: Number(order.price || 0),
+        contactPhoneAssessment: privacySafePhoneSummary,
+        deliveryAddressOrSchool:
+          order.mode === 'Adult'
+            ? sanitizeUntrustedCustomerText(order.address, 300)
+            : `Class: ${sanitizeUntrustedCustomerText(order.studentClass, 30)}, Section: ${sanitizeUntrustedCustomerText(order.section, 30)}`,
+        specialInstructionsNote: sanitizeUntrustedCustomerText(order.note, 400),
+        rulePreCheckTriggers: Array.isArray(body.triggers) ? body.triggers : [],
+      }),
+      '',
+      'Return JSON matching the schema:',
+      '- riskLevel: "LOW" | "MEDIUM" | "HIGH"',
+      '- confidence: integer 0-100',
+      '- recommendedAction: "Approve" | "Verify Details" | "Hold & Review"',
+      '- summaryReason: crisp 1-sentence owner-friendly explanation (max 180 chars)',
+      '- suggestedClarificationMessage: optional polite customer question ONLY if MEDIUM/HIGH risk needs verification (max 180 chars, never accuse customer of spam)',
+      '- flaggedFields: array of specific suspicious/inconsistent items (empty [] if LOW risk).',
+    ].join('\n');
+
+    const runInspectOnce = async (modelName: string, timeoutMs: number) => {
+      const cfg: any = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            riskLevel: { type: Type.STRING, enum: ['LOW', 'MEDIUM', 'HIGH'] },
+            confidence: { type: Type.INTEGER },
+            recommendedAction: { type: Type.STRING, enum: ['Approve', 'Verify Details', 'Hold & Review'] },
+            summaryReason: { type: Type.STRING },
+            suggestedClarificationMessage: { type: Type.STRING },
+            flaggedFields: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  field: { type: Type.STRING },
+                  suspiciousValue: { type: Type.STRING },
+                  reason: { type: Type.STRING },
+                  severity: { type: Type.STRING, enum: ['info', 'warning', 'critical'] },
+                },
+                required: ['field', 'suspiciousValue', 'reason', 'severity'],
+              },
+            },
+          },
+          required: ['riskLevel', 'confidence', 'recommendedAction', 'summaryReason', 'flaggedFields'],
+        },
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      };
+      if (modelName === PLAYNIX_GEMINI_MODEL) {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return ai.models.generateContent({
+        model: modelName,
+        contents: promptText,
+        config: cfg,
+      });
+    };
+
+    const primaryModel =
+      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+
+    let resp: any;
+    let modelUsed = primaryModel;
+    try {
+      resp = await runInspectOnce(primaryModel, 5500);
+    } catch (firstErr: any) {
+      const m = String(firstErr?.message || firstErr || '').toLowerCase();
+      if (
+        primaryModel === PLAYNIX_GEMINI_MODEL &&
+        (firstErr?.status === 503 ||
+          firstErr?.name === 'TimeoutError' ||
+          firstErr?.name === 'AbortError' ||
+          m.includes('503') ||
+          m.includes('high demand') ||
+          m.includes('timed out') ||
+          m.includes('aborted'))
+      ) {
+        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+        modelUsed = 'gemini-3.1-flash-lite';
+        resp = await runInspectOnce(modelUsed, 4500);
+      } else {
+        throw firstErr;
+      }
+    }
+
+    const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
+    const aiRisk: 'LOW' | 'MEDIUM' | 'HIGH' =
+      parsed?.riskLevel === 'HIGH' ? 'HIGH' : parsed?.riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW';
+
+    // Safety merge: if deterministic rules spotted critical hard spam (e.g. duplicate rapid burst / dummy phone), don't downgrade HIGH to LOW accidentally
+    const triggers: string[] = Array.isArray(body.triggers) ? body.triggers : [];
+    const hasHardSpamTrigger = triggers.some((t) =>
+      ['duplicate_order_burst', 'empty_address', 'invalid_name'].includes(t)
+    );
+    const finalRisk: 'LOW' | 'MEDIUM' | 'HIGH' =
+      hasHardSpamTrigger && aiRisk === 'LOW' ? 'HIGH' : aiRisk;
+
+    const cleanFlags = Array.isArray(parsed?.flaggedFields)
+      ? parsed.flaggedFields.slice(0, 6).map((f: any) => ({
+          field: String(f?.field || 'Order Detail').trim().slice(0, 60),
+          suspiciousValue: String(f?.suspiciousValue || '').trim().slice(0, 140),
+          reason: String(f?.reason || '').trim().slice(0, 220),
+          severity: f?.severity === 'critical' ? 'critical' : f?.severity === 'warning' ? 'warning' : 'info',
+        }))
+      : [];
+
+    // Preserve hard rule flags if Gemini omitted any triggered rule
+    const baselineFlags = Array.isArray(ruleBaseline?.flaggedFields) ? ruleBaseline.flaggedFields : [];
+    const mergedFlags = cleanFlags.length > 0 ? cleanFlags : finalRisk === 'LOW' ? [] : baselineFlags;
+
+    const verification = {
+      riskLevel: finalRisk,
+      decisionStatus: finalRisk === 'LOW' ? 'auto_approved' : 'pending_review',
+      confidence: Math.min(99, Math.max(40, Number(parsed?.confidence) || (finalRisk === 'LOW' ? 94 : 85))),
+      recommendedAction:
+        finalRisk === 'HIGH'
+          ? 'Hold & Review'
+          : finalRisk === 'MEDIUM'
+          ? 'Verify Details'
+          : parsed?.recommendedAction || 'Approve',
+      summaryReason:
+        String(parsed?.summaryReason || '').trim().slice(0, 260) ||
+        (finalRisk === 'LOW'
+          ? 'Order context verified as normal and legitimate by Playnix AI.'
+          : ruleBaseline?.summaryReason || 'Requires quick owner review.'),
+      flaggedFields: mergedFlags,
+      clarificationMessage:
+        finalRisk !== 'LOW' && parsed?.suggestedClarificationMessage
+          ? String(parsed.suggestedClarificationMessage).trim().slice(0, 220)
+          : undefined,
+      inspectedBy: 'gemini_ai',
+      modelUsed,
+      inspectedAt: nowIso,
+      auditHistory: [
+        {
+          action: 'inspected',
+          actor: 'Playnix AI',
+          riskLevel: finalRisk,
+          note: String(parsed?.summaryReason || '').trim().slice(0, 220) || `Inspected via ${modelUsed}`,
+          at: nowIso,
+        },
+      ],
+    };
+
+    return res.json({
+      success: true,
+      geminiConfigured: true,
+      usedGemini: true,
+      verification,
+    });
+  } catch (err: any) {
+    console.info('Order AI inspection safe fallback:', String(err?.status || err?.message || 'error'));
+    return res.json({
+      success: true,
+      geminiConfigured: getGeminiClient() !== null,
+      usedGemini: false,
+      verification: req.body?.ruleBaseline || null,
     });
   }
 });
