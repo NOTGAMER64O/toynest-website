@@ -3173,6 +3173,37 @@ export default function App() {
   };
 
   useEffect(() => {
+    const homeTitle = 'Playnix – Affordable Toys & 3D Printed Products';
+    const homeDescription =
+      'Playnix – Your trusted online destination for affordable toys, creative 3D-printed products and unique finds. Discover great products at budget-friendly prices with convenient shopping!';
+
+    let nextTitle = homeTitle;
+    let nextDescription = homeDescription;
+    let nextRobots = 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1';
+
+    if (page === 'productDetail' && selectedProductForDetail) {
+      nextTitle = `${selectedProductForDetail.name} – Playnix`;
+      if (selectedProductForDetail.description?.trim()) {
+        nextDescription = `${selectedProductForDetail.name} at Playnix – ${selectedProductForDetail.description.trim().slice(0, 130)}`;
+      }
+    } else if (page === 'myOrders') {
+      nextTitle = 'My Orders – Playnix';
+    } else if (page === 'buy') {
+      nextTitle = 'Checkout – Playnix';
+      nextRobots = 'noindex, nofollow';
+    } else if (page === 'owner' || page === 'ownerLogin') {
+      nextTitle = 'Owner Dashboard – Playnix';
+      nextRobots = 'noindex, nofollow';
+    }
+
+    document.title = nextTitle;
+    const descEl = document.querySelector('meta[name="description"]');
+    if (descEl) descEl.setAttribute('content', nextDescription);
+    const robotsEl = document.querySelector('meta[name="robots"]');
+    if (robotsEl) robotsEl.setAttribute('content', nextRobots);
+  }, [page, selectedProductForDetail]);
+
+  useEffect(() => {
     loadPaymentQr();
     loadShopModes();
     loadColours();
@@ -6604,14 +6635,14 @@ export default function App() {
           <>
             <section className="hero">
               <div className="hero-copy">
-                <span className="eyebrow">LITTLE THINGS, BIG SMILES</span>
+                <span className="eyebrow">PLAYNIX · AFFORDABLE TOYS &amp; 3D PRINTS</span>
                 <h1>
-                  Find your next
+                  Playnix affordable
                   <br />
-                  <em>favourite toy.</em>
+                  <em>toys &amp; 3D prints.</em>
                 </h1>
                 <p>
-                  Discover fun picks, check the price, and place your order in just a few steps.
+                  Shop Playnix online for affordable toys, 3D printed products, and unique budget-friendly picks delivered in a few easy steps.
                 </p>
                 <button
                   className="primary-btn"
@@ -6619,10 +6650,10 @@ export default function App() {
                     document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' });
                   }}
                 >
-                  Explore toys <ArrowLeft className="arrow-down" size={17} />
+                  Explore Playnix <ArrowLeft className="arrow-down" size={17} />
                 </button>
                 <div className="hero-proof">
-                  <span className="proof-icon">✦</span> A little joy for every day
+                  <span className="proof-icon">✦</span> Budget-friendly online shopping at Playnix
                 </div>
               </div>
 
@@ -7054,11 +7085,11 @@ export default function App() {
             <section className="catalog" id="catalog">
               <div className="section-head">
                 <div>
-                  <span className="eyebrow">THE COLLECTION</span>
+                  <span className="eyebrow">PLAYNIX COLLECTION</span>
                   <h2>
-                    Toy shelf <span>({products.filter((p) => p.available !== false).length})</span>
+                    Playnix toy shelf <span>({products.filter((p) => p.available !== false).length})</span>
                   </h2>
-                  <p>Pick a toy you love. The price is shown upfront.</p>
+                  <p>Browse cheap toys online and unique 3D printed products with upfront prices.</p>
                 </div>
 
                 <div className="catalog-actions">
