@@ -417,5 +417,93 @@ service cloud.firestore {
         && isValidAiGuidanceQuestion(request.resource.data);
       allow delete: if isValidId(questionId);
     }
+
+    // AI Watchdog Alerts Collection:
+    function isValidWatchdogAlert(data) {
+      return data.keys().hasAll(['id', 'title', 'explanation', 'recommendedAction', 'category', 'severity', 'status', 'detectedBy', 'detectedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'explanation',
+          'recommendedAction',
+          'category',
+          'severity',
+          'status',
+          'targetType',
+          'targetId',
+          'targetLabel',
+          'detectedBy',
+          'detectedAt',
+          'updatedAt',
+          'resolvedAt',
+          'ownerNote'
+        ])
+        && isValidId(data.id)
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 240
+        && data.explanation is string
+        && data.explanation.size() > 0
+        && data.explanation.size() <= 2000
+        && data.recommendedAction is string
+        && data.recommendedAction.size() <= 600
+        && data.category in ['orders', 'products', 'pricing', 'website']
+        && data.severity in ['info', 'warning', 'critical']
+        && data.status in ['Pending', 'Resolved', 'Ignored']
+        && (!('targetType' in data) || data.targetType in ['order', 'product', 'deal', 'offer', 'campaign', 'website'])
+        && (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128))
+        && (!('targetLabel' in data) || (data.targetLabel is string && data.targetLabel.size() <= 200))
+        && data.detectedBy in ['rules', 'gemini_ai']
+        && data.detectedAt is string
+        && data.detectedAt.size() <= 64
+        && data.updatedAt is string
+        && data.updatedAt.size() <= 64
+        && (!('resolvedAt' in data) || (data.resolvedAt is string && data.resolvedAt.size() <= 64))
+        && (!('ownerNote' in data) || (data.ownerNote is string && data.ownerNote.size() <= 500));
+    }
+
+    match /watchdogAlerts/{alertId} {
+      allow read: if true;
+      allow create, update: if isValidId(alertId)
+        && request.resource.data.id == alertId
+        && isValidWatchdogAlert(request.resource.data);
+      allow delete: if false;
+    }
+
+    // AI Watchdog Activity Logs Collection (append-only audit history):
+    function isValidWatchdogLog(data) {
+      return data.keys().hasAll(['id', 'category', 'action', 'actor', 'details', 'at'])
+        && data.keys().hasOnly([
+          'id',
+          'alertId',
+          'alertTitle',
+          'category',
+          'action',
+          'actor',
+          'details',
+          'severity',
+          'at'
+        ])
+        && isValidId(data.id)
+        && (!('alertId' in data) || (data.alertId is string && data.alertId.size() <= 128))
+        && (!('alertTitle' in data) || (data.alertTitle is string && data.alertTitle.size() <= 240))
+        && data.category in ['orders', 'products', 'pricing', 'website', 'system']
+        && data.action in ['detected', 'scan_completed', 'ai_analyzed', 'resolved', 'ignored', 'reopened', 'auto_resolved']
+        && data.actor in ['AI Watchdog', 'Gemini AI', 'Owner']
+        && data.details is string
+        && data.details.size() > 0
+        && data.details.size() <= 1000
+        && (!('severity' in data) || data.severity in ['info', 'warning', 'critical'])
+        && data.at is string
+        && data.at.size() <= 64;
+    }
+
+    match /watchdogLogs/{logId} {
+      allow read: if true;
+      allow create: if isValidId(logId)
+        && request.resource.data.id == logId
+        && isValidWatchdogLog(request.resource.data);
+      allow update, delete: if false;
+    }
   }
 }

@@ -1511,7 +1511,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
   const runSuggestOnce = async (modelName: string) => {
     const cfg: any = {
       ...suggestConfig,
-      abortSignal: AbortSignal.timeout(6000),
+      abortSignal: AbortSignal.timeout(10000),
     };
     if (modelName === PLAYNIX_GEMINI_MODEL) {
       cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
@@ -1589,6 +1589,17 @@ app.post('/api/owner/ai/suggest-answer', async (req, res) => {
     const result = await handleAiSuggestQuestion(req.body || {});
     res.json(result);
   } catch (err: any) {
+    const rawMsg = String(err?.message || err || '');
+    const isAbort =
+      err?.name === 'AbortError' || err?.name === 'TimeoutError' || /aborted|timed out/i.test(rawMsg);
+    if (isAbort) {
+      console.info('AI suggest-answer timed out.');
+      return res.status(504).json({
+        success: false,
+        geminiConfigured: getGeminiClient() !== null,
+        error: 'Playnix AI took too long to respond right now. Please try again.',
+      });
+    }
     console.error('Error in /api/owner/ai/suggest-answer:', err);
     res.status(500).json({
       success: false,
@@ -1610,6 +1621,17 @@ app.post('/api/owner/ai/test-question', async (req, res) => {
     const result = await handleAiSuggestQuestion(req.body || {});
     res.json(result);
   } catch (err: any) {
+    const rawMsg = String(err?.message || err || '');
+    const isAbort =
+      err?.name === 'AbortError' || err?.name === 'TimeoutError' || /aborted|timed out/i.test(rawMsg);
+    if (isAbort) {
+      console.info('AI test-question timed out.');
+      return res.status(504).json({
+        success: false,
+        geminiConfigured: getGeminiClient() !== null,
+        error: 'Playnix AI took too long to respond right now. Please try again.',
+      });
+    }
     console.error('Error in /api/owner/ai/test-question:', err);
     res.status(500).json({
       success: false,
@@ -1911,15 +1933,13 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       const m = String(e?.message || e || '').toLowerCase();
       return (
         e?.status === 429 ||
-        e?.name === 'TimeoutError' ||
-        e?.name === 'AbortError' ||
         m.includes('429') ||
         m.includes('resource_exhausted') ||
-        m.includes('quota') ||
-        m.includes('aborted') ||
-        m.includes('timed out')
+        m.includes('quota')
       );
     };
+
+    const isSearchFallbackError = (e: any) => isSearchQuotaError(e) || isTransientOverload(e);
 
     const callModelWithRetry = async (withSearch: boolean) => {
       const runOnce = async (modelName: string, timeoutMs: number) => {
@@ -1941,14 +1961,17 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
 
       try {
         return {
-          resp: await runOnce(primaryModel, withSearch ? 5500 : 8000),
+          resp: await runOnce(primaryModel, withSearch ? 12000 : 15000),
           modelUsed: primaryModel,
         };
       } catch (firstErr: any) {
         if (isTransientOverload(firstErr) && primaryModel === PLAYNIX_GEMINI_MODEL) {
-          hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+          const msg = String(firstErr?.message || firstErr || '').toLowerCase();
+          if (firstErr?.status === 503 || msg.includes('overloaded') || msg.includes('high demand')) {
+            hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+          }
           return {
-            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 5000 : 7500),
+            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 10000 : 14000),
             modelUsed: 'gemini-3.1-flash-lite',
           };
         }
@@ -1968,16 +1991,22 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
         response = out.resp;
         modelUsed = out.modelUsed;
       } catch (searchErr: any) {
-        if (!isSearchQuotaError(searchErr)) {
+        if (!isSearchFallbackError(searchErr)) {
           throw searchErr;
         }
+        const hitQuota = isSearchQuotaError(searchErr);
         console.info(
-          'Google Search grounding unavailable on current quota; using standard Gemini toy market pricing estimate.'
+          hitQuota
+            ? 'Google Search grounding unavailable on current quota; using standard Gemini toy market pricing estimate.'
+            : 'Google Search grounding timed out or was busy; falling back to fast Gemini market pricing estimate.'
         );
-        googleSearchCooldownUntil = Date.now() + 15 * 60_000;
+        if (hitQuota) {
+          googleSearchCooldownUntil = Date.now() + 15 * 60_000;
+        }
         webSearchUsed = false;
-        webSearchNote =
-          'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).';
+        webSearchNote = hitQuota
+          ? 'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).'
+          : 'Live web search took too long, so Playnix AI used direct Gemini vision & toy market pricing instead.';
         const fallbackOut = await callModelWithRetry(false);
         response = fallbackOut.resp;
         modelUsed = fallbackOut.modelUsed;
@@ -2115,8 +2144,23 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       modelUsed,
     });
   } catch (err: any) {
+    const rawMsg = String(err?.message || err || 'Failed to research product prices.');
+    const isAbort =
+      err?.name === 'AbortError' ||
+      err?.name === 'TimeoutError' ||
+      /aborted|timed out/i.test(rawMsg);
+
+    if (isAbort) {
+      console.info('Product price advisor request timed out after retries.');
+      return res.status(504).json({
+        success: false,
+        geminiConfigured: getGeminiClient() !== null,
+        error: 'Playnix AI took too long to respond right now. Please try again.',
+      });
+    }
+
     console.error('Error in /api/owner/ai/product-price-advisor:', err);
-    let friendlyError = String(err?.message || 'Failed to research product prices. Please try again.');
+    let friendlyError = rawMsg;
     try {
       const parsedErr = JSON.parse(friendlyError);
       if (parsedErr?.error?.status === 'RESOURCE_EXHAUSTED' || parsedErr?.error?.code === 429) {
@@ -2201,10 +2245,11 @@ app.post('/api/owner/ai/product-highlights', async (req, res) => {
       `DESCRIPTION: ${description || 'Not provided'}`,
     ].join('\n');
 
-    const contentsPayload =
-      imageParts.length > 0 ? { parts: [...imageParts, { text: promptText }] } : promptText;
-
-    const runHighlightsOnce = async (modelName: string, timeoutMs: number) => {
+    const runHighlightsOnce = async (
+      modelName: string,
+      timeoutMs: number,
+      partsToUse: Array<{ inlineData: { mimeType: string; data: string } }> = imageParts
+    ) => {
       const cfg: any = {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -2223,9 +2268,11 @@ app.post('/api/owner/ai/product-highlights', async (req, res) => {
       if (modelName === PLAYNIX_GEMINI_MODEL) {
         cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
       }
+      const payload =
+        partsToUse.length > 0 ? { parts: [...partsToUse, { text: promptText }] } : promptText;
       return ai.models.generateContent({
         model: modelName,
-        contents: contentsPayload,
+        contents: payload,
         config: cfg,
       });
     };
@@ -2235,23 +2282,47 @@ app.post('/api/owner/ai/product-highlights', async (req, res) => {
 
     let resp: any;
     let modelUsed = primaryModel;
+    let usedPhotoCount = imageParts.length;
     try {
-      resp = await runHighlightsOnce(primaryModel, 6500);
+      resp = await runHighlightsOnce(primaryModel, 18000, imageParts);
     } catch (firstErr: any) {
       const m = String(firstErr?.message || firstErr || '').toLowerCase();
-      if (
-        primaryModel === PLAYNIX_GEMINI_MODEL &&
-        (firstErr?.status === 503 ||
-          firstErr?.name === 'TimeoutError' ||
-          firstErr?.name === 'AbortError' ||
-          m.includes('503') ||
-          m.includes('high demand') ||
-          m.includes('timed out') ||
-          m.includes('aborted'))
-      ) {
-        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+      const isTransient =
+        firstErr?.status === 503 ||
+        firstErr?.name === 'TimeoutError' ||
+        firstErr?.name === 'AbortError' ||
+        m.includes('503') ||
+        m.includes('high demand') ||
+        m.includes('overloaded') ||
+        m.includes('timed out') ||
+        m.includes('aborted');
+
+      if (isTransient) {
+        if (firstErr?.status === 503 || m.includes('high demand') || m.includes('overloaded')) {
+          hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+        }
         modelUsed = 'gemini-3.1-flash-lite';
-        resp = await runHighlightsOnce(modelUsed, 6000);
+        // Retry with flash-lite (and cap to first 2 photos if payload had many photos)
+        const lighterParts = imageParts.length > 2 ? imageParts.slice(0, 2) : imageParts;
+        usedPhotoCount = lighterParts.length;
+        try {
+          resp = await runHighlightsOnce(modelUsed, 15000, lighterParts);
+        } catch (secondErr: any) {
+          const sm = String(secondErr?.message || secondErr || '').toLowerCase();
+          const secondAbort =
+            secondErr?.name === 'AbortError' ||
+            secondErr?.name === 'TimeoutError' ||
+            sm.includes('aborted') ||
+            sm.includes('timed out');
+          // Final fast fallback with single photo or name-only if multi-photo upload timed out
+          if (secondAbort && (lighterParts.length > 1 || (lighterParts.length === 1 && productName))) {
+            const finalParts = lighterParts.length > 1 ? lighterParts.slice(0, 1) : [];
+            usedPhotoCount = finalParts.length;
+            resp = await runHighlightsOnce('gemini-3.1-flash-lite', 12000, finalParts);
+          } else {
+            throw secondErr;
+          }
+        }
       } else {
         throw firstErr;
       }
@@ -2277,17 +2348,32 @@ app.post('/api/owner/ai/product-highlights', async (req, res) => {
     return res.json({
       success: true,
       geminiConfigured: true,
-      reviewedPhotosCount: imageParts.length,
+      reviewedPhotosCount: usedPhotoCount,
       imageObservation: String(parsed?.imageObservation || '').trim().slice(0, 260),
       highlights,
       modelUsed,
     });
   } catch (err: any) {
+    const rawMsg = String(err?.message || err || 'Failed to generate highlights right now.');
+    const isAbort =
+      err?.name === 'AbortError' ||
+      err?.name === 'TimeoutError' ||
+      /aborted|timed out/i.test(rawMsg);
+
+    if (isAbort) {
+      console.info('Product highlights generation timed out after retries.');
+      return res.status(504).json({
+        success: false,
+        geminiConfigured: getGeminiClient() !== null,
+        error: 'Playnix AI took too long to analyze the photos right now. Please try again.',
+      });
+    }
+
     console.error('Error in /api/owner/ai/product-highlights:', err);
     res.status(500).json({
       success: false,
       geminiConfigured: getGeminiClient() !== null,
-      error: err?.message || 'Failed to generate highlights right now.',
+      error: rawMsg,
     });
   }
 });
@@ -2829,7 +2915,7 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
           },
           required: ['questions'],
         },
-        abortSignal: AbortSignal.timeout(7000),
+        abortSignal: AbortSignal.timeout(12000),
       };
 
       const runAuditOnce = async (modelName: string) => {
@@ -3036,7 +3122,7 @@ app.post('/api/orders/inspect', async (req, res) => {
     let resp: any;
     let modelUsed = primaryModel;
     try {
-      resp = await runInspectOnce(primaryModel, 5500);
+      resp = await runInspectOnce(primaryModel, 9500);
     } catch (firstErr: any) {
       const m = String(firstErr?.message || firstErr || '').toLowerCase();
       if (
@@ -3051,7 +3137,7 @@ app.post('/api/orders/inspect', async (req, res) => {
       ) {
         hydrogenOverloadCooldownUntil = Date.now() + 60_000;
         modelUsed = 'gemini-3.1-flash-lite';
-        resp = await runInspectOnce(modelUsed, 4500);
+        resp = await runInspectOnce(modelUsed, 8500);
       } else {
         throw firstErr;
       }
@@ -3129,6 +3215,286 @@ app.post('/api/orders/inspect', async (req, res) => {
       geminiConfigured: getGeminiClient() !== null,
       usedGemini: false,
       verification: req.body?.ruleBaseline || null,
+    });
+  }
+});
+
+// Playnix AI Watchdog — deep context-aware business monitoring using real database snapshot
+app.post('/api/owner/watchdog/analyze', async (req, res) => {
+  const { pin } = req.body || {};
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.json({
+      success: true,
+      geminiConfigured: false,
+      usedGemini: false,
+      healthSummary: '',
+      extraAlerts: [],
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const products: any[] = Array.isArray(body.products) ? body.products.slice(0, 60) : [];
+    const orders: any[] = Array.isArray(body.orders) ? body.orders.slice(0, 40) : [];
+    const deals: any[] = Array.isArray(body.deals) ? body.deals.slice(0, 20) : [];
+    const offers: any[] = Array.isArray(body.offers) ? body.offers.slice(0, 20) : [];
+    const campaigns: any[] = Array.isArray(body.campaigns) ? body.campaigns.slice(0, 15) : [];
+    const ruleFindings: any[] = Array.isArray(body.ruleFindings) ? body.ruleFindings.slice(0, 30) : [];
+    const websiteErrors: any[] = Array.isArray(body.websiteErrors) ? body.websiteErrors.slice(0, 15) : [];
+    const stats = body.stats || {};
+
+    const validOrderIds = new Set(orders.map((o) => String(o?.id || '').trim()).filter(Boolean));
+    const validProductIds = new Set(products.map((p) => String(p?.id || '').trim()).filter(Boolean));
+    const validDealIds = new Set(deals.map((d) => String(d?.id || '').trim()).filter(Boolean));
+    const validOfferIds = new Set(offers.map((o) => String(o?.id || '').trim()).filter(Boolean));
+    const validCampaignIds = new Set(campaigns.map((c) => String(c?.id || '').trim()).filter(Boolean));
+    const validWebsiteTargets = new Set(['sections', 'aiAssistant', 'questions', 'products', 'website']);
+
+    const compactProducts = products.map((p) => ({
+      id: String(p?.id || '').slice(0, 128),
+      name: String(p?.name || '').trim().slice(0, 100),
+      category: String(p?.category || 'Other').trim().slice(0, 50),
+      priceINR: Number(p?.price) || 0,
+      available: p?.available !== false,
+      description: String(p?.description || '').trim().slice(0, 160),
+    }));
+
+    const compactOrders = orders.map((o) => ({
+      id: String(o?.id || '').slice(0, 128),
+      orderNumber: String(o?.orderNumber || '').slice(0, 32),
+      customerName: sanitizeUntrustedCustomerText(o?.name, 80),
+      mode: o?.mode === 'Adult' ? 'Adult' : 'Child',
+      productId: String(o?.productId || '').slice(0, 128),
+      productName: String(o?.productName || '').slice(0, 100),
+      quantity: Number(o?.quantity) || 1,
+      totalINR: Number(o?.price) || 0,
+      status: String(o?.status || '').slice(0, 40),
+      existingRisk: o?.aiVerification?.riskLevel || 'uninspected',
+      note: sanitizeUntrustedCustomerText(o?.note, 160),
+    }));
+
+    const compactDeals = deals.map((d) => ({
+      id: String(d?.id || '').slice(0, 128),
+      title: String(d?.title || '').slice(0, 90),
+      originalPriceINR: Number(d?.originalPrice) || 0,
+      dealPriceINR: Number(d?.dealPrice) || 0,
+      claimed: Boolean(d?.claimed),
+    }));
+
+    const compactOffers = offers.map((o) => ({
+      id: String(o?.id || '').slice(0, 128),
+      productId: String(o?.productId || '').slice(0, 128),
+      productName: String(o?.productName || '').slice(0, 90),
+      originalPriceINR: Number(o?.originalPrice) || 0,
+      discountedPriceINR: Number(o?.discountedPrice) || 0,
+      status: String(o?.status || '').slice(0, 30),
+    }));
+
+    const compactCampaigns = campaigns.map((c) => ({
+      id: String(c?.id || '').slice(0, 128),
+      name: String(c?.name || '').slice(0, 80),
+      discountType: String(c?.discountType || '').slice(0, 20),
+      discountValue: Number(c?.discountValue) || 0,
+      targetScope: String(c?.targetScope || '').slice(0, 20),
+    }));
+
+    const promptText = [
+      'You are Playnix AI Watchdog, the business monitoring assistant for Playnix Shop (a toy storefront in India, INR ₹).',
+      'Inspect ONLY the real database snapshot below and spot genuine issues that deterministic rules did NOT already report.',
+      '',
+      'STRICT ACCURACY RULES:',
+      '1. NEVER invent products, orders, numbers, sales stats, or errors not explicitly present below.',
+      '2. Every item in extraAlerts MUST reference an EXACT id from ORDERS, PRODUCTS, DEALS, OFFERS, or CAMPAIGNS (or targetType "website" with targetId "sections"/"aiAssistant"/"questions"/"website").',
+      '3. Focus on semantic/subtle issues missed by simple rules:',
+      '   - Category-name/description contradictions (e.g. "Car" or "Fidget" listed in the wrong category like "Educational" or "Decorative").',
+      '   - Suspicious repeated order patterns across multiple customer names/notes, or nonsensical instructions.',
+      '   - Pricing inconsistencies across similar items in the store (e.g., open-box Rescue Deal priced higher than the regular item, or misleading titles/prices).',
+      '   - Overlapping or confusing active offers/campaigns.',
+      '4. Do NOT duplicate issues already listed in RULE_FINDINGS_ALREADY_DETECTED.',
+      '5. If everything looks clean beyond RULE_FINDINGS_ALREADY_DETECTED, return extraAlerts: [] (empty array is completely good!).',
+      '6. Keep healthSummary strictly grounded in REAL_STATS (max 220 chars).',
+      '',
+      `REAL_STATS: ${JSON.stringify(stats)}`,
+      `RULE_FINDINGS_ALREADY_DETECTED: ${JSON.stringify(ruleFindings.map((r) => ({ id: r.id, title: r.title, targetId: r.targetId })))}`,
+      `PRODUCTS: ${JSON.stringify(compactProducts)}`,
+      `ORDERS: ${JSON.stringify(compactOrders)}`,
+      `RESCUE_DEALS: ${JSON.stringify(compactDeals)}`,
+      `SCHEDULED_OFFERS: ${JSON.stringify(compactOffers)}`,
+      `DISCOUNT_CAMPAIGNS: ${JSON.stringify(compactCampaigns)}`,
+      `WEBSITE_ERRORS: ${JSON.stringify(websiteErrors)}`,
+    ].join('\n');
+
+    const runWatchdogOnce = async (modelName: string, timeoutMs: number) => {
+      const cfg: any = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            healthSummary: { type: Type.STRING },
+            extraAlerts: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  explanation: { type: Type.STRING },
+                  recommendedAction: { type: Type.STRING },
+                  category: {
+                    type: Type.STRING,
+                    enum: ['orders', 'products', 'pricing', 'website'],
+                  },
+                  severity: {
+                    type: Type.STRING,
+                    enum: ['info', 'warning', 'critical'],
+                  },
+                  targetType: {
+                    type: Type.STRING,
+                    enum: ['order', 'product', 'deal', 'offer', 'campaign', 'website'],
+                  },
+                  targetId: { type: Type.STRING },
+                  targetLabel: { type: Type.STRING },
+                },
+                required: [
+                  'title',
+                  'explanation',
+                  'recommendedAction',
+                  'category',
+                  'severity',
+                  'targetType',
+                  'targetId',
+                ],
+              },
+            },
+          },
+          required: ['healthSummary', 'extraAlerts'],
+        },
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      };
+      if (modelName === PLAYNIX_GEMINI_MODEL) {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return ai.models.generateContent({
+        model: modelName,
+        contents: promptText,
+        config: cfg,
+      });
+    };
+
+    const primaryModel =
+      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
+
+    let resp: any;
+    let modelUsed = primaryModel;
+    try {
+      resp = await runWatchdogOnce(primaryModel, 11000);
+    } catch (firstErr: any) {
+      const m = String(firstErr?.message || firstErr || '').toLowerCase();
+      if (
+        primaryModel === PLAYNIX_GEMINI_MODEL &&
+        (firstErr?.status === 503 ||
+          firstErr?.name === 'TimeoutError' ||
+          firstErr?.name === 'AbortError' ||
+          m.includes('503') ||
+          m.includes('high demand') ||
+          m.includes('timed out') ||
+          m.includes('aborted'))
+      ) {
+        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
+        modelUsed = 'gemini-3.1-flash-lite';
+        resp = await runWatchdogOnce(modelUsed, 9000);
+      } else {
+        throw firstErr;
+      }
+    }
+
+    const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
+    const existingRuleTargets = new Set(
+      ruleFindings.map((r) => `${String(r?.category || '')}::${String(r?.targetId || '')}`)
+    );
+
+    const validatedAlerts: Array<{
+      id: string;
+      title: string;
+      explanation: string;
+      recommendedAction: string;
+      category: 'orders' | 'products' | 'pricing' | 'website';
+      severity: 'info' | 'warning' | 'critical';
+      targetType: 'order' | 'product' | 'deal' | 'offer' | 'campaign' | 'website';
+      targetId: string;
+      targetLabel: string;
+      detectedBy: 'gemini_ai';
+    }> = [];
+
+    if (Array.isArray(parsed?.extraAlerts)) {
+      for (const raw of parsed.extraAlerts.slice(0, 6)) {
+        const tType = String(raw?.targetType || '').trim();
+        const tId = String(raw?.targetId || '').trim();
+        const cat = String(raw?.category || '').trim();
+
+        const isValidRef =
+          (tType === 'order' && validOrderIds.has(tId)) ||
+          (tType === 'product' && validProductIds.has(tId)) ||
+          (tType === 'deal' && validDealIds.has(tId)) ||
+          (tType === 'offer' && validOfferIds.has(tId)) ||
+          (tType === 'campaign' && validCampaignIds.has(tId)) ||
+          (tType === 'website' && (validWebsiteTargets.has(tId) || websiteErrors.some((e) => e.id === tId)));
+
+        if (!isValidRef) continue;
+        if (existingRuleTargets.has(`${cat}::${tId}`)) continue;
+
+        const cleanTitle = String(raw?.title || '').trim().slice(0, 180);
+        const cleanExp = String(raw?.explanation || '').trim().slice(0, 700);
+        if (!cleanTitle || !cleanExp) continue;
+
+        const cleanSeverity =
+          raw?.severity === 'critical' ? 'critical' : raw?.severity === 'info' ? 'info' : 'warning';
+        const cleanCat =
+          cat === 'orders' || cat === 'products' || cat === 'pricing' ? cat : 'website';
+        const safeAlertId = `wd_ai_${cleanCat}_${tId}`
+          .replace(/[^a-zA-Z0-9_-]/g, '_')
+          .replace(/_+/g, '_')
+          .slice(0, 120);
+
+        if (validatedAlerts.some((a) => a.id === safeAlertId)) continue;
+
+        validatedAlerts.push({
+          id: safeAlertId,
+          title: cleanTitle,
+          explanation: cleanExp,
+          recommendedAction: String(raw?.recommendedAction || 'Inspect item in dashboard')
+            .trim()
+            .slice(0, 320),
+          category: cleanCat,
+          severity: cleanSeverity,
+          targetType: tType as any,
+          targetId: tId.slice(0, 128),
+          targetLabel: String(raw?.targetLabel || tId).trim().slice(0, 160),
+          detectedBy: 'gemini_ai',
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      geminiConfigured: true,
+      usedGemini: true,
+      modelUsed,
+      healthSummary: String(parsed?.healthSummary || '').trim().slice(0, 260),
+      extraAlerts: validatedAlerts,
+    });
+  } catch (err: any) {
+    console.info('Watchdog AI audit safe fallback:', String(err?.status || err?.message || 'error'));
+    return res.json({
+      success: true,
+      geminiConfigured: getGeminiClient() !== null,
+      usedGemini: false,
+      healthSummary: '',
+      extraAlerts: [],
     });
   }
 });

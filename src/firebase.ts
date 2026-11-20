@@ -46,6 +46,8 @@ import {
   type AiTrainingAnswer,
   type AiTrainingStepKey,
   type AiGuidanceQuestion,
+  type WatchdogAlert,
+  type WatchdogActivityLog,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   DEFAULT_AI_ASSISTANT_STATE,
@@ -3121,3 +3123,235 @@ export async function deleteAiGuidanceQuestionFromCloud(questionId: string): Pro
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
+
+// ----------------- AI WATCHDOG ALERTS & ACTIVITY LOGS -----------------
+function sanitizeWatchdogIdForFirestore(rawId: string, prefix = 'wd'): string {
+  const clean = String(rawId || `${prefix}_${Date.now().toString(36)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 128);
+  return clean || `${prefix}_${Date.now().toString(36)}`;
+}
+
+function normalizeWatchdogAlert(data: any, docId: string): WatchdogAlert {
+  const validCategories = new Set(['orders', 'products', 'pricing', 'website']);
+  const validSeverities = new Set(['info', 'warning', 'critical']);
+  const validStatuses = new Set(['Pending', 'Resolved', 'Ignored']);
+  const validTargets = new Set(['order', 'product', 'deal', 'offer', 'campaign', 'website']);
+
+  return {
+    id: sanitizeWatchdogIdForFirestore(String(data?.id || docId), 'wd'),
+    title: String(data?.title || 'Watchdog Alert').trim().slice(0, 200),
+    explanation: String(data?.explanation || '').trim().slice(0, 800),
+    recommendedAction: String(data?.recommendedAction || 'Inspect item in dashboard').trim().slice(0, 400),
+    category: validCategories.has(data?.category) ? data.category : 'website',
+    severity: validSeverities.has(data?.severity) ? data.severity : 'warning',
+    status: validStatuses.has(data?.status) ? data.status : 'Pending',
+    ...(validTargets.has(data?.targetType) ? { targetType: data.targetType } : {}),
+    ...(data?.targetId ? { targetId: String(data.targetId).slice(0, 128) } : {}),
+    ...(data?.targetLabel ? { targetLabel: String(data.targetLabel).trim().slice(0, 200) } : {}),
+    detectedBy: data?.detectedBy === 'gemini_ai' ? 'gemini_ai' : 'rules',
+    detectedAt: String(data?.detectedAt || data?.updatedAt || new Date().toISOString()).slice(0, 64),
+    updatedAt: String(data?.updatedAt || data?.detectedAt || new Date().toISOString()).slice(0, 64),
+    ...(data?.resolvedAt ? { resolvedAt: String(data.resolvedAt).slice(0, 64) } : {}),
+    ...(data?.ownerNote ? { ownerNote: String(data.ownerNote).trim().slice(0, 400) } : {}),
+  };
+}
+
+function normalizeWatchdogLog(data: any, docId: string): WatchdogActivityLog {
+  const validCategories = new Set(['orders', 'products', 'pricing', 'website', 'system']);
+  const validActions = new Set([
+    'detected',
+    'scan_completed',
+    'ai_analyzed',
+    'resolved',
+    'ignored',
+    'reopened',
+    'auto_resolved',
+  ]);
+  const validActors = new Set(['AI Watchdog', 'Gemini AI', 'Owner']);
+  const validSeverities = new Set(['info', 'warning', 'critical']);
+
+  return {
+    id: sanitizeWatchdogIdForFirestore(String(data?.id || docId), 'log'),
+    ...(data?.alertId ? { alertId: String(data.alertId).slice(0, 128) } : {}),
+    ...(data?.alertTitle ? { alertTitle: String(data.alertTitle).trim().slice(0, 200) } : {}),
+    category: validCategories.has(data?.category) ? data.category : 'system',
+    action: validActions.has(data?.action) ? data.action : 'detected',
+    actor: validActors.has(data?.actor) ? data.actor : 'AI Watchdog',
+    details: String(data?.details || '').trim().slice(0, 500),
+    ...(validSeverities.has(data?.severity) ? { severity: data.severity } : {}),
+    at: String(data?.at || new Date().toISOString()).slice(0, 64),
+  };
+}
+
+export async function fetchWatchdogAlertsFromCloud(): Promise<WatchdogAlert[]> {
+  const path = 'watchdogAlerts';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'watchdogAlerts'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'watchdogAlerts'));
+    }
+    const list: WatchdogAlert[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.title) {
+        list.push(normalizeWatchdogAlert(data, d.id));
+      }
+    });
+    return list.sort(
+      (a, b) => new Date(b.updatedAt || b.detectedAt || 0).getTime() - new Date(a.updatedAt || a.detectedAt || 0).getTime()
+    );
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Watchdog alerts fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToWatchdogAlerts(callback: (alerts: WatchdogAlert[]) => void): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'watchdogAlerts'),
+      (snapshot) => {
+        const list: WatchdogAlert[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.title) {
+            list.push(normalizeWatchdogAlert(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.updatedAt || b.detectedAt || 0).getTime() - new Date(a.updatedAt || a.detectedAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('Watchdog alerts subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveWatchdogAlertToCloud(alert: WatchdogAlert): Promise<void> {
+  const safeId = sanitizeWatchdogIdForFirestore(alert.id, 'wd');
+  const path = `watchdogAlerts/${safeId}`;
+  try {
+    const nowIso = new Date().toISOString();
+    const payload = sanitizeForFirestore({
+      id: safeId,
+      title: String(alert.title || 'Watchdog Alert').trim().slice(0, 200),
+      explanation: String(alert.explanation || '').trim().slice(0, 800),
+      recommendedAction: String(alert.recommendedAction || 'Inspect item').trim().slice(0, 400),
+      category: alert.category,
+      severity: alert.severity,
+      status: alert.status,
+      ...(alert.targetType ? { targetType: alert.targetType } : {}),
+      ...(alert.targetId ? { targetId: String(alert.targetId).slice(0, 128) } : {}),
+      ...(alert.targetLabel ? { targetLabel: String(alert.targetLabel).trim().slice(0, 200) } : {}),
+      detectedBy: alert.detectedBy === 'gemini_ai' ? 'gemini_ai' : 'rules',
+      detectedAt: (alert.detectedAt || nowIso).slice(0, 64),
+      updatedAt: (alert.updatedAt || nowIso).slice(0, 64),
+      ...(alert.resolvedAt ? { resolvedAt: String(alert.resolvedAt).slice(0, 64) } : {}),
+      ...(alert.ownerNote ? { ownerNote: String(alert.ownerNote).trim().slice(0, 400) } : {}),
+    });
+    await setDoc(doc(db, 'watchdogAlerts', safeId), payload);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Watchdog alert save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function fetchWatchdogLogsFromCloud(): Promise<WatchdogActivityLog[]> {
+  const path = 'watchdogLogs';
+  try {
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(collection(db, 'watchdogLogs'));
+    } catch {
+      snapshot = await getDocs(collection(db, 'watchdogLogs'));
+    }
+    const list: WatchdogActivityLog[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.action && data.details) {
+        list.push(normalizeWatchdogLog(data, d.id));
+      }
+    });
+    return list
+      .sort((a, b) => new Date(b.at || 0).getTime() - new Date(a.at || 0).getTime())
+      .slice(0, 250);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Watchdog logs fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToWatchdogLogs(callback: (logs: WatchdogActivityLog[]) => void): () => void {
+  try {
+    return onSnapshot(
+      collection(db, 'watchdogLogs'),
+      (snapshot) => {
+        const list: WatchdogActivityLog[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.action && data.details) {
+            list.push(normalizeWatchdogLog(data, d.id));
+          }
+        });
+        list.sort((a, b) => new Date(b.at || 0).getTime() - new Date(a.at || 0).getTime());
+        callback(list.slice(0, 250));
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          console.warn('Watchdog logs subscription warning:', error);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveWatchdogLogToCloud(entry: WatchdogActivityLog): Promise<void> {
+  const safeId = sanitizeWatchdogIdForFirestore(entry.id, 'log');
+  const path = `watchdogLogs/${safeId}`;
+  try {
+    const payload = sanitizeForFirestore({
+      id: safeId,
+      ...(entry.alertId ? { alertId: sanitizeWatchdogIdForFirestore(entry.alertId, 'wd') } : {}),
+      ...(entry.alertTitle ? { alertTitle: String(entry.alertTitle).trim().slice(0, 200) } : {}),
+      category: entry.category || 'system',
+      action: entry.action,
+      actor: entry.actor,
+      details: String(entry.details || '').trim().slice(0, 500),
+      ...(entry.severity ? { severity: entry.severity } : {}),
+      at: String(entry.at || new Date().toISOString()).slice(0, 64),
+    });
+    await setDoc(doc(db, 'watchdogLogs', safeId), payload);
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('Watchdog log save deferred while offline.');
+      return;
+    }
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+

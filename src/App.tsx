@@ -189,32 +189,65 @@ function markAllOwnerOrdersSeen(orders: Order[] = []) {
 
 const api = {
   async get(url: string) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    const data = await res.json();
-    return { data };
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const msg = `HTTP ${res.status} on GET ${url}`;
+        if (res.status >= 500 || res.status === 404) {
+          recordWebsiteError('api', msg, url);
+        }
+        throw new Error(`HTTP error ${res.status}`);
+      }
+      const data = await res.json();
+      return { data };
+    } catch (err: any) {
+      if (!String(err?.message || '').startsWith('HTTP error')) {
+        recordWebsiteError('api', err?.message || `Network failure on GET ${url}`, url);
+      }
+      throw err;
+    }
   },
   async post(url: string, body: any) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP error ${res.status}`);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const errMsg = err.error || `HTTP error ${res.status}`;
+        if (res.status >= 500 || (res.status !== 401 && res.status !== 400)) {
+          recordWebsiteError('api', `${errMsg} on POST ${url}`, url);
+        }
+        throw new Error(errMsg);
+      }
+      const data = await res.json();
+      return { data };
+    } catch (err: any) {
+      if (!String(err?.message || '').includes('HTTP error') && !String(err?.message || '').includes('Invalid owner PIN')) {
+        recordWebsiteError('api', err?.message || `Network failure on POST ${url}`, url);
+      }
+      throw err;
     }
-    const data = await res.json();
-    return { data };
   },
   async delete(url: string) {
-    const res = await fetch(url, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP error ${res.status}`);
+    try {
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const errMsg = err.error || `HTTP error ${res.status}`;
+        if (res.status >= 500) {
+          recordWebsiteError('api', `${errMsg} on DELETE ${url}`, url);
+        }
+        throw new Error(errMsg);
+      }
+      const data = await res.json();
+      return { data };
+    } catch (err: any) {
+      recordWebsiteError('api', err?.message || `Network failure on DELETE ${url}`, url);
+      throw err;
     }
-    const data = await res.json();
-    return { data };
   },
 };
 
@@ -289,6 +322,13 @@ import {
   formatGuestCustomerLabel,
   getStoredGuestName,
   saveStoredGuestName,
+  type WatchdogAlert,
+  type WatchdogAlertStatus,
+  type WatchdogActivityLog,
+  getStoredWatchdogAlerts,
+  saveStoredWatchdogAlerts,
+  getStoredWatchdogLogs,
+  saveStoredWatchdogLogs,
 } from './defaultData';
 import {
   saveOrderToCloud,
@@ -375,6 +415,12 @@ import {
   subscribeToAiGuidanceQuestions,
   saveAiGuidanceQuestionToCloud,
   deleteAiGuidanceQuestionFromCloud,
+  fetchWatchdogAlertsFromCloud,
+  subscribeToWatchdogAlerts,
+  saveWatchdogAlertToCloud,
+  fetchWatchdogLogsFromCloud,
+  subscribeToWatchdogLogs,
+  saveWatchdogLogToCloud,
 } from './firebase';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
@@ -386,8 +432,22 @@ import { AnimatedCategoryDropdown } from './components/AnimatedCategoryDropdown'
 import { ProductQuestionsSection } from './components/ProductQuestionsSection';
 import { OwnerProductQuestionsManager } from './components/OwnerProductQuestionsManager';
 import { OwnerPlaynixAiAssistant } from './components/OwnerPlaynixAiAssistant';
+import { OwnerAiWatchdogDashboard } from './components/OwnerAiWatchdogDashboard';
 import { OrderVerificationCard } from './components/OrderVerificationCard';
 import { runDeterministicOrderInspection } from './utils/orderVerification';
+import {
+  reconcileWatchdogAudit,
+  computeWatchdogMetrics,
+  sanitizeWatchdogDocId,
+} from './utils/aiWatchdog';
+import {
+  type CapturedWebsiteError,
+  installWebsiteErrorListeners,
+  subscribeWebsiteErrors,
+  getCapturedWebsiteErrors,
+  recordWebsiteError,
+  clearCapturedWebsiteError,
+} from './utils/websiteErrorMonitor';
 import { OwnerProductPriceAdvisor } from './components/OwnerProductPriceAdvisor';
 import {
   OrderSuccessCelebration,
@@ -924,7 +984,7 @@ export default function App() {
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'aiAssistant' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'aiAssistant' | 'watchdog' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
   const [ownerProductQuestions, setOwnerProductQuestions] = useState<ProductQuestion[]>(() =>
     getStoredProductQuestions()
@@ -955,6 +1015,21 @@ export default function App() {
     backendError?: string;
   }>({ checked: false, geminiConfigured: false });
   const aiInitialScanTriggeredRef = useRef<boolean>(false);
+  const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>(() =>
+    getStoredWatchdogAlerts()
+  );
+  const [watchdogLogs, setWatchdogLogs] = useState<WatchdogActivityLog[]>(() =>
+    getStoredWatchdogLogs()
+  );
+  const [watchdogScanning, setWatchdogScanning] = useState<boolean>(false);
+  const [watchdogLastScanAt, setWatchdogLastScanAt] = useState<string | null>(null);
+  const [watchdogAiHealthSummary, setWatchdogAiHealthSummary] = useState<string>('');
+  const [capturedWebsiteErrors, setCapturedWebsiteErrors] = useState<CapturedWebsiteError[]>(() =>
+    getCapturedWebsiteErrors()
+  );
+  const watchdogLastGeminiScanRef = useRef<number>(0);
+  const watchdogAlertsRef = useRef<WatchdogAlert[]>(watchdogAlerts);
+  watchdogAlertsRef.current = watchdogAlerts;
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
   const [analyticsCustomers, setAnalyticsCustomers] = useState<AnalyticsCustomer[]>([]);
   const [allCartItems, setAllCartItems] = useState<CartItem[]>([]);
@@ -2178,6 +2253,287 @@ export default function App() {
     );
   };
 
+  // ----------------- AI WATCHDOG MONITORING HANDLERS -----------------
+  const watchdogMetrics = useMemo(
+    () =>
+      computeWatchdogMetrics({
+        orders: ownerOrders,
+        alerts: watchdogAlerts,
+        websiteErrors: capturedWebsiteErrors,
+      }),
+    [ownerOrders, watchdogAlerts, capturedWebsiteErrors]
+  );
+
+  const runWatchdogScan = async (useGemini = true) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    if (watchdogScanning) return;
+    setWatchdogScanning(true);
+
+    try {
+      const baseInput = {
+        orders: ownerOrders,
+        products,
+        rescueDeals,
+        scheduledOffers,
+        discountCampaigns,
+        productQuestions: ownerProductQuestions,
+        websiteErrors: capturedWebsiteErrors,
+        adultPublished,
+        childPublished,
+        geminiStatus: aiGeminiStatus,
+        existingAlerts: watchdogAlertsRef.current,
+        availableColours,
+      };
+
+      const firstPass = reconcileWatchdogAudit(baseInput, [], { allowAutoResolveRules: true });
+      let combinedAlerts = firstPass.nextAlerts;
+      const allChangedAlerts = [...firstPass.changedAlerts];
+      const allNewLogs = [...firstPass.newLogs];
+      let latestMetrics = firstPass.metrics;
+
+      // Save deterministic findings & auto-resolutions immediately
+      if (allChangedAlerts.length > 0) {
+        setWatchdogAlerts(combinedAlerts);
+        saveStoredWatchdogAlerts(combinedAlerts);
+        await Promise.all(allChangedAlerts.map((a) => saveWatchdogAlertToCloud(a).catch(() => {})));
+      }
+
+      if (useGemini) {
+        watchdogLastGeminiScanRef.current = Date.now();
+        try {
+          const rulePending = combinedAlerts
+            .filter((a) => a.status === 'Pending' && a.detectedBy === 'rules')
+            .map((a) => ({
+              id: a.id,
+              title: a.title,
+              category: a.category,
+              targetId: a.targetId,
+            }));
+
+          const res = await ownerPost('/api/owner/watchdog/analyze', {
+            stats: latestMetrics,
+            products: products.slice(0, 60).map((p) => ({
+              id: p.id,
+              name: p.name,
+              category: p.category,
+              price: p.price,
+              available: p.available,
+              description: p.description,
+            })),
+            orders: ownerOrders.slice(0, 40).map((o) => ({
+              id: o.id,
+              orderNumber: o.orderNumber,
+              name: o.name,
+              mode: o.mode,
+              productId: o.productId,
+              productName: o.productName,
+              quantity: o.quantity,
+              price: o.price,
+              status: o.status,
+              note: o.note,
+              aiVerification: o.aiVerification,
+            })),
+            deals: rescueDeals.filter((d) => !d.deleted).slice(0, 20),
+            offers: scheduledOffers.filter((o) => !o.deleted).slice(0, 20),
+            campaigns: discountCampaigns.filter((c) => !c.deleted).slice(0, 15),
+            ruleFindings: rulePending,
+            websiteErrors: capturedWebsiteErrors.slice(0, 15),
+          });
+
+          if (res.data?.healthSummary) {
+            setWatchdogAiHealthSummary(String(res.data.healthSummary));
+          }
+
+          const aiCandidates = Array.isArray(res.data?.extraAlerts) ? res.data.extraAlerts : [];
+          if (aiCandidates.length > 0) {
+            const secondPass = reconcileWatchdogAudit(
+              { ...baseInput, existingAlerts: combinedAlerts },
+              aiCandidates,
+              { allowAutoResolveRules: false }
+            );
+            combinedAlerts = secondPass.nextAlerts;
+            if (secondPass.changedAlerts.length > 0) {
+              setWatchdogAlerts(combinedAlerts);
+              saveStoredWatchdogAlerts(combinedAlerts);
+              await Promise.all(
+                secondPass.changedAlerts.map((a) => saveWatchdogAlertToCloud(a).catch(() => {}))
+              );
+            }
+            allNewLogs.push(...secondPass.newLogs);
+            latestMetrics = secondPass.metrics;
+          }
+
+          allNewLogs.push({
+            id: sanitizeWatchdogDocId(
+              `log_scan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+            ),
+            category: 'system',
+            action: res.data?.usedGemini ? 'ai_analyzed' : 'scan_completed',
+            actor: res.data?.usedGemini ? 'Gemini AI' : 'AI Watchdog',
+            details: `Scanned ${latestMetrics.ordersChecked} orders, ${products.length} products, offers & website health (${latestMetrics.totalPendingAlerts} pending alerts, ${latestMetrics.criticalAlerts} critical).`,
+            at: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.warn('Gemini Watchdog analysis skipped (using rule checks):', err);
+        }
+      }
+
+      if (allNewLogs.length > 0) {
+        setWatchdogLogs((prev) => {
+          const existingIds = new Set(prev.map((l) => l.id));
+          const merged = [
+            ...allNewLogs.filter((l) => !existingIds.has(l.id)),
+            ...prev,
+          ].slice(0, 250);
+          saveStoredWatchdogLogs(merged);
+          return merged;
+        });
+        await Promise.all(allNewLogs.map((l) => saveWatchdogLogToCloud(l).catch(() => {})));
+      }
+
+      setWatchdogLastScanAt(new Date().toISOString());
+    } finally {
+      setWatchdogScanning(false);
+    }
+  };
+
+  const loadOwnerWatchdogData = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    try {
+      const [cloudAlerts, cloudLogs] = await Promise.all([
+        fetchWatchdogAlertsFromCloud(),
+        fetchWatchdogLogsFromCloud(),
+      ]);
+      setWatchdogAlerts(cloudAlerts);
+      saveStoredWatchdogAlerts(cloudAlerts);
+      setWatchdogLogs(cloudLogs);
+      saveStoredWatchdogLogs(cloudLogs);
+    } catch (err) {
+      console.warn('Could not load Watchdog data from Firestore:', err);
+    }
+  };
+
+  const handleUpdateWatchdogAlertStatus = async (
+    alert: WatchdogAlert,
+    nextStatus: WatchdogAlertStatus,
+    ownerNote?: string
+  ) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const nowIso = new Date().toISOString();
+    const updatedAlert: WatchdogAlert = {
+      ...alert,
+      status: nextStatus,
+      updatedAt: nowIso,
+      ...(nextStatus === 'Resolved' || nextStatus === 'Ignored' ? { resolvedAt: nowIso } : {}),
+      ...(ownerNote ? { ownerNote } : {}),
+    };
+
+    // If resolving/ignoring a browser runtime website error alert, clear its captured session buffer entry
+    if (
+      (nextStatus === 'Resolved' || nextStatus === 'Ignored') &&
+      alert.category === 'website' &&
+      alert.targetId?.startsWith('we_')
+    ) {
+      clearCapturedWebsiteError(alert.targetId);
+    }
+
+    setWatchdogAlerts((prev) => {
+      const next = prev.map((a) => (a.id === updatedAlert.id ? updatedAlert : a));
+      saveStoredWatchdogAlerts(next);
+      return next;
+    });
+    await saveWatchdogAlertToCloud(updatedAlert).catch(() => {});
+
+    const actionVerb =
+      nextStatus === 'Resolved' ? 'resolved' : nextStatus === 'Ignored' ? 'ignored' : 'reopened';
+    const logEntry: WatchdogActivityLog = {
+      id: sanitizeWatchdogDocId(
+        `log_owner_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+      ),
+      alertId: updatedAlert.id,
+      alertTitle: updatedAlert.title,
+      category: updatedAlert.category,
+      action: actionVerb,
+      actor: 'Owner',
+      details: `Owner marked "${updatedAlert.title}" as ${nextStatus}${
+        ownerNote ? ` — Note: ${ownerNote}` : ''
+      }.`,
+      severity: updatedAlert.severity,
+      at: nowIso,
+    };
+    setWatchdogLogs((prev) => {
+      const next = [logEntry, ...prev].slice(0, 250);
+      saveStoredWatchdogLogs(next);
+      return next;
+    });
+    await saveWatchdogLogToCloud(logEntry).catch(() => {});
+  };
+
+  const handleInspectWatchdogTarget = (alert: WatchdogAlert) => {
+    if (alert.targetType === 'order' && alert.targetId) {
+      const targetOrder = ownerOrders.find((o) => o.id === alert.targetId);
+      setOwnerTab('orders');
+      setOrderStatusFilter(
+        targetOrder && isOrderFlaggedForOwner(targetOrder)
+          ? 'Flagged'
+          : targetOrder?.status === 'Cancelled'
+          ? 'Cancelled'
+          : 'Pending'
+      );
+      setHighlightedOwnerOrderId(alert.targetId);
+      setTimeout(() => {
+        const el = document.getElementById(`owner-order-card-${alert.targetId}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 150);
+      return;
+    }
+
+    if (alert.targetType === 'product') {
+      if (alert.targetId && alert.targetId !== 'products') {
+        const prod = products.find((p) => p.id === alert.targetId);
+        if (prod) {
+          startEditProduct(prod);
+          return;
+        }
+      }
+      setOwnerTab('products');
+      window.scrollTo({ top: 320, behavior: 'smooth' });
+      return;
+    }
+
+    if (alert.targetType === 'deal') {
+      setOwnerTab('rescueDeals');
+      window.scrollTo({ top: 320, behavior: 'smooth' });
+      return;
+    }
+
+    if (alert.targetType === 'offer') {
+      setOwnerTab('scheduledOffers');
+      window.scrollTo({ top: 320, behavior: 'smooth' });
+      return;
+    }
+
+    if (alert.targetType === 'campaign') {
+      setOwnerTab('campaigns');
+      window.scrollTo({ top: 320, behavior: 'smooth' });
+      return;
+    }
+
+    if (alert.targetId === 'sections') {
+      setOwnerTab('sections');
+      void loadShopModes();
+    } else if (alert.targetId === 'questions') {
+      setOwnerTab('questions');
+      void loadOwnerProductQuestions();
+    } else if (alert.targetId === 'aiAssistant') {
+      setOwnerTab('aiAssistant');
+      void loadOwnerAiData();
+    } else {
+      setOwnerTab('products');
+    }
+    window.scrollTo({ top: 320, behavior: 'smooth' });
+  };
+
   const dismissOwnerNotification = () => {
     setHasOwnerOrderNotification(false);
     setOwnerNewOrdersCount(0);
@@ -3156,6 +3512,8 @@ export default function App() {
       let unsubAiKnowledge = () => {};
       let unsubAiTraining = () => {};
       let unsubAiGuidance = () => {};
+      let unsubWatchdogAlerts = () => {};
+      let unsubWatchdogLogs = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -3190,6 +3548,14 @@ export default function App() {
           setAiGuidanceQuestions(list);
           saveStoredAiGuidanceQuestions(list);
         });
+        unsubWatchdogAlerts = subscribeToWatchdogAlerts((list) => {
+          setWatchdogAlerts(list);
+          saveStoredWatchdogAlerts(list);
+        });
+        unsubWatchdogLogs = subscribeToWatchdogLogs((list) => {
+          setWatchdogLogs(list);
+          saveStoredWatchdogLogs(list);
+        });
         void checkAiServerStatus();
       } else {
         setAllCartItems([]);
@@ -3206,11 +3572,58 @@ export default function App() {
         unsubAiKnowledge();
         unsubAiTraining();
         unsubAiGuidance();
+        unsubWatchdogAlerts();
+        unsubWatchdogLogs();
       };
     } else {
       setAllCartItems([]);
     }
   }, [page, ownerPin]);
+
+  // Global browser & promise error monitor for AI Watchdog Website Error tracking
+  useEffect(() => {
+    const cleanup = installWebsiteErrorListeners();
+    const unsub = subscribeWebsiteErrors((list) => {
+      setCapturedWebsiteErrors(list);
+    });
+    return () => {
+      cleanup();
+      unsub();
+    };
+  }, []);
+
+  // Automatic real-data rule monitoring whenever owner dashboard data changes
+  useEffect(() => {
+    if (page !== 'owner' || ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    const timer = window.setTimeout(() => {
+      void runWatchdogScan(false);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [
+    page,
+    ownerPin,
+    ownerOrders.length,
+    products.length,
+    rescueDeals.length,
+    scheduledOffers.length,
+    discountCampaigns.length,
+    capturedWebsiteErrors.length,
+    adultPublished,
+    childPublished,
+  ]);
+
+  // Run full Gemini + Rules Watchdog audit when Watchdog dashboard opens (max once per 90s automatically)
+  useEffect(() => {
+    if (
+      page === 'owner' &&
+      ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN &&
+      ownerTab === 'watchdog' &&
+      !watchdogScanning &&
+      Date.now() - watchdogLastGeminiScanRef.current > 90_000
+    ) {
+      void runWatchdogScan(true);
+    }
+  }, [page, ownerPin, ownerTab]);
 
   // Auto-run Initial Website Scan once on first visit to Playnix AI Assistant
   useEffect(() => {
@@ -3617,6 +4030,10 @@ export default function App() {
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
       if (ownerTab === 'questions') await loadOwnerProductQuestions();
       if (ownerTab === 'aiAssistant') await loadOwnerAiData();
+      if (ownerTab === 'watchdog') {
+        await loadOwnerWatchdogData();
+        await runWatchdogScan(true);
+      }
       if (ownerTab === 'sections') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
@@ -6010,6 +6427,52 @@ export default function App() {
                     </span>
                   )}
                 </button>
+
+                {/* 9. AI Watchdog */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'watchdog' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('watchdog');
+                    void loadOwnerWatchdogData();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div
+                    className="owner-panel-item-icon"
+                    style={{
+                      backgroundColor: watchdogMetrics.criticalAlerts > 0 ? '#fee2e2' : '#dcfce7',
+                      color: watchdogMetrics.criticalAlerts > 0 ? '#b91c1c' : '#166534',
+                    }}
+                  >
+                    <ShieldAlert size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>AI Watchdog</strong>
+                    <span>Orders, products, pricing &amp; error alerts</span>
+                  </div>
+                  {ownerTab === 'watchdog' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span
+                      className="owner-panel-status-tag"
+                      style={
+                        watchdogMetrics.criticalAlerts > 0
+                          ? { backgroundColor: '#fee2e2', color: '#991b1b' }
+                          : watchdogMetrics.totalPendingAlerts > 0
+                          ? { backgroundColor: '#fef3c7', color: '#92400e' }
+                          : undefined
+                      }
+                    >
+                      {watchdogMetrics.criticalAlerts > 0
+                        ? `${watchdogMetrics.criticalAlerts} critical`
+                        : watchdogMetrics.totalPendingAlerts > 0
+                        ? `${watchdogMetrics.totalPendingAlerts} alerts`
+                        : 'Healthy'}
+                    </span>
+                  )}
+                </button>
               </div>
 
               <div className="owner-panel-divider" />
@@ -8156,7 +8619,7 @@ export default function App() {
                 <BarChart3 size={15} style={{ display: 'inline', verticalAlign: '-2px', marginRight: '5px' }} />
                 Analytics
               </button>
-              {(ownerTab === 'questions' || ownerTab === 'aiAssistant' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
+              {(ownerTab === 'questions' || ownerTab === 'aiAssistant' || ownerTab === 'watchdog' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -8165,6 +8628,7 @@ export default function App() {
                 >
                   {ownerTab === 'questions' && `❓ Product Questions (${ownerProductQuestions.length})`}
                   {ownerTab === 'aiAssistant' && `🤖 Playnix AI Assistant`}
+                  {ownerTab === 'watchdog' && `🛡️ AI Watchdog (${watchdogMetrics.totalPendingAlerts} alerts)`}
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
@@ -9689,6 +10153,22 @@ export default function App() {
                     el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
                   }, 120);
                 }}
+              />
+            )}
+
+            {/* AI WATCHDOG DASHBOARD TAB */}
+            {ownerTab === 'watchdog' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+              <OwnerAiWatchdogDashboard
+                alerts={watchdogAlerts}
+                logs={watchdogLogs}
+                metrics={watchdogMetrics}
+                scanning={watchdogScanning}
+                lastScanAt={watchdogLastScanAt}
+                aiHealthSummary={watchdogAiHealthSummary}
+                geminiStatus={aiGeminiStatus}
+                onRunScan={runWatchdogScan}
+                onUpdateAlertStatus={handleUpdateWatchdogAlertStatus}
+                onInspectTarget={handleInspectWatchdogTarget}
               />
             )}
 

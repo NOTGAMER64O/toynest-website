@@ -1411,3 +1411,83 @@ export function saveStoredAiGuidanceQuestions(list: AiGuidanceQuestion[]): void 
     localStorage.setItem('playnix_ai_guidance_questions', JSON.stringify(list));
   } catch {}
 }
+
+/* =========================================================================
+   AI WATCHDOG MONITORING TYPES & STORAGE HELPERS
+   ========================================================================= */
+
+export type WatchdogAlertCategory = 'orders' | 'products' | 'pricing' | 'website';
+export type WatchdogAlertSeverity = 'info' | 'warning' | 'critical';
+export type WatchdogAlertStatus = 'Pending' | 'Resolved' | 'Ignored';
+
+export interface WatchdogAlert {
+  id: string;
+  title: string;
+  explanation: string;
+  recommendedAction: string;
+  category: WatchdogAlertCategory;
+  severity: WatchdogAlertSeverity;
+  status: WatchdogAlertStatus;
+  targetType?: 'order' | 'product' | 'deal' | 'offer' | 'campaign' | 'website';
+  targetId?: string;
+  targetLabel?: string;
+  detectedBy: 'rules' | 'gemini_ai';
+  detectedAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+  ownerNote?: string;
+}
+
+export interface WatchdogActivityLog {
+  id: string;
+  alertId?: string;
+  alertTitle?: string;
+  category: WatchdogAlertCategory | 'system';
+  action:
+    | 'detected'
+    | 'scan_completed'
+    | 'ai_analyzed'
+    | 'resolved'
+    | 'ignored'
+    | 'reopened'
+    | 'auto_resolved';
+  actor: 'AI Watchdog' | 'Gemini AI' | 'Owner';
+  details: string;
+  severity?: WatchdogAlertSeverity;
+  at: string;
+}
+
+export function getStoredWatchdogAlerts(): WatchdogAlert[] {
+  try {
+    const raw = localStorage.getItem('playnix_watchdog_alerts');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredWatchdogAlerts(alerts: WatchdogAlert[]): void {
+  try {
+    localStorage.setItem('playnix_watchdog_alerts', JSON.stringify(alerts.slice(0, 200)));
+  } catch {}
+}
+
+export function getStoredWatchdogLogs(): WatchdogActivityLog[] {
+  try {
+    const raw = localStorage.getItem('playnix_watchdog_logs');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveStoredWatchdogLogs(logs: WatchdogActivityLog[]): void {
+  try {
+    localStorage.setItem('playnix_watchdog_logs', JSON.stringify(logs.slice(0, 250)));
+  } catch {}
+}
+
