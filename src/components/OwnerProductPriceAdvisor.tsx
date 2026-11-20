@@ -1,28 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
-  ExternalLink,
-  Globe,
   Image as ImageIcon,
   RefreshCw,
-  SlidersHorizontal,
+  Settings,
   Sparkles,
   X,
 } from 'lucide-react';
 import { Product } from '../defaultData';
-
-export interface PriceAdvisorQuestion {
-  id: string;
-  question: string;
-  reason?: string;
-  placeholder?: string;
-  quickOptions: string[];
-}
-
-export interface PriceAdvisorWebSource {
-  title: string;
-  uri: string;
-}
 
 interface OwnerProductPriceAdvisorProps {
   pin: string;
@@ -32,10 +18,12 @@ interface OwnerProductPriceAdvisorProps {
   catalogProducts: Product[];
   productImageFiles: File[];
   existingImageUrls?: string[];
+  filamentCostPerGram: number | null;
+  currentSellingPrice: string;
+  onOpenFilamentSettings: () => void;
   onApplyPrice: (price: number) => void;
   onSetCategory?: (categoryText: string) => void;
   onSetDescription?: (descriptionText: string) => void;
-  onSetHighlights?: (highlights: string[]) => void;
 }
 
 async function fileToSmallJpegDataUrl(file: File, maxDim = 340): Promise<string | null> {
@@ -71,6 +59,12 @@ async function fileToSmallJpegDataUrl(file: File, maxDim = 340): Promise<string 
   });
 }
 
+function formatInrAmount(value: number): string {
+  return Number.isInteger(value)
+    ? value.toLocaleString('en-IN')
+    : value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> = ({
   pin,
   productName,
@@ -79,41 +73,32 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   catalogProducts,
   productImageFiles,
   existingImageUrls = [],
+  filamentCostPerGram,
+  currentSellingPrice,
+  onOpenFilamentSettings,
   onApplyPrice,
   onSetCategory,
   onSetDescription,
-  onSetHighlights,
 }) => {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [lastSearchedName, setLastSearchedName] = useState('');
 
-  const [stage, setStage] = useState<'idle' | 'questions' | 'price_ready'>('idle');
+  const [ready, setReady] = useState(false);
   const [imageReviewSummary, setImageReviewSummary] = useState('');
   const [reviewedPhotosCount, setReviewedPhotosCount] = useState(0);
-  const [marketFindings, setMarketFindings] = useState('');
-  const [preliminaryRange, setPreliminaryRange] = useState<{ min: number; max: number } | null>(null);
-  const [questions, setQuestions] = useState<PriceAdvisorQuestion[]>([]);
-  const [answersMap, setAnswersMap] = useState<Record<string, string>>({});
 
-  const [recommendedPrice, setRecommendedPrice] = useState<number | null>(null);
-  const [priceRange, setPriceRange] = useState<{ min: number; max: number } | null>(null);
-  const [reasoning, setReasoning] = useState('');
-  const [sizeAndSpecSummary, setSizeAndSpecSummary] = useState('');
   const [suggestedCategory, setSuggestedCategory] = useState('');
   const [secondaryCategories, setSecondaryCategories] = useState<string[]>([]);
   const [categoryNeedsClarification, setCategoryNeedsClarification] = useState(false);
   const [categoryReasoning, setCategoryReasoning] = useState('');
   const [suggestedDesc, setSuggestedDesc] = useState('');
-  const [suggestedHighlights, setSuggestedHighlights] = useState<string[]>([]);
-  const [webSources, setWebSources] = useState<PriceAdvisorWebSource[]>([]);
-  const [webSearchUsed, setWebSearchUsed] = useState(true);
-  const [webSearchNote, setWebSearchNote] = useState('');
+
+  const [filamentGramsInput, setFilamentGramsInput] = useState('');
   const [appliedPriceFeedback, setAppliedPriceFeedback] = useState(false);
   const [appliedCategoryFeedback, setAppliedCategoryFeedback] = useState(false);
   const [appliedDescFeedback, setAppliedDescFeedback] = useState(false);
-  const [appliedHighlightsFeedback, setAppliedHighlightsFeedback] = useState(false);
 
   const trimmedName = productName.trim();
   const totalPhotosAttached = productImageFiles.length + existingImageUrls.length;
@@ -121,9 +106,24 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
     Boolean(lastSearchedName) &&
     trimmedName.toLowerCase() !== lastSearchedName.toLowerCase();
 
+  // Filament weight validation & live calculation (never uses hardcoded fallback rate)
+  const hasConfiguredRate =
+    typeof filamentCostPerGram === 'number' &&
+    isFinite(filamentCostPerGram) &&
+    filamentCostPerGram > 0;
+
+  const trimmedGrams = filamentGramsInput.trim();
+  const parsedGrams = trimmedGrams ? Number(trimmedGrams) : NaN;
+  const isGramsEntered = trimmedGrams.length > 0;
+  const isGramsValid = isGramsEntered && isFinite(parsedGrams) && parsedGrams > 0;
+  const calculatedMaterialCost =
+    hasConfiguredRate && isGramsValid
+      ? Math.round(parsedGrams * filamentCostPerGram * 100) / 100
+      : null;
+
   useEffect(() => {
     setAppliedPriceFeedback(false);
-  }, [recommendedPrice]);
+  }, [calculatedMaterialCost, filamentGramsInput, filamentCostPerGram]);
 
   const buildPayloadBase = async () => {
     const imageDataUrls: string[] = [];
@@ -153,12 +153,11 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
     );
 
     const catalogSample = catalogProducts
-      .filter((p) => p && p.name && p.price > 0)
+      .filter((p) => p && p.name)
       .slice(0, 10)
       .map((p) => ({
         name: p.name,
         category: p.category || 'Other',
-        price: Number(p.price) || 0,
       }));
 
     return {
@@ -172,10 +171,10 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
     };
   };
 
-  const runInitialSearchAndQuestions = async () => {
+  const runGenerateCategoryAndDescription = async () => {
     if (!trimmedName) {
       setOpen(true);
-      setErrorMsg('Enter the Toy name first, then tap Re-check so AI can review the name & photos.');
+      setErrorMsg('Enter the Toy name first, then tap Re-check so AI can generate category & description.');
       return;
     }
 
@@ -185,7 +184,6 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
     setAppliedPriceFeedback(false);
     setAppliedCategoryFeedback(false);
     setAppliedDescFeedback(false);
-    setAppliedHighlightsFeedback(false);
 
     try {
       const base = await buildPayloadBase();
@@ -194,7 +192,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...base,
-          mode: 'ask_or_estimate',
+          mode: 'estimate_final',
           answers: [],
         }),
       });
@@ -204,9 +202,6 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
       }
 
       setLastSearchedName(trimmedName);
-      setWebSources(Array.isArray(data.webSources) ? data.webSources : []);
-      setWebSearchUsed(data.webSearchUsed !== false);
-      setWebSearchNote(data.webSearchNote || '');
       setImageReviewSummary(data.imageReviewSummary || '');
       setReviewedPhotosCount(Number(data.reviewedPhotosCount) || 0);
 
@@ -222,121 +217,27 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
       setSecondaryCategories(nextSecondary);
       setCategoryReasoning(String(data.categoryReasoning || '').trim());
 
+      const nextDesc = String(data.suggestedDescription || '').trim();
+      setSuggestedDesc(nextDesc);
+
       if (nextCat && onSetCategory && !category.trim()) {
         onSetCategory(nextCat);
         setAppliedCategoryFeedback(true);
       }
 
-      if (data.stage === 'questions' && Array.isArray(data.questions) && data.questions.length > 0) {
-        setQuestions(data.questions);
-        setAnswersMap({});
-        setMarketFindings(data.marketFindings || '');
-        setPreliminaryRange(data.preliminaryRangeINR || null);
-        setRecommendedPrice(null);
-        setSuggestedHighlights([]);
-        setStage('questions');
-      } else {
-        setRecommendedPrice(Number(data.recommendedPriceINR) || null);
-        setPriceRange(data.priceRangeINR || null);
-        setReasoning(data.reasoning || '');
-        setSizeAndSpecSummary(data.sizeAndSpecSummary || '');
-        setSuggestedDesc(data.suggestedDescription || data.suggestedDescriptionSnippet || '');
-        setSuggestedHighlights(Array.isArray(data.highlights) ? data.highlights : []);
-        setStage('price_ready');
-      }
+      setReady(true);
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Could not reach AI web search right now. Please try again.');
+      setErrorMsg(err?.message || 'Could not reach Playnix AI right now. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  const runCalculatePriceFromAnswers = async (skipAnswers = false) => {
-    if (!trimmedName) {
-      setErrorMsg('Please enter the Toy name first.');
-      return;
-    }
-
-    const formattedAnswers = skipAnswers
-      ? []
-      : questions
-          .map((q) => ({
-            id: q.id,
-            question: q.question,
-            answer: (answersMap[q.id] || '').trim(),
-          }))
-          .filter((a) => a.answer.length > 0);
-
-    if (!skipAnswers && formattedAnswers.length === 0) {
-      setErrorMsg('Please select or type an answer to at least one question (especially size).');
-      return;
-    }
-
-    setLoading(true);
-    setErrorMsg('');
-    setAppliedPriceFeedback(false);
-    setAppliedCategoryFeedback(false);
-    setAppliedDescFeedback(false);
-    setAppliedHighlightsFeedback(false);
-
-    try {
-      const base = await buildPayloadBase();
-      const res = await fetch('/api/owner/ai/product-price-advisor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...base,
-          mode: 'estimate_final',
-          answers: formattedAnswers,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || `Request failed (${res.status})`);
-      }
-
-      setLastSearchedName(trimmedName);
-      setWebSearchUsed(data.webSearchUsed !== false);
-      setWebSearchNote(data.webSearchNote || '');
-      if (data.imageReviewSummary) setImageReviewSummary(data.imageReviewSummary);
-      if (typeof data.reviewedPhotosCount === 'number') {
-        setReviewedPhotosCount(data.reviewedPhotosCount);
-      }
-      const needsCatClarify = Boolean(data.categoryNeedsClarification);
-      const nextCat = needsCatClarify ? '' : String(data.suggestedCategory || '').trim();
-      const nextSecondary: string[] =
-        !needsCatClarify && Array.isArray(data.secondaryCategories)
-          ? data.secondaryCategories.map((c: any) => String(c || '').trim()).filter(Boolean).slice(0, 2)
-          : [];
-
-      setCategoryNeedsClarification(needsCatClarify && !nextCat);
-      setSuggestedCategory(nextCat);
-      setSecondaryCategories(nextSecondary);
-      if (data.categoryReasoning) {
-        setCategoryReasoning(String(data.categoryReasoning).trim());
-      }
-      if (nextCat && onSetCategory && !category.trim()) {
-        onSetCategory(nextCat);
-        setAppliedCategoryFeedback(true);
-      }
-      setRecommendedPrice(Number(data.recommendedPriceINR) || null);
-      setPriceRange(data.priceRangeINR || null);
-      setReasoning(data.reasoning || '');
-      setSizeAndSpecSummary(data.sizeAndSpecSummary || '');
-      setSuggestedDesc(data.suggestedDescription || data.suggestedDescriptionSnippet || '');
-      setSuggestedHighlights(Array.isArray(data.highlights) ? data.highlights : []);
-      if (Array.isArray(data.webSources) && data.webSources.length > 0) {
-        setWebSources(data.webSources);
-      }
-      setStage('price_ready');
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Could not calculate price right now. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const answeredCount = questions.filter((q) => (answersMap[q.id] || '').trim().length > 0).length;
+  const trimmedCurrentSellingPrice = currentSellingPrice.trim();
+  const hasManualPriceConflict =
+    calculatedMaterialCost !== null &&
+    trimmedCurrentSellingPrice.length > 0 &&
+    Number(trimmedCurrentSellingPrice) !== calculatedMaterialCost;
 
   return (
     <div className="playnix-price-advisor-wrap">
@@ -345,8 +246,8 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
           type="button"
           className="playnix-price-advisor-launch-btn"
           onClick={() => {
-            if (!open || stage === 'idle' || isNameChangedSinceSearch) {
-              void runInitialSearchAndQuestions();
+            if (!open || !ready || isNameChangedSinceSearch) {
+              void runGenerateCategoryAndDescription();
             } else {
               setOpen(false);
             }
@@ -357,22 +258,23 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
             <>
               <RefreshCw size={15} className="refresh-spinning" />
               <span>
-                Reviewing Name{totalPhotosAttached > 0 ? ` & ${totalPhotosAttached} Photo(s)` : ''}…
+                Generating Category &amp; Description
+                {totalPhotosAttached > 0 ? ` (${totalPhotosAttached} Photo(s))` : ''}…
               </span>
             </>
           ) : (
             <>
-              <Globe size={15} />
+              <Sparkles size={15} />
               <span>
-                {open && stage !== 'idle' && !isNameChangedSinceSearch
-                  ? 'Hide AI Price & Description'
+                {open && ready && !isNameChangedSinceSearch
+                  ? 'Hide AI Description, Category & Filament Calculator'
                   : 'Ask AI Price & Description (Name + Photos)'}
               </span>
             </>
           )}
         </button>
         <small className="playnix-price-advisor-hint">
-          AI reviews your toy name{totalPhotosAttached > 0 ? ` and ${totalPhotosAttached} attached photo(s)` : ''}, checks prices, asks size details, and suggests both ₹ price &amp; description.
+          AI directly generates Category &amp; Description from your product name{totalPhotosAttached > 0 ? ` and ${totalPhotosAttached} photo(s)` : ''}, then only asks filament grams to calculate material cost.
         </small>
       </div>
 
@@ -381,39 +283,33 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
           <div className="playnix-price-advisor-head">
             <div className="playnix-price-advisor-title">
               <Sparkles size={15} />
-              <strong>AI Product &amp; Price Advisor</strong>
+              <strong>Playnix AI Category, Description &amp; Filament Calculator</strong>
               <span className="playnix-price-web-tag">
-                {webSearchUsed ? 'Live Internet' : 'AI Market Estimate'}
+                {hasConfiguredRate ? `₹${formatInrAmount(filamentCostPerGram!)}/g` : 'Rate Needed'}
               </span>
             </div>
             <button
               type="button"
               className="playnix-price-close-btn"
               onClick={() => setOpen(false)}
-              aria-label="Close AI price advisor"
+              aria-label="Close AI listing assistant"
             >
               <X size={15} />
             </button>
           </div>
 
-          {isNameChangedSinceSearch && stage !== 'idle' && (
+          {isNameChangedSinceSearch && ready && (
             <div className="playnix-price-stale-banner">
               <span>
                 Toy name changed to <strong>{trimmedName || '(empty)'}</strong>.
               </span>
               <button
                 type="button"
-                onClick={() => void runInitialSearchAndQuestions()}
+                onClick={() => void runGenerateCategoryAndDescription()}
                 disabled={loading || !trimmedName}
               >
                 Re-check Name &amp; Photos
               </button>
-            </div>
-          )}
-
-          {webSearchNote && stage !== 'idle' && !loading && (
-            <div className="playnix-price-stale-banner" style={{ background: '#f5f7ef', borderColor: '#d5dec3', color: '#45543c' }}>
-              <span>{webSearchNote}</span>
             </div>
           )}
 
@@ -424,230 +320,93 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
               <RefreshCw size={18} className="refresh-spinning" />
               <div>
                 <strong>
-                  {stage === 'questions'
-                    ? `Calculating ₹ price & description for "${trimmedName}"...`
-                    : `Reviewing "${trimmedName}"${totalPhotosAttached > 0 ? ` + ${totalPhotosAttached} photo(s)` : ''}...`}
+                  Generating category &amp; description for &quot;{trimmedName}&quot;
+                  {totalPhotosAttached > 0 ? ` (${totalPhotosAttached} photo(s))` : ''}...
                 </strong>
-                <p>
-                  {stage === 'questions'
-                    ? 'Matching online prices and drafting customer description from your answers.'
-                    : 'Inspecting toy details and preparing quick size/material questions.'}
-                </p>
+                <p>No extra questionnaire — generating category &amp; description directly.</p>
               </div>
             </div>
           )}
 
-          {!loading && imageReviewSummary && stage !== 'idle' && (
-            <div className="playnix-price-spec-pill" style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
-              <ImageIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
-              <span>
-                <strong>
-                  Reviewed Name{reviewedPhotosCount > 0 ? ` + ${reviewedPhotosCount} Photo(s)` : ''}:
-                </strong>{' '}
-                {imageReviewSummary}
-              </span>
-            </div>
-          )}
-
-          {!loading && stage !== 'idle' && onSetCategory && (suggestedCategory || categoryNeedsClarification) && (
-            <div className="playnix-price-desc-helper" style={{ marginBottom: 8 }}>
-              {suggestedCategory ? (
-                <>
-                  <div style={{ flex: '1 1 220px' }}>
-                    <span>
-                      <strong>Primary category:</strong> {suggestedCategory}
-                    </span>
-                    {secondaryCategories.length > 0 && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
-                        <small style={{ color: '#5c6b52', fontWeight: 700 }}>Secondary:</small>
-                        {secondaryCategories.map((secCat) => {
-                          const isSelected = category.trim().toLowerCase() === secCat.toLowerCase();
-                          return (
-                            <button
-                              key={secCat}
-                              type="button"
-                              className={`playnix-price-chip ${isSelected ? 'is-selected' : ''}`}
-                              style={{ padding: '2px 9px', fontSize: '0.72rem' }}
-                              onClick={() => {
-                                onSetCategory(secCat);
-                                setAppliedCategoryFeedback(true);
-                              }}
-                              title={`Use "${secCat}" as Category`}
-                            >
-                              {isSelected ? `✓ ${secCat}` : secCat}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {categoryReasoning && (
-                      <small style={{ display: 'block', color: '#5c6b52', marginTop: 4 }}>
-                        {categoryReasoning}
-                      </small>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() => {
-                      onSetCategory(suggestedCategory);
-                      setAppliedCategoryFeedback(true);
-                    }}
-                  >
-                    {appliedCategoryFeedback || category.trim().toLowerCase() === suggestedCategory.toLowerCase()
-                      ? `✓ Category: ${suggestedCategory}`
-                      : `Use Category "${suggestedCategory}"`}
-                  </button>
-                </>
-              ) : (
-                <span>
-                  <strong>Category clarification needed:</strong>{' '}
-                  {categoryReasoning ||
-                    'Product details are too general to classify reliably — please answer the usage question below instead of guessing.'}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* STAGE 1: CLARIFYING QUESTIONS (SIZE, MATERIAL, ETC.) */}
-          {!loading && stage === 'questions' && questions.length > 0 && (
-            <div className="playnix-price-questions-stage">
-              {(marketFindings || preliminaryRange) && (
-                <div className="playnix-price-market-summary">
-                  {preliminaryRange && (
-                    <div className="playnix-price-prelim-badge">
-                      Initial Web Range: ₹{preliminaryRange.min.toLocaleString('en-IN')} – ₹
-                      {preliminaryRange.max.toLocaleString('en-IN')}
-                    </div>
-                  )}
-                  {marketFindings && <p>{marketFindings}</p>}
-                </div>
-              )}
-
-              <p className="playnix-price-step-label">
-                Answer these quick details so AI can suggest the exact price &amp; description ({answeredCount}/
-                {questions.length} filled):
-              </p>
-
-              <div className="playnix-price-question-list">
-                {questions.map((q, idx) => {
-                  const currentVal = answersMap[q.id] || '';
-                  return (
-                    <div key={q.id} className="playnix-price-question-item">
-                      <label className="playnix-price-q-title">
-                        <span>
-                          {idx + 1}. {q.question}
-                        </span>
-                        {q.reason && <small>{q.reason}</small>}
-                      </label>
-
-                      {q.quickOptions.length > 0 && (
-                        <div className="playnix-price-quick-chips">
-                          {q.quickOptions.map((opt) => {
-                            const selected = currentVal.toLowerCase() === opt.toLowerCase();
-                            return (
-                              <button
-                                key={opt}
-                                type="button"
-                                className={`playnix-price-chip ${selected ? 'is-selected' : ''}`}
-                                onClick={() =>
-                                  setAnswersMap((prev) => ({
-                                    ...prev,
-                                    [q.id]: selected ? '' : opt,
-                                  }))
-                                }
-                              >
-                                {selected && <Check size={12} />}
-                                <span>{opt}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      <input
-                        type="text"
-                        className="playnix-price-answer-input"
-                        value={currentVal}
-                        onChange={(e) =>
-                          setAnswersMap((prev) => ({
-                            ...prev,
-                            [q.id]: e.target.value,
-                          }))
-                        }
-                        placeholder={q.placeholder || 'Or type custom size / detail...'}
-                        maxLength={200}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="playnix-price-actions">
-                <button
-                  type="button"
-                  className="primary-btn"
-                  disabled={answeredCount === 0 || loading}
-                  onClick={() => void runCalculatePriceFromAnswers(false)}
-                >
-                  <Sparkles size={15} /> Get Price &amp; Description
-                </button>
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  disabled={loading}
-                  onClick={() => void runCalculatePriceFromAnswers(true)}
-                >
-                  Skip &amp; Estimate
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* STAGE 2: RECOMMENDED PRICE & DESCRIPTION RESULT */}
-          {!loading && stage === 'price_ready' && recommendedPrice !== null && (
+          {!loading && ready && (
             <div className="playnix-price-result-stage">
-              <div className="playnix-price-result-hero">
-                <div>
-                  <span className="playnix-price-result-eyebrow">RECOMMENDED SELLING PRICE</span>
-                  <div className="playnix-price-result-amount">
-                    ₹{recommendedPrice.toLocaleString('en-IN')}
-                  </div>
-                  {priceRange && (
-                    <span className="playnix-price-result-range">
-                      Typical online market range: ₹{priceRange.min.toLocaleString('en-IN')} – ₹
-                      {priceRange.max.toLocaleString('en-IN')}
-                    </span>
-                  )}
+              {imageReviewSummary && (
+                <div className="playnix-price-spec-pill" style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
+                  <ImageIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <span>
+                    <strong>
+                      Reviewed Name{reviewedPhotosCount > 0 ? ` + ${reviewedPhotosCount} Photo(s)` : ''}:
+                    </strong>{' '}
+                    {imageReviewSummary}
+                  </span>
                 </div>
-                <button
-                  type="button"
-                  className={`playnix-price-apply-btn ${appliedPriceFeedback ? 'is-applied' : ''}`}
-                  onClick={() => {
-                    onApplyPrice(recommendedPrice);
-                    setAppliedPriceFeedback(true);
-                  }}
-                >
-                  {appliedPriceFeedback ? (
+              )}
+
+              {/* 1. PRODUCT CATEGORY */}
+              {onSetCategory && (suggestedCategory || categoryNeedsClarification) && (
+                <div className="playnix-price-desc-helper">
+                  {suggestedCategory ? (
                     <>
-                      <Check size={15} /> Applied ₹{recommendedPrice}
+                      <div style={{ flex: '1 1 220px' }}>
+                        <span>
+                          <strong>1. Category:</strong> {suggestedCategory}
+                        </span>
+                        {secondaryCategories.length > 0 && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
+                            <small style={{ color: '#5c6b52', fontWeight: 700 }}>Secondary:</small>
+                            {secondaryCategories.map((secCat) => {
+                              const isSelected = category.trim().toLowerCase() === secCat.toLowerCase();
+                              return (
+                                <button
+                                  key={secCat}
+                                  type="button"
+                                  className={`playnix-price-chip ${isSelected ? 'is-selected' : ''}`}
+                                  style={{ padding: '2px 9px', fontSize: '0.72rem' }}
+                                  onClick={() => {
+                                    onSetCategory(secCat);
+                                    setAppliedCategoryFeedback(true);
+                                  }}
+                                  title={`Use "${secCat}" as Category`}
+                                >
+                                  {isSelected ? `✓ ${secCat}` : secCat}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {categoryReasoning && (
+                          <small style={{ display: 'block', color: '#5c6b52', marginTop: 4 }}>
+                            {categoryReasoning}
+                          </small>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={() => {
+                          onSetCategory(suggestedCategory);
+                          setAppliedCategoryFeedback(true);
+                        }}
+                      >
+                        {appliedCategoryFeedback || category.trim().toLowerCase() === suggestedCategory.toLowerCase()
+                          ? `✓ Category: ${suggestedCategory}`
+                          : `Use Category "${suggestedCategory}"`}
+                      </button>
                     </>
                   ) : (
-                    <>Use ₹{recommendedPrice} as Price</>
+                    <span>
+                      <strong>Category note:</strong>{' '}
+                      {categoryReasoning || 'Please enter a category manually in the Category field below.'}
+                    </span>
                   )}
-                </button>
-              </div>
-
-              {sizeAndSpecSummary && (
-                <div className="playnix-price-spec-pill">{sizeAndSpecSummary}</div>
+                </div>
               )}
 
-              {reasoning && <p className="playnix-price-reasoning">{reasoning}</p>}
-
+              {/* 2. PRODUCT DESCRIPTION */}
               {suggestedDesc && onSetDescription && (
                 <div className="playnix-price-desc-helper">
-                  <span>
-                    <strong>Suggested description:</strong> {suggestedDesc}
+                  <span style={{ flex: '1 1 240px' }}>
+                    <strong>2. Description:</strong> {suggestedDesc}
                   </span>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button
@@ -660,97 +419,193 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
                     >
                       {appliedDescFeedback ? '✓ Description Filled' : 'Use This Description'}
                     </button>
-                    <button
-                      type="button"
-                      className="primary-btn"
-                      style={{ padding: '6px 11px', fontSize: '0.74rem' }}
-                      onClick={() => {
-                        onApplyPrice(recommendedPrice);
-                        onSetDescription(suggestedDesc);
-                        setAppliedPriceFeedback(true);
-                        setAppliedDescFeedback(true);
-                        if (suggestedCategory && onSetCategory) {
+                    {suggestedCategory && onSetCategory && (
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        style={{ padding: '6px 11px', fontSize: '0.74rem' }}
+                        onClick={() => {
                           onSetCategory(suggestedCategory);
+                          onSetDescription(suggestedDesc);
                           setAppliedCategoryFeedback(true);
-                        }
-                        if (suggestedHighlights.length > 0 && onSetHighlights) {
-                          onSetHighlights(suggestedHighlights);
-                          setAppliedHighlightsFeedback(true);
-                        }
+                          setAppliedDescFeedback(true);
+                        }}
+                      >
+                        Apply Category &amp; Description
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 3. ONLY QUESTION: FILAMENT WEIGHT IN GRAMS & CALCULATION */}
+              <div
+                style={{
+                  border: '1.5px solid #bfd1a1',
+                  borderRadius: '11px',
+                  padding: '12px',
+                  background: '#f3f7eb',
+                  display: 'grid',
+                  gap: '10px',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <span className="playnix-price-result-eyebrow">
+                    3. FILAMENT COST CALCULATOR
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: '0.72rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                    }}
+                    onClick={onOpenFilamentSettings}
+                  >
+                    <Settings size={12} />
+                    {hasConfiguredRate
+                      ? `Rate: ₹${formatInrAmount(filamentCostPerGram!)}/g · Edit`
+                      : 'Configure Filament Cost'}
+                  </button>
+                </div>
+
+                {!hasConfiguredRate ? (
+                  <div
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: '9px',
+                      background: '#fffbeb',
+                      border: '1px solid #fde68a',
+                      color: '#92400e',
+                      fontSize: '0.8rem',
+                      display: 'grid',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '7px' }}>
+                      <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 2 }} />
+                      <div>
+                        <strong>Filament cost per gram is not set yet.</strong>
+                        <p style={{ margin: '3px 0 0', fontSize: '0.76rem', color: '#78350f' }}>
+                          Set your 1g filament cost in the three-dot menu under{' '}
+                          <strong>Filament Cost Settings</strong> to calculate material cost automatically.
+                        </p>
+                      </div>
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        style={{ padding: '7px 12px', fontSize: '0.76rem' }}
+                        onClick={onOpenFilamentSettings}
+                      >
+                        <Settings size={13} /> Open Filament Cost Settings
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <label
+                      style={{
+                        display: 'grid',
+                        gap: '6px',
+                        margin: 0,
+                        fontSize: '0.82rem',
+                        fontWeight: 700,
+                        color: '#22331b',
                       }}
                     >
-                      {suggestedHighlights.length > 0 && onSetHighlights
-                        ? 'Apply All (Price, Category, Description & Highlights)'
-                        : 'Apply Price, Category & Description'}
-                    </button>
-                  </div>
-                </div>
-              )}
+                      <span>How many grams of filament are required to print this product?</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <input
+                          type="number"
+                          min="0.1"
+                          step="any"
+                          className="playnix-price-answer-input"
+                          style={{ maxWidth: '180px', margin: 0 }}
+                          value={filamentGramsInput}
+                          onChange={(e) => setFilamentGramsInput(e.target.value)}
+                          placeholder="e.g. 25"
+                        />
+                        <span style={{ fontSize: '0.78rem', color: '#4c5b43', fontWeight: 600 }}>
+                          grams × ₹{formatInrAmount(filamentCostPerGram!)} / gram
+                        </span>
+                      </div>
+                    </label>
 
-              {suggestedHighlights.length > 0 && onSetHighlights && (
-                <div className="playnix-price-desc-helper">
-                  <div style={{ width: '100%' }}>
-                    <strong>Suggested Key Highlights (from Photos &amp; Name):</strong>
-                    <ul className="playnix-price-highlights-preview">
-                      {suggestedHighlights.map((hl, idx) => (
-                        <li key={idx}>{hl}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() => {
-                      onSetHighlights(suggestedHighlights);
-                      setAppliedHighlightsFeedback(true);
-                    }}
-                  >
-                    {appliedHighlightsFeedback ? '✓ Highlights Filled' : 'Use These Highlights'}
-                  </button>
-                </div>
-              )}
+                    {!isGramsEntered ? (
+                      <p className="playnix-price-reasoning" style={{ fontSize: '0.76rem', color: '#4d5d44' }}>
+                        Enter the filament weight in grams above to calculate the suggested material cost.
+                      </p>
+                    ) : !isGramsValid ? (
+                      <p className="error-msg" style={{ margin: 0, fontSize: '0.76rem' }}>
+                        Please enter a valid filament weight greater than 0 grams.
+                      </p>
+                    ) : (
+                      calculatedMaterialCost !== null && (
+                        <div className="playnix-price-result-hero" style={{ background: '#ffffff' }}>
+                          <div>
+                            <span className="playnix-price-result-eyebrow">
+                              CALCULATED MATERIAL COST
+                            </span>
+                            <div className="playnix-price-result-amount">
+                              ₹{formatInrAmount(calculatedMaterialCost)}
+                            </div>
+                            <span className="playnix-price-result-range">
+                              {parsedGrams}g × ₹{formatInrAmount(filamentCostPerGram!)}/g = ₹
+                              {formatInrAmount(calculatedMaterialCost)}
+                            </span>
+                            {hasManualPriceConflict && (
+                              <span
+                                className="playnix-price-result-range"
+                                style={{ color: '#4a5a42', marginTop: 4 }}
+                              >
+                                Current selling price in form: ₹{trimmedCurrentSellingPrice}. Click Apply only if you want to replace it, or edit the Price field directly.
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className={`playnix-price-apply-btn ${appliedPriceFeedback ? 'is-applied' : ''}`}
+                            onClick={() => {
+                              onApplyPrice(calculatedMaterialCost);
+                              setAppliedPriceFeedback(true);
+                            }}
+                          >
+                            {appliedPriceFeedback ? (
+                              <>
+                                <Check size={15} /> Applied ₹{formatInrAmount(calculatedMaterialCost)}
+                              </>
+                            ) : (
+                              <>Use ₹{formatInrAmount(calculatedMaterialCost)} as Price</>
+                            )}
+                          </button>
+                        </div>
+                      )
+                    )}
+                  </>
+                )}
+              </div>
 
               <div className="playnix-price-actions">
-                {questions.length > 0 && (
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() => {
-                      setErrorMsg('');
-                      setStage('questions');
-                    }}
-                  >
-                    <SlidersHorizontal size={14} /> Change Size / Answers
-                  </button>
-                )}
                 <button
                   type="button"
                   className="secondary-btn"
-                  onClick={() => void runInitialSearchAndQuestions()}
+                  onClick={() => void runGenerateCategoryAndDescription()}
                 >
                   <RefreshCw size={14} /> Re-check Name &amp; Photos
                 </button>
-              </div>
-            </div>
-          )}
-
-          {/* GOOGLE SEARCH GROUNDING SOURCES */}
-          {!loading && webSources.length > 0 && (
-            <div className="playnix-price-sources">
-              <span>Internet sources checked:</span>
-              <div className="playnix-price-sources-list">
-                {webSources.map((src, i) => (
-                  <a
-                    key={`${src.uri}-${i}`}
-                    href={src.uri}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="playnix-price-source-link"
-                  >
-                    <span>{src.title}</span>
-                    <ExternalLink size={11} />
-                  </a>
-                ))}
               </div>
             </div>
           )}

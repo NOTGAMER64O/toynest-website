@@ -39,6 +39,8 @@ import {
   HelpCircle,
   Bot,
   ShieldAlert,
+  Settings,
+  Scale,
 } from 'lucide-react';
 
 const da = (val: number | string) => '₹' + Number(val).toLocaleString('en-IN');
@@ -984,7 +986,7 @@ export default function App() {
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const galleryDidSwipeRef = useRef<boolean>(false);
   const [ownerTab, setOwnerTab] = useState<
-    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'aiAssistant' | 'watchdog' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
+    'products' | 'drafts' | 'orders' | 'suggestions' | 'questions' | 'aiAssistant' | 'watchdog' | 'filamentSettings' | 'analytics' | 'sections' | 'payment' | 'colours' | 'popularSearches' | 'rescueDeals' | 'scheduledOffers' | 'campaigns'
   >('products');
   const [ownerProductQuestions, setOwnerProductQuestions] = useState<ProductQuestion[]>(() =>
     getStoredProductQuestions()
@@ -1281,10 +1283,32 @@ export default function App() {
     price: '',
     description: '',
     category: '',
-    highlights: [] as string[],
   });
-  const [highlightsAiLoading, setHighlightsAiLoading] = useState<boolean>(false);
-  const [highlightsAiNote, setHighlightsAiNote] = useState<string>('');
+  const [filamentCostPerGram, setFilamentCostPerGram] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('playnix_filament_cost_per_gram');
+      if (!saved) return null;
+      const parsed = Number(saved);
+      return isFinite(parsed) && parsed > 0 ? Math.round(parsed * 100) / 100 : null;
+    } catch {
+      return null;
+    }
+  });
+  const [filamentCostInput, setFilamentCostInput] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('playnix_filament_cost_per_gram');
+      if (!saved) return '';
+      const parsed = Number(saved);
+      return isFinite(parsed) && parsed > 0 ? String(Math.round(parsed * 100) / 100) : '';
+    } catch {
+      return '';
+    }
+  });
+  const [filamentCostSaving, setFilamentCostSaving] = useState<boolean>(false);
+  const [filamentCostFeedback, setFilamentCostFeedback] = useState<{
+    message: string;
+    isError?: boolean;
+  } | null>(null);
   const [productImages, setProductImages] = useState<File[]>([]);
   const [editExistingImages, setEditExistingImages] = useState<string[]>([]);
   const [productSubmitTarget, setProductSubmitTarget] = useState<'published' | 'draft'>('published');
@@ -2721,6 +2745,14 @@ export default function App() {
           setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
           saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
         }
+        if (typeof settings.filamentCostPerGram === 'number' && isFinite(settings.filamentCostPerGram) && settings.filamentCostPerGram > 0) {
+          const cleanRate = Math.round(settings.filamentCostPerGram * 100) / 100;
+          setFilamentCostPerGram(cleanRate);
+          setFilamentCostInput(String(cleanRate));
+          try {
+            localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
+          } catch {}
+        }
         return;
       }
     } catch {}
@@ -2743,6 +2775,44 @@ export default function App() {
     } catch {}
     setAdultPublished(true);
     setChildPublished(true);
+  };
+
+  const handleSaveFilamentCost = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setFilamentCostFeedback(null);
+    const trimmed = filamentCostInput.trim();
+    const numericCost = Number(trimmed);
+    if (!trimmed || !isFinite(numericCost) || numericCost <= 0) {
+      setFilamentCostFeedback({
+        message: 'Please enter a valid cost per gram greater than ₹0.',
+        isError: true,
+      });
+      return;
+    }
+
+    const cleanRate = Math.round(numericCost * 100) / 100;
+    setFilamentCostSaving(true);
+    try {
+      await saveSettingsToCloud({
+        filamentCostPerGram: cleanRate,
+        filamentCostUpdatedAt: new Date().toISOString(),
+      });
+      setFilamentCostPerGram(cleanRate);
+      setFilamentCostInput(String(cleanRate));
+      try {
+        localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
+      } catch {}
+      setFilamentCostFeedback({
+        message: `Saved permanently! Future AI calculations will use ₹${cleanRate} per gram.`,
+      });
+    } catch (err: any) {
+      setFilamentCostFeedback({
+        message: err?.message || 'Could not save filament cost right now. Please try again.',
+        isError: true,
+      });
+    } finally {
+      setFilamentCostSaving(false);
+    }
   };
 
   const saveShopModes = async () => {
@@ -3502,6 +3572,13 @@ export default function App() {
           setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
           saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
         }
+        if (typeof settings.filamentCostPerGram === 'number' && isFinite(settings.filamentCostPerGram) && settings.filamentCostPerGram > 0) {
+          const cleanRate = Math.round(settings.filamentCostPerGram * 100) / 100;
+          setFilamentCostPerGram(cleanRate);
+          try {
+            localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
+          } catch {}
+        }
       });
 
       let unsubAnalyticsEvents = () => {};
@@ -4035,6 +4112,7 @@ export default function App() {
         await runWatchdogScan(true);
       }
       if (ownerTab === 'sections') await loadShopModes();
+      if (ownerTab === 'filamentSettings') await loadShopModes();
       if (ownerTab === 'payment') await loadPaymentQr();
       if (ownerTab === 'colours') await loadColours();
       if (ownerTab === 'popularSearches') await loadPopularSearches();
@@ -4132,18 +4210,15 @@ export default function App() {
         // Guarantee payload is safely under Firestore limit
         finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
-        const cleanHighlights = (productForm.highlights || [])
-          .map((h) => h.trim().slice(0, 160))
-          .filter(Boolean)
-          .slice(0, 6);
-
         const updatedItem: Product = {
           id: editingProductId,
           name: cleanName,
           price: cleanPrice,
           description: productForm.description.trim(),
           category: productForm.category.trim() || 'Other',
-          highlights: cleanHighlights,
+          ...(Array.isArray(existing?.highlights) && existing.highlights.length > 0
+            ? { highlights: existing.highlights }
+            : {}),
           imageUrl: finalImageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
           imageUrls: finalImageUrls,
           available: targetAvailable,
@@ -4164,8 +4239,7 @@ export default function App() {
         });
 
         setEditingProductId(null);
-        setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
-        setHighlightsAiNote('');
+        setProductForm({ name: '', price: '', description: '', category: '' });
         setProductImages([]);
         setEditExistingImages([]);
         setProductSubmitTarget('published');
@@ -4192,11 +4266,6 @@ export default function App() {
       }
       finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
-      const cleanNewHighlights = (productForm.highlights || [])
-        .map((h) => h.trim().slice(0, 160))
-        .filter(Boolean)
-        .slice(0, 6);
-
       const productId = `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const newProduct: Product = {
         id: productId,
@@ -4204,7 +4273,6 @@ export default function App() {
         price: cleanPrice,
         description: productForm.description.trim(),
         category: productForm.category.trim() || 'Other',
-        highlights: cleanNewHighlights,
         imageUrl: finalImageUrls[0],
         imageUrls: finalImageUrls,
         available: targetAvailable,
@@ -4223,8 +4291,7 @@ export default function App() {
         return next;
       });
 
-      setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
-      setHighlightsAiNote('');
+      setProductForm({ name: '', price: '', description: '', category: '' });
       setProductImages([]);
       setEditExistingImages([]);
       setProductSubmitTarget('published');
@@ -4285,68 +4352,6 @@ export default function App() {
     }
   };
 
-  const handleGenerateHighlightsFromPhotos = async () => {
-    const hasName = productForm.name.trim().length > 0;
-    const hasPhotos = productImages.length > 0 || editExistingImages.length > 0;
-    if (!hasName && !hasPhotos) {
-      setHighlightsAiNote('Add at least 1 toy photo or enter the Toy name first.');
-      return;
-    }
-
-    setHighlightsAiLoading(true);
-    setHighlightsAiNote('');
-    try {
-      const imageDataUrls: string[] = [];
-      for (const u of editExistingImages.slice(0, 5)) {
-        if (u && u.startsWith('data:image/') && u.length < 400_000) {
-          imageDataUrls.push(u);
-        }
-      }
-      const slots = Math.max(0, 5 - imageDataUrls.length);
-      if (slots > 0 && productImages.length > 0) {
-        const encoded = await Promise.all(
-          productImages.slice(0, slots).map((f) => fileToOptimizedDataUrl(f, 340, 0.62))
-        );
-        for (const dataUrl of encoded) {
-          if (dataUrl) imageDataUrls.push(dataUrl);
-        }
-      }
-
-      const res = await fetch('/api/owner/ai/product-highlights', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pin: ownerPin.trim() || DEFAULT_OWNER_PIN,
-          productName: productForm.name.trim(),
-          category: productForm.category.trim(),
-          description: productForm.description.trim(),
-          imageDataUrls,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data?.success || !Array.isArray(data?.highlights)) {
-        throw new Error(data?.error || 'Could not generate highlights right now.');
-      }
-      setProductForm((prev) => ({
-        ...prev,
-        highlights: data.highlights.slice(0, 6),
-      }));
-      const photoText =
-        Number(data.reviewedPhotosCount) > 0
-          ? `from ${data.reviewedPhotosCount} photo(s)`
-          : 'from product details';
-      setHighlightsAiNote(
-        data.imageObservation
-          ? `Generated ${data.highlights.length} bullet points ${photoText}: ${data.imageObservation}`
-          : `Generated ${data.highlights.length} bullet points ${photoText}. Review or edit below!`
-      );
-    } catch (err: any) {
-      setHighlightsAiNote(err?.message || 'Could not generate highlight bullets right now.');
-    } finally {
-      setHighlightsAiLoading(false);
-    }
-  };
-
   const startEditProduct = (p: Product) => {
     setEditingProductId(p.id);
     setProductForm({
@@ -4354,9 +4359,7 @@ export default function App() {
       price: String(p.price),
       description: p.description || '',
       category: p.category || 'Other',
-      highlights: Array.isArray(p.highlights) ? [...p.highlights] : [],
     });
-    setHighlightsAiNote('');
     const currentImgs =
       p.imageUrls && p.imageUrls.length > 0
         ? [...p.imageUrls]
@@ -4374,8 +4377,7 @@ export default function App() {
 
   const cancelEditProduct = () => {
     setEditingProductId(null);
-    setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
-    setHighlightsAiNote('');
+    setProductForm({ name: '', price: '', description: '', category: '' });
     setProductImages([]);
     setEditExistingImages([]);
     setProductSubmitTarget('published');
@@ -6470,6 +6472,39 @@ export default function App() {
                         : watchdogMetrics.totalPendingAlerts > 0
                         ? `${watchdogMetrics.totalPendingAlerts} alerts`
                         : 'Healthy'}
+                    </span>
+                  )}
+                </button>
+
+                {/* 10. Filament Cost Settings */}
+                <button
+                  type="button"
+                  className={`owner-panel-item ${ownerTab === 'filamentSettings' ? 'active' : ''}`}
+                  onClick={() => {
+                    setOwnerTab('filamentSettings');
+                    setFilamentCostFeedback(null);
+                    if (filamentCostPerGram !== null) {
+                      setFilamentCostInput(String(filamentCostPerGram));
+                    }
+                    void loadShopModes();
+                    setIsOwnerMenuOpen(false);
+                    window.scrollTo({ top: 320, behavior: 'smooth' });
+                  }}
+                >
+                  <div className="owner-panel-item-icon" style={{ backgroundColor: '#fef3c7', color: '#92400e' }}>
+                    <Scale size={20} />
+                  </div>
+                  <div className="owner-panel-item-info">
+                    <strong>Filament Cost Settings</strong>
+                    <span>1g filament cost for AI price calculator</span>
+                  </div>
+                  {ownerTab === 'filamentSettings' ? (
+                    <span className="owner-panel-active-tag">Active</span>
+                  ) : (
+                    <span className="owner-panel-status-tag">
+                      {filamentCostPerGram && filamentCostPerGram > 0
+                        ? `₹${filamentCostPerGram}/g`
+                        : 'Not set'}
                     </span>
                   )}
                 </button>
@@ -8619,7 +8654,7 @@ export default function App() {
                 <BarChart3 size={15} style={{ display: 'inline', verticalAlign: '-2px', marginRight: '5px' }} />
                 Analytics
               </button>
-              {(ownerTab === 'questions' || ownerTab === 'aiAssistant' || ownerTab === 'watchdog' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
+              {(ownerTab === 'questions' || ownerTab === 'aiAssistant' || ownerTab === 'watchdog' || ownerTab === 'filamentSettings' || ownerTab === 'sections' || ownerTab === 'payment' || ownerTab === 'colours' || ownerTab === 'popularSearches' || ownerTab === 'scheduledOffers' || ownerTab === 'rescueDeals' || ownerTab === 'campaigns') && (
                 <button
                   className="active panel-active-tab-indicator"
                   type="button"
@@ -8629,6 +8664,7 @@ export default function App() {
                   {ownerTab === 'questions' && `❓ Product Questions (${ownerProductQuestions.length})`}
                   {ownerTab === 'aiAssistant' && `🤖 Playnix AI Assistant`}
                   {ownerTab === 'watchdog' && `🛡️ AI Watchdog (${watchdogMetrics.totalPendingAlerts} alerts)`}
+                  {ownerTab === 'filamentSettings' && `⚖️ Filament Cost Settings`}
                   {ownerTab === 'sections' && '⚙️ Shop Sections'}
                   {ownerTab === 'payment' && '💳 Payment QR'}
                   {ownerTab === 'colours' && '🎨 Manage Colours'}
@@ -8744,7 +8780,7 @@ export default function App() {
                     <input
                       type="number"
                       min="1"
-                      step="1"
+                      step="any"
                       value={productForm.price}
                       onChange={(e) => setProductForm({ ...productForm, price: e.target.value })}
                       placeholder="e.g. 150"
@@ -8760,6 +8796,16 @@ export default function App() {
                     catalogProducts={products}
                     productImageFiles={productImages}
                     existingImageUrls={editExistingImages}
+                    filamentCostPerGram={filamentCostPerGram}
+                    currentSellingPrice={productForm.price}
+                    onOpenFilamentSettings={() => {
+                      setOwnerTab('filamentSettings');
+                      setFilamentCostFeedback(null);
+                      if (filamentCostPerGram !== null) {
+                        setFilamentCostInput(String(filamentCostPerGram));
+                      }
+                      window.scrollTo({ top: 320, behavior: 'smooth' });
+                    }}
                     onApplyPrice={(suggestedPrice) =>
                       setProductForm((prev) => ({
                         ...prev,
@@ -8776,12 +8822,6 @@ export default function App() {
                       setProductForm((prev) => ({
                         ...prev,
                         description: descriptionText.slice(0, 250),
-                      }))
-                    }
-                    onSetHighlights={(highlightsList) =>
-                      setProductForm((prev) => ({
-                        ...prev,
-                        highlights: highlightsList.slice(0, 6),
                       }))
                     }
                   />
@@ -8806,96 +8846,6 @@ export default function App() {
                       maxLength={250}
                     />
                   </label>
-
-                  {/* IMAGE-TO-HIGHLIGHTS BULLET POINTS EDITOR */}
-                  <div className="owner-highlights-box">
-                    <div className="owner-highlights-head">
-                      <div>
-                        <strong>Key Highlights (Bullet Points)</strong>
-                        <small>Shown as quick bullet points on the product page</small>
-                      </div>
-                      <button
-                        type="button"
-                        className="owner-highlights-ai-btn"
-                        disabled={highlightsAiLoading}
-                        onClick={() => void handleGenerateHighlightsFromPhotos()}
-                      >
-                        {highlightsAiLoading ? (
-                          <>
-                            <RefreshCw size={13} className="refresh-spinning" />
-                            <span>Inspecting Photos…</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={13} />
-                            <span>
-                              Generate from{' '}
-                              {productImages.length + editExistingImages.length > 0
-                                ? `${productImages.length + editExistingImages.length} Photo(s)`
-                                : 'Toy Info'}
-                            </span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {highlightsAiNote && (
-                      <p className="owner-highlights-note">{highlightsAiNote}</p>
-                    )}
-
-                    {productForm.highlights.length > 0 && (
-                      <div className="owner-highlights-list">
-                        {productForm.highlights.map((bullet, idx) => (
-                          <div key={idx} className="owner-highlight-row">
-                            <span className="owner-highlight-dot" aria-hidden="true">
-                              •
-                            </span>
-                            <input
-                              type="text"
-                              value={bullet}
-                              maxLength={140}
-                              placeholder={`Highlight #${idx + 1}`}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setProductForm((prev) => ({
-                                  ...prev,
-                                  highlights: prev.highlights.map((h, i) => (i === idx ? val : h)),
-                                }));
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="owner-highlight-remove"
-                              aria-label={`Remove highlight ${idx + 1}`}
-                              onClick={() =>
-                                setProductForm((prev) => ({
-                                  ...prev,
-                                  highlights: prev.highlights.filter((_, i) => i !== idx),
-                                }))
-                              }
-                            >
-                              <X size={13} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {productForm.highlights.length < 6 && (
-                      <button
-                        type="button"
-                        className="owner-highlights-add-btn"
-                        onClick={() =>
-                          setProductForm((prev) => ({
-                            ...prev,
-                            highlights: [...prev.highlights, ''],
-                          }))
-                        }
-                      >
-                        <Plus size={13} /> Add highlight bullet
-                      </button>
-                    )}
-                  </div>
 
                   {/* PHOTO MANAGEMENT (ADD & REMOVE PICTURES) */}
                   {editingProductId ? (
@@ -9458,8 +9408,7 @@ export default function App() {
                     className="primary-btn"
                     onClick={() => {
                       setEditingProductId(null);
-                      setProductForm({ name: '', price: '', description: '', category: '', highlights: [] });
-                      setHighlightsAiNote('');
+                      setProductForm({ name: '', price: '', description: '', category: '' });
                       setProductImages([]);
                       setOwnerTab('products');
                       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -10170,6 +10119,91 @@ export default function App() {
                 onUpdateAlertStatus={handleUpdateWatchdogAlertStatus}
                 onInspectTarget={handleInspectWatchdogTarget}
               />
+            )}
+
+            {/* FILAMENT COST SETTINGS TAB */}
+            {ownerTab === 'filamentSettings' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+              <form
+                className="panel-form add-form"
+                onSubmit={(e) => void handleSaveFilamentCost(e)}
+                style={{ maxWidth: '560px' }}
+              >
+                <span className="eyebrow">AI PRICE CALCULATOR SETTINGS</span>
+                <h2>Filament Cost Settings</h2>
+                <p>
+                  Configure the cost of 1 gram of filament (in ₹). This saved rate is automatically used whenever the AI Filament Price Calculator calculates material cost on the Add a Toy page.
+                </p>
+
+                <div
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    background: filamentCostPerGram ? '#eef4e2' : '#fffbeb',
+                    border: `1px solid ${filamentCostPerGram ? '#bfd1a1' : '#fde68a'}`,
+                    color: filamentCostPerGram ? '#1f3218' : '#92400e',
+                    fontSize: '0.84rem',
+                    marginBottom: '12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '10px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <strong>Current 1g filament cost:</strong>{' '}
+                    {filamentCostPerGram && filamentCostPerGram > 0
+                      ? `₹${filamentCostPerGram} per gram`
+                      : 'Not configured yet'}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', opacity: 0.85 }}>
+                    Formula: Weight (g) × Cost / g
+                  </span>
+                </div>
+
+                <label>
+                  Cost of 1 gram of filament (₹)
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    value={filamentCostInput}
+                    onChange={(e) => setFilamentCostInput(e.target.value)}
+                    placeholder="Enter ₹ cost per gram (e.g. 89)"
+                    required
+                  />
+                  <small>
+                    Example: If 1g filament cost is ₹89 and a product uses 25g, material cost calculates as 25 × 89 = ₹2,225.
+                  </small>
+                </label>
+
+                {filamentCostFeedback && (
+                  <p className={filamentCostFeedback.isError ? 'error-msg' : 'success-msg'}>
+                    {filamentCostFeedback.message}
+                  </p>
+                )}
+
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px' }}>
+                  <button
+                    type="submit"
+                    className="primary-btn"
+                    disabled={filamentCostSaving}
+                  >
+                    <Settings size={15} style={{ marginRight: '6px', verticalAlign: '-2px' }} />
+                    {filamentCostSaving ? 'Saving…' : 'Save Filament Cost'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => {
+                      setOwnerTab('products');
+                      window.scrollTo({ top: 320, behavior: 'smooth' });
+                    }}
+                  >
+                    Go to Add a Toy
+                  </button>
+                </div>
+              </form>
             )}
 
             {/* OWNER ANALYTICS DASHBOARD TAB */}

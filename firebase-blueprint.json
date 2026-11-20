@@ -70,6 +70,8 @@
         "adultPublished": { "type": "boolean" },
         "childPublished": { "type": "boolean" },
         "paymentQrUrl": { "type": "string", "maxLength": 1000 },
+        "filamentCostPerGram": { "type": "number", "description": "Configured cost of 1 gram of filament in INR for the AI Filament Price Calculator" },
+        "filamentCostUpdatedAt": { "type": "string", "maxLength": 64 },
         "list": { "type": "array" }
       }
     },

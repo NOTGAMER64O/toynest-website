@@ -1665,23 +1665,6 @@ function extractJsonObjectFromText(rawText: string): any | null {
   }
 }
 
-function extractGroundingWebSources(response: any): Array<{ title: string; uri: string }> {
-  const chunks = response?.candidates?.[0]?.groundingMetadata?.groundingChunks;
-  if (!Array.isArray(chunks)) return [];
-  const seen = new Set<string>();
-  const out: Array<{ title: string; uri: string }> = [];
-  for (const ch of chunks) {
-    const uri = String(ch?.web?.uri || '').trim();
-    if (!uri || !/^https?:\/\//i.test(uri) || seen.has(uri)) continue;
-    seen.add(uri);
-    const title = String(ch?.web?.title || uri).trim().slice(0, 140);
-    out.push({ title, uri });
-    if (out.length >= 6) break;
-  }
-  return out;
-}
-
-let googleSearchCooldownUntil = 0;
 let hydrogenOverloadCooldownUntil = 0;
 
 app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
@@ -1705,29 +1688,16 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
     const productName = String(body.productName || '').trim().slice(0, 120);
     const category = String(body.category || '').trim().slice(0, 60);
     const description = String(body.description || '').trim().slice(0, 400);
-    const mode = body.mode === 'estimate_final' ? 'estimate_final' : 'ask_or_estimate';
 
     if (!productName) {
       return res.status(400).json({
         success: false,
         geminiConfigured: true,
-        error: 'Please enter the Toy name first so AI can search market prices.',
+        error: 'Please enter the Toy name first so AI can review the name & photos.',
       });
     }
 
-    const answers: Array<{ id: string; question: string; answer: string }> = Array.isArray(
-      body.answers
-    )
-      ? body.answers
-          .map((a: any) => ({
-            id: String(a?.id || '').trim().slice(0, 40),
-            question: String(a?.question || '').trim().slice(0, 200),
-            answer: String(a?.answer || '').trim().slice(0, 250),
-          }))
-          .filter((a: any) => a.question && a.answer)
-      : [];
-
-    const catalogSample: Array<{ name: string; category: string; price: number }> = Array.isArray(
+    const catalogSample: Array<{ name: string; category: string }> = Array.isArray(
       body.catalogSample
     )
       ? body.catalogSample
@@ -1735,9 +1705,8 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
           .map((p: any) => ({
             name: String(p?.name || '').slice(0, 80),
             category: String(p?.category || 'Other').slice(0, 40),
-            price: Number(p?.price) || 0,
           }))
-          .filter((p: any) => p.name && p.price > 0)
+          .filter((p: any) => p.name)
       : [];
 
     // Review ALL provided product photos (up to 5 small previews) alongside toy name
@@ -1767,11 +1736,10 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       }
     }
 
-    const needsQuestionsStage = answers.length === 0 && mode !== 'estimate_final';
     const photoNotice =
       imageParts.length > 0
-        ? `Attached ${imageParts.length} product photo(s). FIRST carefully inspect ALL attached photos + the product name (look for scale/size cues, material, packaging/box, moving parts, accessories, finish) before estimating.`
-        : 'No product photos attached; rely on product name, category, description, and web lookup.';
+        ? `Attached ${imageParts.length} product photo(s). FIRST carefully inspect ALL attached photos + the product name (look for actual purpose/functionality, shape, moving/articulated parts, surface finish, colour details, and display context).`
+        : 'No product photos attached; rely carefully on the product name, current category, and existing description.';
 
     const rawExistingCats: string[] = Array.isArray(body.existingCategories)
       ? body.existingCategories.map((c: any) => String(c || '').trim()).filter(Boolean)
@@ -1795,7 +1763,7 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       if (exactExisting) return exactExisting;
       const canonicalMap: Record<string, string> = {
         fidget: 'Fidget',
-        'fidgets': 'Fidget',
+        fidgets: 'Fidget',
         'fidget toys': 'Fidget',
         educational: 'Educational',
         'toys and figures': 'Toys and Figures',
@@ -1810,7 +1778,7 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
 
     const classificationRulesBlock = [
       'PRODUCT CLASSIFICATION RULES (FOLLOW STRICTLY):',
-      '1. Understand the ACTUAL PURPOSE and FUNCTIONALITY of the product from its photos, description, and answers — never rely solely on a word or keyword in the name.',
+      '1. Understand the ACTUAL PURPOSE and FUNCTIONALITY of the product from its photos and name — never rely solely on a word or keyword in the name.',
       '2. Prioritize the MOST SPECIFIC matching category over broad categories.',
       '3. Fidget products (infinity cubes, spinners, clickers, pop-its, sensory toys, tactile/stress-relief gadgets) MUST be categorized as "Fidget" (never "Educational").',
       '4. "Educational" must ONLY be suggested for products primarily designed for learning, teaching, STEM/science kits, or demonstrating concepts.',
@@ -1819,100 +1787,40 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       '7. "Home & Garden" includes planters, household decorations, and practical home products.',
       '8. If a product genuinely belongs to multiple categories, suggest 1 primary category ("suggestedCategory") and up to 2 relevant secondary categories ("secondaryCategories"). Never include a category based only on a weak keyword match.',
       '9. Use EXACT category names from EXISTING_WEBSITE_CATEGORIES whenever an existing category matches the product functionality, otherwise use the exact category names above ("Fidget", "Educational", "Toys and Figures", "Desk Accessories", "Home & Garden").',
-      '10. If product information (name + photos + description) is too vague or ambiguous to know its real purpose/functionality, DO NOT GUESS — set "categoryNeedsClarification": true, leave "suggestedCategory": "" and "secondaryCategories": [], and ask what the product is primarily used for in "questions".',
+      '10. If product information is genuinely too ambiguous to know its category reliably, set "categoryNeedsClarification": true and explain briefly in "categoryReasoning" while still writing the best factual "suggestedDescription".',
     ].join('\n');
 
-    const instructionText = needsQuestionsStage
-      ? [
-          'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
-          photoNotice,
-          'Use Google Search to quickly check current Indian online prices and product specs (Amazon.in, Flipkart, toy stores).',
-          classificationRulesBlock,
-          'Identify what crucial price- or category-affecting details are STILL unclear after inspecting the toy name and photos (especially FUNCTION/PURPOSE if unclear, plus SIZE/SCALE, MATERIAL, and FEATURES/PACKAGING).',
-          '',
-          `PRODUCT_NAME: ${productName}`,
-          `CURRENT_CATEGORY: ${category || 'Not specified'}`,
-          `EXISTING_WEBSITE_CATEGORIES: ${JSON.stringify(existingCategories)}`,
-          `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
-          catalogSample.length > 0
-            ? `SHOP_PRICE_CONTEXT: ${JSON.stringify(catalogSample.slice(0, 8))}`
-            : '',
-          '',
-          'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
-          '{',
-          '  "stage": "questions",',
-          '  "categoryNeedsClarification": false,',
-          '  "suggestedCategory": "Exact primary category name, or empty string if info is insufficient to avoid guessing",',
-          '  "secondaryCategories": ["Optional secondary category (max 2)"],',
-          '  "categoryReasoning": "1 short sentence explaining why this category fits its actual purpose (or what clarification is needed).",',
-          '  "imageReviewSummary": "1 concise sentence stating what you observed from reviewing the product name and attached photo(s).",',
-          '  "marketFindings": "1-2 short sentences on current Indian online prices for this item.",',
-          '  "preliminaryRangeINR": { "min": 150, "max": 600 },',
-          '  "questions": [',
-          '    {',
-          '      "id": "size",',
-          '      "question": "What is the approximate size or scale of this toy?",',
-          '      "reason": "Price changes significantly by size/scale.",',
-          '      "placeholder": "e.g., ~14 cm or 1:32 scale",',
-          '      "quickOptions": ["Mini (~6-8 cm)", "Medium (~12-16 cm)", "Large (~20-25 cm)", "XL (25+ cm)"]',
-          '    }',
-          '  ]',
-          '}',
-          'Rules:',
-          '- Never guess suggestedCategory on weak keyword matches. If unclear, set categoryNeedsClarification=true, suggestedCategory="", and put a functional purpose question first in questions (with quickOptions like "Fidget / Stress relief", "Toy / Collectible figure", "Desk organizer / decoration", "Educational / Learning tool", "Home / Planter / Decor").',
-          '- Generate 2 to 3 crisp, fast questions.',
-          '- Keep all text concise.',
-        ]
-          .filter(Boolean)
-          .join('\n')
-      : [
-          'You are the Playnix AI Product & Pricing Advisor for Playnix Shop (India, INR ₹).',
-          photoNotice,
-          'Use Google Search to check Indian online prices and specs matching the product name, attached photos, AND owner answers.',
-          classificationRulesBlock,
-          '',
-          `PRODUCT_NAME: ${productName}`,
-          `CURRENT_CATEGORY: ${category || 'Not specified'}`,
-          `EXISTING_WEBSITE_CATEGORIES: ${JSON.stringify(existingCategories)}`,
-          `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
-          `OWNER_PROVIDED_ANSWERS: ${JSON.stringify(answers)}`,
-          catalogSample.length > 0
-            ? `SHOP_PRICE_CONTEXT: ${JSON.stringify(catalogSample.slice(0, 8))}`
-            : '',
-          '',
-          'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
-          '{',
-          '  "stage": "price_ready",',
-          '  "categoryNeedsClarification": false,',
-          '  "suggestedCategory": "Exact primary category matching product purpose",',
-          '  "secondaryCategories": ["Optional secondary category (max 2)"],',
-          '  "categoryReasoning": "1 short sentence explaining why this category matches the product purpose/functionality.",',
-          '  "imageReviewSummary": "1 concise sentence summarizing what you observed from the toy name & attached photo(s).",',
-          '  "recommendedPriceINR": 299,',
-          '  "priceRangeINR": { "min": 249, "max": 399 },',
-          '  "reasoning": "1-2 short, straight sentences explaining why this ₹ price fits the size, visual appearance, and market listings.",',
-          '  "sizeAndSpecSummary": "Size: ~14 cm (1:32) · Material: Diecast Metal",',
-          '  "suggestedDescription": "Clean, customer-ready Playnix Shop description under 220 characters accurately describing what is visible in photos + owner specs.",',
-          '  "highlights": [',
-          '    "Short bullet point 1 observed from photos/name (max 95 chars)",',
-          '    "Short bullet point 2 (material, finish, or play style visible)",',
-          '    "Short bullet point 3 (size/spec or gift/display appeal)"',
-          '  ]',
-          '}',
-          'Rules:',
-          '- Apply the PRODUCT CLASSIFICATION RULES strictly (e.g., infinity cube / spinner / clicker / sensory gadget -> "Fidget", NEVER "Educational").',
-          '- Return 1 primary suggestedCategory and up to 2 genuinely relevant secondaryCategories (empty array if only 1 applies).',
-          '- recommendedPriceINR, priceRangeINR.min, and priceRangeINR.max must be realistic positive integers in INR (₹).',
-          '- suggestedDescription MUST be <= 220 characters, factual (based only on name, visible photo details, and owner answers), and ready for the storefront.',
-          '- highlights MUST be 3 to 5 crisp, scannable bullet points (no leading bullet symbols like "•" or "-"), each <= 110 characters, based ONLY on what is visible in photos, the toy name, or owner answers (never invent battery inclusion or unverified specs).',
-        ]
-          .filter(Boolean)
-          .join('\n');
-
-    const contentsPayload =
-      imageParts.length > 0
-        ? { parts: [...imageParts, { text: instructionText }] }
-        : instructionText;
+    const instructionText = [
+      'You are the Playnix AI Catalog Assistant for Playnix Shop (a 3D-printed & toy shop in India).',
+      photoNotice,
+      classificationRulesBlock,
+      'Do NOT generate prices, price ranges, follow-up questions, or bullet-point highlights. Your ONLY job is to inspect the product name & photos and return:',
+      '1) The most accurate Product Category (+ optional secondary categories), and',
+      '2) An attractive, accurate, customer-friendly Product Description.',
+      '',
+      `PRODUCT_NAME: ${productName}`,
+      `CURRENT_CATEGORY: ${category || 'Not specified'}`,
+      `EXISTING_WEBSITE_CATEGORIES: ${JSON.stringify(existingCategories)}`,
+      `EXISTING_DESCRIPTION: ${description || 'Not provided'}`,
+      '',
+      'Return ONLY a single valid JSON object (no markdown fences) matching this exact format:',
+      '{',
+      '  "stage": "ready",',
+      '  "categoryNeedsClarification": false,',
+      '  "suggestedCategory": "Exact primary category matching product purpose",',
+      '  "secondaryCategories": ["Optional secondary category (max 2)"],',
+      '  "categoryReasoning": "1 short sentence explaining why this category matches the product purpose/functionality.",',
+      '  "imageReviewSummary": "1 concise sentence summarizing what you observed from the toy name & attached photo(s).",',
+      '  "suggestedDescription": "Attractive, accurate, customer-friendly Playnix Shop description under 235 characters based ONLY on what is visible in the photos and the product name."',
+      '}',
+      'Rules:',
+      '- Apply the PRODUCT CLASSIFICATION RULES strictly (e.g., infinity cube / spinner / clicker / sensory gadget -> "Fidget", NEVER "Educational").',
+      '- Return 1 primary suggestedCategory and up to 2 genuinely relevant secondaryCategories (empty array if only 1 applies).',
+      '- suggestedDescription MUST be <= 235 characters, engaging, factual, and ready for customers on the Playnix storefront.',
+      '- Do NOT include any questions, prices, currency figures, or highlight bullets.',
+    ]
+      .filter(Boolean)
+      .join('\n');
 
     const isTransientOverload = (e: any) => {
       const m = String(e?.message || e || '').toLowerCase();
@@ -1929,29 +1837,20 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       );
     };
 
-    const isSearchQuotaError = (e: any) => {
-      const m = String(e?.message || e || '').toLowerCase();
-      return (
-        e?.status === 429 ||
-        m.includes('429') ||
-        m.includes('resource_exhausted') ||
-        m.includes('quota')
-      );
-    };
-
-    const isSearchFallbackError = (e: any) => isSearchQuotaError(e) || isTransientOverload(e);
-
-    const callModelWithRetry = async (withSearch: boolean) => {
-      const runOnce = async (modelName: string, timeoutMs: number) => {
-        const cfg: any = withSearch
-          ? { tools: [{ googleSearch: {} }], abortSignal: AbortSignal.timeout(timeoutMs) }
-          : { responseMimeType: 'application/json', abortSignal: AbortSignal.timeout(timeoutMs) };
+    const callModelWithRetry = async () => {
+      const runOnce = async (modelName: string, timeoutMs: number, parts: typeof imageParts) => {
+        const cfg: any = {
+          responseMimeType: 'application/json',
+          abortSignal: AbortSignal.timeout(timeoutMs),
+        };
         if (modelName === PLAYNIX_GEMINI_MODEL) {
           cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
         }
+        const payload =
+          parts.length > 0 ? { parts: [...parts, { text: instructionText }] } : instructionText;
         return ai.models.generateContent({
           model: modelName,
-          contents: contentsPayload,
+          contents: payload,
           config: cfg,
         });
       };
@@ -1961,75 +1860,39 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
 
       try {
         return {
-          resp: await runOnce(primaryModel, withSearch ? 12000 : 15000),
+          resp: await runOnce(primaryModel, 16000, imageParts),
           modelUsed: primaryModel,
+          reviewedCount: imageParts.length,
         };
       } catch (firstErr: any) {
-        if (isTransientOverload(firstErr) && primaryModel === PLAYNIX_GEMINI_MODEL) {
+        if (isTransientOverload(firstErr)) {
           const msg = String(firstErr?.message || firstErr || '').toLowerCase();
           if (firstErr?.status === 503 || msg.includes('overloaded') || msg.includes('high demand')) {
             hydrogenOverloadCooldownUntil = Date.now() + 60_000;
           }
+          const lighterParts = imageParts.length > 2 ? imageParts.slice(0, 2) : imageParts;
           return {
-            resp: await runOnce('gemini-3.1-flash-lite', withSearch ? 10000 : 14000),
+            resp: await runOnce('gemini-3.1-flash-lite', 15000, lighterParts),
             modelUsed: 'gemini-3.1-flash-lite',
+            reviewedCount: lighterParts.length,
           };
         }
         throw firstErr;
       }
     };
 
-    let response: any;
-    let modelUsed = PLAYNIX_GEMINI_MODEL;
-    let webSearchUsed = true;
-    let webSearchNote = '';
-    const searchAvailableNow = Date.now() >= googleSearchCooldownUntil;
-
-    if (searchAvailableNow) {
-      try {
-        const out = await callModelWithRetry(true);
-        response = out.resp;
-        modelUsed = out.modelUsed;
-      } catch (searchErr: any) {
-        if (!isSearchFallbackError(searchErr)) {
-          throw searchErr;
-        }
-        const hitQuota = isSearchQuotaError(searchErr);
-        console.info(
-          hitQuota
-            ? 'Google Search grounding unavailable on current quota; using standard Gemini toy market pricing estimate.'
-            : 'Google Search grounding timed out or was busy; falling back to fast Gemini market pricing estimate.'
-        );
-        if (hitQuota) {
-          googleSearchCooldownUntil = Date.now() + 15 * 60_000;
-        }
-        webSearchUsed = false;
-        webSearchNote = hitQuota
-          ? 'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).'
-          : 'Live web search took too long, so Playnix AI used direct Gemini vision & toy market pricing instead.';
-        const fallbackOut = await callModelWithRetry(false);
-        response = fallbackOut.resp;
-        modelUsed = fallbackOut.modelUsed;
-      }
-    } else {
-      webSearchUsed = false;
-      webSearchNote =
-        'Using Gemini toy market pricing (live Google Search grounding requires Search quota or billing enabled in Settings > Secrets).';
-      const fallbackOut = await callModelWithRetry(false);
-      response = fallbackOut.resp;
-      modelUsed = fallbackOut.modelUsed;
-    }
-
+    const out = await callModelWithRetry();
+    const response = out.resp;
+    const modelUsed = out.modelUsed;
     const parsed = extractJsonObjectFromText(response?.text || '');
-    const webSources = webSearchUsed ? extractGroundingWebSources(response) : [];
 
     if (!parsed) {
-      throw new Error('Playnix AI could not structure the pricing result. Please try again.');
+      throw new Error('Playnix AI could not structure the category & description result. Please try again.');
     }
 
     const imageReviewSummary = String(parsed.imageReviewSummary || '').trim().slice(0, 320);
     const categoryNeedsClarification = Boolean(parsed.categoryNeedsClarification);
-    const combinedEvidenceText = `${productName} ${description} ${answers.map((a) => a.answer).join(' ')}`.toLowerCase();
+    const combinedEvidenceText = `${productName} ${description}`.toLowerCase();
     const isClearlyFidget = /\b(fidget|infinity\s*cube|spinner|clicker|pop[\s-]*it|sensory\s*toy|stress[\s-]*relief|stress\s*reliever)\b/i.test(
       combinedEvidenceText
     );
@@ -2055,103 +1918,34 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
 
     const categoryReasoning = String(parsed.categoryReasoning || '').trim().slice(0, 240);
 
-    if (needsQuestionsStage && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-      const sanitizedQuestions = parsed.questions
-        .slice(0, 4)
-        .map((q: any, idx: number) => ({
-          id: String(q?.id || `q_${idx + 1}`).trim().slice(0, 40),
-          question: String(q?.question || '').trim().slice(0, 220),
-          reason: String(q?.reason || '').trim().slice(0, 220),
-          placeholder: String(q?.placeholder || 'Type your answer...').trim().slice(0, 100),
-          quickOptions: Array.isArray(q?.quickOptions)
-            ? q.quickOptions.map((o: any) => String(o || '').trim()).filter(Boolean).slice(0, 5)
-            : [],
-        }))
-        .filter((q: any) => q.question);
-
-      const minPrelim = Math.max(10, Math.round(Number(parsed?.preliminaryRangeINR?.min) || 0));
-      const maxPrelim = Math.max(minPrelim, Math.round(Number(parsed?.preliminaryRangeINR?.max) || 0));
-
-      return res.json({
-        success: true,
-        geminiConfigured: true,
-        webSearchUsed,
-        webSearchNote,
-        reviewedPhotosCount: imageParts.length,
-        imageReviewSummary,
-        suggestedCategory,
-        secondaryCategories,
-        categoryNeedsClarification,
-        categoryReasoning,
-        stage: 'questions',
-        marketFindings: String(parsed.marketFindings || '').trim().slice(0, 500),
-        preliminaryRangeINR:
-          minPrelim > 0 && maxPrelim >= minPrelim
-            ? { min: minPrelim, max: maxPrelim }
-            : null,
-        questions: sanitizedQuestions,
-        webSources,
-        modelUsed,
-      });
-    }
-
-    const recommended = Math.max(10, Math.round(Number(parsed.recommendedPriceINR) || 0));
-    const minPrice = Math.max(10, Math.round(Number(parsed?.priceRangeINR?.min) || Math.round(recommended * 0.85)));
-    const maxPrice = Math.max(minPrice, Math.round(Number(parsed?.priceRangeINR?.max) || Math.round(recommended * 1.2)));
-
-    if (!recommended) {
-      throw new Error('Could not determine a valid INR price. Please try adding more details.');
-    }
-
     const cleanSuggestedDescription = String(
       parsed.suggestedDescription || parsed.suggestedDescriptionSnippet || ''
     )
       .trim()
-      .slice(0, 240);
-
-    const cleanHighlights: string[] = Array.isArray(parsed.highlights)
-      ? parsed.highlights
-          .map((h: any) =>
-            String(h || '')
-              .replace(/^[\s•\-\*]+/, '')
-              .trim()
-              .slice(0, 140)
-          )
-          .filter(Boolean)
-          .slice(0, 5)
-      : [];
+      .slice(0, 245);
 
     return res.json({
       success: true,
       geminiConfigured: true,
-      webSearchUsed,
-      webSearchNote,
-      reviewedPhotosCount: imageParts.length,
+      reviewedPhotosCount: out.reviewedCount,
       imageReviewSummary,
       suggestedCategory,
       secondaryCategories,
       categoryNeedsClarification: !suggestedCategory && categoryNeedsClarification,
       categoryReasoning,
-      stage: 'price_ready',
-      recommendedPriceINR: recommended,
-      priceRangeINR: { min: minPrice, max: maxPrice },
-      reasoning: String(parsed.reasoning || '').trim().slice(0, 600),
-      sizeAndSpecSummary: String(parsed.sizeAndSpecSummary || '').trim().slice(0, 240),
+      stage: 'ready',
       suggestedDescription: cleanSuggestedDescription,
-      suggestedDescriptionSnippet: cleanSuggestedDescription,
-      highlights: cleanHighlights,
-      webSources,
       modelUsed,
     });
   } catch (err: any) {
-    const rawMsg = String(err?.message || err || 'Failed to research product prices.');
+    const rawMsg = String(err?.message || err || 'Failed to generate product category & description.');
     const isAbort =
       err?.name === 'AbortError' ||
       err?.name === 'TimeoutError' ||
       /aborted|timed out/i.test(rawMsg);
 
     if (isAbort) {
-      console.info('Product price advisor request timed out after retries.');
+      console.info('Product AI advisor request timed out after retries.');
       return res.status(504).json({
         success: false,
         geminiConfigured: getGeminiClient() !== null,
@@ -2173,207 +1967,6 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       success: false,
       geminiConfigured: getGeminiClient() !== null,
       error: friendlyError,
-    });
-  }
-});
-
-// Fast Image-to-Highlights Bullet Points Generator for Owner Product Form
-app.post('/api/owner/ai/product-highlights', async (req, res) => {
-  const { pin } = req.body || {};
-  if (!verifyPin(pin)) {
-    return res.status(401).json({ error: 'Invalid owner PIN' });
-  }
-
-  const ai = getGeminiClient();
-  if (!ai) {
-    return res.status(400).json({
-      success: false,
-      geminiConfigured: false,
-      error:
-        'GEMINI_API_KEY is not configured on the server yet. Add GEMINI_API_KEY in Settings > Secrets.',
-    });
-  }
-
-  try {
-    const body = req.body || {};
-    const productName = String(body.productName || '').trim().slice(0, 120);
-    const category = String(body.category || '').trim().slice(0, 60);
-    const description = String(body.description || '').trim().slice(0, 400);
-
-    const imageParts: Array<{ inlineData: { mimeType: string; data: string } }> = [];
-    const rawImagesInput: string[] = Array.isArray(body.imageDataUrls)
-      ? body.imageDataUrls.filter((u: any) => typeof u === 'string').slice(0, 5)
-      : [];
-
-    let totalImageBytes = 0;
-    for (const rawUrl of rawImagesInput) {
-      if (!rawUrl.startsWith('data:image/')) continue;
-      const m = rawUrl.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
-      if (m && m[2].length <= 450_000 && totalImageBytes + m[2].length <= 1_400_000) {
-        totalImageBytes += m[2].length;
-        imageParts.push({
-          inlineData: {
-            mimeType: m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase(),
-            data: m[2],
-          },
-        });
-      }
-    }
-
-    if (!productName && imageParts.length === 0) {
-      return res.status(400).json({
-        success: false,
-        geminiConfigured: true,
-        error: 'Add at least 1 toy photo or enter the Toy name first.',
-      });
-    }
-
-    const promptText = [
-      'You are Playnix AI Catalog Assistant for Playnix Shop (a friendly toy store in India).',
-      imageParts.length > 0
-        ? `Carefully inspect ALL ${imageParts.length} attached toy photo(s) along with the product name and description.`
-        : 'No photos attached yet; use the toy name, category, and description.',
-      'Generate 3 to 5 crisp, scannable, parent-friendly Key Highlight bullet points for the product page.',
-      'Rules:',
-      '- Keep each bullet concise (4 to 14 words, max 110 characters), easy to read, and free of hype.',
-      '- Base points strictly on what is clearly visible in the photos (design, colours, moving parts, accessories, finish, packaging/display look) and stated in the name/description.',
-      '- Do NOT invent exact dimensions in cm, battery counts, age ratings, or safety certifications unless visibly printed in the photo or stated in the owner description.',
-      '- Do NOT include leading bullet symbols ("•", "-", "*") in the strings.',
-      '',
-      `PRODUCT_NAME: ${productName || 'Not entered yet (identify from photos)'}`,
-      `CATEGORY: ${category || 'Not specified'}`,
-      `DESCRIPTION: ${description || 'Not provided'}`,
-    ].join('\n');
-
-    const runHighlightsOnce = async (
-      modelName: string,
-      timeoutMs: number,
-      partsToUse: Array<{ inlineData: { mimeType: string; data: string } }> = imageParts
-    ) => {
-      const cfg: any = {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            imageObservation: { type: Type.STRING },
-            highlights: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-          },
-          required: ['imageObservation', 'highlights'],
-        },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      };
-      if (modelName === PLAYNIX_GEMINI_MODEL) {
-        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      }
-      const payload =
-        partsToUse.length > 0 ? { parts: [...partsToUse, { text: promptText }] } : promptText;
-      return ai.models.generateContent({
-        model: modelName,
-        contents: payload,
-        config: cfg,
-      });
-    };
-
-    const primaryModel =
-      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-
-    let resp: any;
-    let modelUsed = primaryModel;
-    let usedPhotoCount = imageParts.length;
-    try {
-      resp = await runHighlightsOnce(primaryModel, 18000, imageParts);
-    } catch (firstErr: any) {
-      const m = String(firstErr?.message || firstErr || '').toLowerCase();
-      const isTransient =
-        firstErr?.status === 503 ||
-        firstErr?.name === 'TimeoutError' ||
-        firstErr?.name === 'AbortError' ||
-        m.includes('503') ||
-        m.includes('high demand') ||
-        m.includes('overloaded') ||
-        m.includes('timed out') ||
-        m.includes('aborted');
-
-      if (isTransient) {
-        if (firstErr?.status === 503 || m.includes('high demand') || m.includes('overloaded')) {
-          hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-        }
-        modelUsed = 'gemini-3.1-flash-lite';
-        // Retry with flash-lite (and cap to first 2 photos if payload had many photos)
-        const lighterParts = imageParts.length > 2 ? imageParts.slice(0, 2) : imageParts;
-        usedPhotoCount = lighterParts.length;
-        try {
-          resp = await runHighlightsOnce(modelUsed, 15000, lighterParts);
-        } catch (secondErr: any) {
-          const sm = String(secondErr?.message || secondErr || '').toLowerCase();
-          const secondAbort =
-            secondErr?.name === 'AbortError' ||
-            secondErr?.name === 'TimeoutError' ||
-            sm.includes('aborted') ||
-            sm.includes('timed out');
-          // Final fast fallback with single photo or name-only if multi-photo upload timed out
-          if (secondAbort && (lighterParts.length > 1 || (lighterParts.length === 1 && productName))) {
-            const finalParts = lighterParts.length > 1 ? lighterParts.slice(0, 1) : [];
-            usedPhotoCount = finalParts.length;
-            resp = await runHighlightsOnce('gemini-3.1-flash-lite', 12000, finalParts);
-          } else {
-            throw secondErr;
-          }
-        }
-      } else {
-        throw firstErr;
-      }
-    }
-
-    const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
-    const highlights: string[] = Array.isArray(parsed?.highlights)
-      ? parsed.highlights
-          .map((h: any) =>
-            String(h || '')
-              .replace(/^[\s•\-\*]+/, '')
-              .trim()
-              .slice(0, 140)
-          )
-          .filter(Boolean)
-          .slice(0, 5)
-      : [];
-
-    if (highlights.length === 0) {
-      throw new Error('Could not extract highlight bullets from the provided photo(s)/name.');
-    }
-
-    return res.json({
-      success: true,
-      geminiConfigured: true,
-      reviewedPhotosCount: usedPhotoCount,
-      imageObservation: String(parsed?.imageObservation || '').trim().slice(0, 260),
-      highlights,
-      modelUsed,
-    });
-  } catch (err: any) {
-    const rawMsg = String(err?.message || err || 'Failed to generate highlights right now.');
-    const isAbort =
-      err?.name === 'AbortError' ||
-      err?.name === 'TimeoutError' ||
-      /aborted|timed out/i.test(rawMsg);
-
-    if (isAbort) {
-      console.info('Product highlights generation timed out after retries.');
-      return res.status(504).json({
-        success: false,
-        geminiConfigured: getGeminiClient() !== null,
-        error: 'Playnix AI took too long to analyze the photos right now. Please try again.',
-      });
-    }
-
-    console.error('Error in /api/owner/ai/product-highlights:', err);
-    res.status(500).json({
-      success: false,
-      geminiConfigured: getGeminiClient() !== null,
-      error: rawMsg,
     });
   }
 });

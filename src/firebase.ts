@@ -705,6 +705,15 @@ export interface StoreSettings {
   paymentQrUrl: string;
   manualMoneyAdjustment?: number;
   moneyAdjustmentHistory?: MoneyAdjustmentItem[];
+  filamentCostPerGram?: number | null;
+  filamentCostUpdatedAt?: string;
+}
+
+function parseFilamentCostPerGram(raw: any): number | null {
+  if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
+    return Math.round(raw * 100) / 100;
+  }
+  return null;
 }
 
 export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
@@ -719,6 +728,8 @@ export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
         paymentQrUrl: data.paymentQrUrl || '',
         manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
         moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
+        filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
+        filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
       };
     }
   } catch (error) {
@@ -731,6 +742,8 @@ export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
           paymentQrUrl: restData.paymentQrUrl || '',
           manualMoneyAdjustment: typeof restData.manualMoneyAdjustment === 'number' ? restData.manualMoneyAdjustment : 0,
           moneyAdjustmentHistory: Array.isArray(restData.moneyAdjustmentHistory) ? restData.moneyAdjustmentHistory : [],
+          filamentCostPerGram: parseFilamentCostPerGram(restData.filamentCostPerGram),
+          filamentCostUpdatedAt: typeof restData.filamentCostUpdatedAt === 'string' ? restData.filamentCostUpdatedAt : undefined,
         };
       }
       throw error;
@@ -743,6 +756,7 @@ export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
     paymentQrUrl: '',
     manualMoneyAdjustment: 0,
     moneyAdjustmentHistory: [],
+    filamentCostPerGram: null,
   };
 }
 
@@ -769,6 +783,8 @@ export function subscribeToSettings(callback: (settings: StoreSettings) => void)
             paymentQrUrl: data.paymentQrUrl || '',
             manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
             moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
+            filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
+            filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
           });
         }
       },
