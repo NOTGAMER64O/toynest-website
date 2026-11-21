@@ -3,19 +3,524 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import {
-  SITE_BASE_URL,
-  buildProductSeoMeta,
-  findProductBySlugOrId,
-  generateProductSlugForCreate,
-  getCrawlableProductImages,
-  getProductCanonicalUrl,
-} from '../src/utils/productSlug.ts';
-import {
-  escapeHtmlAttr,
-  injectNotFoundSeoIntoHtml,
-  injectProductSeoIntoHtml,
-} from '../src/utils/productSeoHtml.ts';
+
+export const SITE_BASE_URL = 'https://playnixshop-website.vercel.app';
+
+interface SlugProductLike {
+  id: string;
+  name: string;
+  slug?: string;
+}
+
+interface SeoProductInput extends SlugProductLike {
+  price: number;
+  category?: string;
+  description?: string;
+  imageUrl?: string;
+  imageUrls?: string[];
+  available?: boolean;
+  createdAt?: string;
+}
+
+export interface ProductSeoMeta {
+  slug: string;
+  path: string;
+  canonicalUrl: string;
+  title: string;
+  description: string;
+  ogType: 'product' | 'website';
+  ogTitle: string;
+  ogDescription: string;
+  ogImage: string;
+  ogImageAlt: string;
+  robots: string;
+  images: string[];
+  jsonLd: Record<string, any>;
+}
+
+const RESERVED_PRODUCT_SLUGS = new Set(['new', 'edit', 'all', 'index', 'api', 'admin']);
+
+function slugifyProductName(name: string): string {
+  const cleaned = String(name || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 72)
+    .replace(/-+$/g, '');
+
+  if (!cleaned || RESERVED_PRODUCT_SLUGS.has(cleaned)) {
+    return cleaned ? `${cleaned}-toy` : 'toy';
+  }
+  return cleaned;
+}
+
+function getShortProductIdSuffix(id: string): string {
+  const alnum = String(id || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  if (!alnum) return 'item';
+  return alnum.slice(-6);
+}
+
+function isValidExplicitSlug(slug?: string): slug is string {
+  return Boolean(
+    slug &&
+      typeof slug === 'string' &&
+      /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug.trim()) &&
+      !RESERVED_PRODUCT_SLUGS.has(slug.trim())
+  );
+}
+
+export function getUniqueProductSlug(
+  product: SlugProductLike,
+  allProducts: SlugProductLike[] = []
+): string {
+  const explicit = typeof product.slug === 'string' ? product.slug.trim().toLowerCase() : '';
+  if (isValidExplicitSlug(explicit)) {
+    const collides = allProducts.some(
+      (other) =>
+        other &&
+        other.id !== product.id &&
+        typeof other.slug === 'string' &&
+        other.slug.trim().toLowerCase() === explicit
+    );
+    if (!collides) {
+      return explicit;
+    }
+  }
+
+  const base = slugifyProductName(product.name);
+  const siblingsWithSameBase = allProducts.filter((other) => {
+    if (!other) return false;
+    const otherExplicit = typeof other.slug === 'string' ? other.slug.trim().toLowerCase() : '';
+    if (isValidExplicitSlug(otherExplicit) && otherExplicit !== base) {
+      return false;
+    }
+    return slugifyProductName(other.name) === base;
+  });
+
+  if (siblingsWithSameBase.length <= 1) {
+    return base;
+  }
+
+  return `${base}-${getShortProductIdSuffix(product.id)}`;
+}
+
+function generateProductSlugForCreate(
+  name: string,
+  existingProducts: SlugProductLike[],
+  productId: string
+): string {
+  const base = slugifyProductName(name);
+  const taken = new Set<string>(
+    (existingProducts || []).map((p) => getUniqueProductSlug(p, existingProducts))
+  );
+
+  if (!taken.has(base)) {
+    return base;
+  }
+
+  const withId = `${base}-${getShortProductIdSuffix(productId)}`;
+  if (!taken.has(withId)) {
+    return withId;
+  }
+
+  let counter = 2;
+  while (taken.has(`${withId}-${counter}`)) {
+    counter += 1;
+  }
+  return `${withId}-${counter}`;
+}
+
+function getProductPath(product: SlugProductLike, allProducts: SlugProductLike[] = []): string {
+  return `/products/${encodeURIComponent(getUniqueProductSlug(product, allProducts))}`;
+}
+
+function getProductCanonicalUrl(
+  product: SlugProductLike,
+  allProducts: SlugProductLike[] = [],
+  origin: string = SITE_BASE_URL
+): string {
+  const cleanOrigin = (origin || SITE_BASE_URL).replace(/\/+$/, '');
+  return `${cleanOrigin}${getProductPath(product, allProducts)}`;
+}
+
+export function findProductBySlugOrId<T extends SlugProductLike>(
+  slugOrId: string,
+  allProducts: T[]
+): T | undefined {
+  if (!slugOrId || !Array.isArray(allProducts) || allProducts.length === 0) {
+    return undefined;
+  }
+
+  let normalizedTarget = slugOrId.trim();
+  try {
+    normalizedTarget = decodeURIComponent(normalizedTarget);
+  } catch {}
+  normalizedTarget = normalizedTarget.replace(/\/+$/, '').trim().toLowerCase();
+  if (!normalizedTarget) return undefined;
+
+  const exactComputed = allProducts.find(
+    (p) => p && getUniqueProductSlug(p, allProducts).toLowerCase() === normalizedTarget
+  );
+  if (exactComputed) return exactComputed;
+
+  const exactStoredSlug = allProducts.find(
+    (p) => p && typeof p.slug === 'string' && p.slug.trim().toLowerCase() === normalizedTarget
+  );
+  if (exactStoredSlug) return exactStoredSlug;
+
+  const exactId = allProducts.find((p) => p && String(p.id).toLowerCase() === normalizedTarget);
+  if (exactId) return exactId;
+
+  const byNameSlug = allProducts.find(
+    (p) => p && slugifyProductName(p.name) === normalizedTarget
+  );
+  if (byNameSlug) return byNameSlug;
+
+  const suffixMatch = normalizedTarget.match(/^(.+)-([a-z0-9]{4,8})$/);
+  if (suffixMatch) {
+    const [, prefixSlug, idSuffix] = suffixMatch;
+    const matched = allProducts.find(
+      (p) =>
+        p &&
+        getShortProductIdSuffix(p.id) === idSuffix &&
+        slugifyProductName(p.name) === prefixSlug
+    );
+    if (matched) return matched;
+  }
+
+  return undefined;
+}
+
+function resolveAbsoluteImageUrl(
+  imgUrl: string | undefined,
+  origin: string = SITE_BASE_URL
+): string | null {
+  if (!imgUrl || typeof imgUrl !== 'string') return null;
+  const trimmed = imgUrl.trim();
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  const cleanOrigin = (origin || SITE_BASE_URL).replace(/\/+$/, '');
+  if (trimmed.startsWith('/')) {
+    return `${cleanOrigin}${trimmed}`;
+  }
+  return `${cleanOrigin}/${trimmed}`;
+}
+
+function getCrawlableProductImages(
+  product: SeoProductInput,
+  origin: string = SITE_BASE_URL
+): string[] {
+  const cleanOrigin = (origin || SITE_BASE_URL).replace(/\/+$/, '');
+  const candidates =
+    Array.isArray(product.imageUrls) && product.imageUrls.length > 0
+      ? product.imageUrls
+      : product.imageUrl
+      ? [product.imageUrl]
+      : [];
+
+  const resolved = candidates
+    .map((u) => resolveAbsoluteImageUrl(u, cleanOrigin))
+    .filter((u): u is string => Boolean(u));
+
+  const unique = Array.from(new Set(resolved));
+  if (unique.length > 0) return unique;
+  return [`${cleanOrigin}/resources/toynest-logo.png`];
+}
+
+function truncateAtWordBoundary(text: string, maxLen: number): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLen) return clean;
+  const sliced = clean.slice(0, maxLen - 1);
+  const lastSpace = sliced.lastIndexOf(' ');
+  const cut = lastSpace > Math.floor(maxLen * 0.65) ? sliced.slice(0, lastSpace) : sliced;
+  return `${cut.replace(/[.,;:\-\s]+$/, '')}…`;
+}
+
+export function buildProductSeoMeta(
+  product: SeoProductInput,
+  allProducts: SeoProductInput[] = [],
+  options: {
+    effectivePrice?: number;
+    activeOfferTitle?: string;
+    origin?: string;
+  } = {}
+): ProductSeoMeta {
+  const origin = (options.origin || SITE_BASE_URL).replace(/\/+$/, '');
+  const slug = getUniqueProductSlug(product, allProducts);
+  const prodPath = `/products/${encodeURIComponent(slug)}`;
+  const canonicalUrl = `${origin}${prodPath}`;
+
+  const cleanName = String(product.name || 'Playnix Toy').trim();
+  const cleanCategory = String(product.category || 'Toys').trim();
+  const displayPrice =
+    typeof options.effectivePrice === 'number' &&
+    isFinite(options.effectivePrice) &&
+    options.effectivePrice > 0
+      ? options.effectivePrice
+      : Number(product.price) || 0;
+  const priceLabel = displayPrice > 0 ? `₹${Math.round(displayPrice)}` : '';
+  const isAvailable = product.available !== false;
+
+  const fullCandidate =
+    cleanCategory && cleanCategory.toLowerCase() !== 'other'
+      ? `${cleanName} (${cleanCategory}) – Playnix`
+      : `${cleanName} – Playnix`;
+  const title =
+    fullCandidate.length <= 68
+      ? fullCandidate
+      : `${truncateAtWordBoundary(cleanName, 54)} – Playnix`;
+
+  const rawDesc = String(product.description || '').replace(/\s+/g, ' ').trim();
+  let description = '';
+  if (rawDesc) {
+    const prefix = priceLabel
+      ? `Buy ${cleanName} for ${priceLabel} at Playnix.`
+      : `Buy ${cleanName} at Playnix.`;
+    description = truncateAtWordBoundary(`${prefix} ${rawDesc}`, 160);
+  } else {
+    const availabilityPhrase = isAvailable
+      ? 'Ready to order online.'
+      : 'Check details on Playnix.';
+    const pricePhrase = priceLabel ? ` priced at ${priceLabel}` : '';
+    const offerPhrase = options.activeOfferTitle ? ` ${options.activeOfferTitle}.` : '';
+    description = truncateAtWordBoundary(
+      `Buy ${cleanName} (${cleanCategory})${pricePhrase} at Playnix.${offerPhrase} ${availabilityPhrase} Affordable toys and creative 3D-printed products.`,
+      160
+    );
+  }
+
+  const images = getCrawlableProductImages(product, origin);
+  const ogImage = images[0];
+  const robots = 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1';
+
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'Product',
+        '@id': `${canonicalUrl}#product`,
+        name: cleanName,
+        description,
+        sku: product.id,
+        url: canonicalUrl,
+        category: cleanCategory,
+        image: images,
+        brand: {
+          '@type': 'Brand',
+          name: 'Playnix',
+        },
+        offers: {
+          '@type': 'Offer',
+          url: canonicalUrl,
+          priceCurrency: 'INR',
+          price: String(displayPrice),
+          availability: isAvailable
+            ? 'https://schema.org/InStock'
+            : 'https://schema.org/OutOfStock',
+          itemCondition: 'https://schema.org/NewCondition',
+          seller: {
+            '@type': 'Organization',
+            name: 'Playnix',
+            url: `${origin}/`,
+          },
+        },
+      },
+      {
+        '@type': 'BreadcrumbList',
+        '@id': `${canonicalUrl}#breadcrumb`,
+        itemListElement: [
+          {
+            '@type': 'ListItem',
+            position: 1,
+            name: 'Playnix Home',
+            item: `${origin}/`,
+          },
+          {
+            '@type': 'ListItem',
+            position: 2,
+            name: cleanName,
+            item: canonicalUrl,
+          },
+        ],
+      },
+    ],
+  };
+
+  return {
+    slug,
+    path: prodPath,
+    canonicalUrl,
+    title,
+    description,
+    ogType: 'product',
+    ogTitle: title,
+    ogDescription: description,
+    ogImage,
+    ogImageAlt: cleanName,
+    robots,
+    images,
+    jsonLd,
+  };
+}
+
+function escapeHtmlAttr(value: string): string {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeJsonLd(obj: unknown): string {
+  return JSON.stringify(obj, null, 2).replace(/</g, '\\u003c');
+}
+
+function replaceMetaOrLink(
+  html: string,
+  pattern: RegExp,
+  replacement: string,
+  fallbackAnchor: string = '</head>'
+): string {
+  if (pattern.test(html)) {
+    return html.replace(pattern, replacement);
+  }
+  return html.replace(fallbackAnchor, `    ${replacement}\n  ${fallbackAnchor}`);
+}
+
+export function injectProductSeoIntoHtml(baseHtml: string, seo: ProductSeoMeta): string {
+  let html = baseHtml;
+
+  const escapedTitle = escapeHtmlAttr(seo.title);
+  const escapedDesc = escapeHtmlAttr(seo.description);
+  const escapedCanonical = escapeHtmlAttr(seo.canonicalUrl);
+  const escapedOgTitle = escapeHtmlAttr(seo.ogTitle);
+  const escapedOgDesc = escapeHtmlAttr(seo.ogDescription);
+  const escapedOgImage = escapeHtmlAttr(seo.ogImage);
+  const escapedOgImageAlt = escapeHtmlAttr(seo.ogImageAlt);
+  const escapedRobots = escapeHtmlAttr(seo.robots);
+
+  html = replaceMetaOrLink(html, /<title>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`);
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="description"[^>]*>/i,
+    `<meta name="description" content="${escapedDesc}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="robots"[^>]*>/i,
+    `<meta name="robots" content="${escapedRobots}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<link\s+rel="canonical"[^>]*>/i,
+    `<link rel="canonical" href="${escapedCanonical}" />`
+  );
+
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:type"[^>]*>/i,
+    `<meta property="og:type" content="${seo.ogType}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:url"[^>]*>/i,
+    `<meta property="og:url" content="${escapedCanonical}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:title"[^>]*>/i,
+    `<meta property="og:title" content="${escapedOgTitle}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:description"[^>]*>/i,
+    `<meta property="og:description" content="${escapedOgDesc}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:image"[^>]*>/i,
+    `<meta property="og:image" content="${escapedOgImage}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+property="og:image:alt"[^>]*>/i,
+    `<meta property="og:image:alt" content="${escapedOgImageAlt}" />`
+  );
+
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="twitter:title"[^>]*>/i,
+    `<meta name="twitter:title" content="${escapedOgTitle}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="twitter:description"[^>]*>/i,
+    `<meta name="twitter:description" content="${escapedOgDesc}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="twitter:image"[^>]*>/i,
+    `<meta name="twitter:image" content="${escapedOgImage}" />`
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="twitter:image:alt"[^>]*>/i,
+    `<meta name="twitter:image:alt" content="${escapedOgImageAlt}" />`
+  );
+
+  const jsonLdScript = `<script id="playnix-product-jsonld" type="application/ld+json">\n${escapeJsonLd(seo.jsonLd)}\n    </script>`;
+  if (/<script[^>]*type="application\/ld\+json"[^>]*>[\s\S]*?<\/script>/i.test(html)) {
+    html = html.replace(
+      /<script[^>]*type="application\/ld\+json"[^>]*>[\s\S]*?<\/script>/i,
+      jsonLdScript
+    );
+  } else {
+    html = html.replace('</head>', `    ${jsonLdScript}\n  </head>`);
+  }
+
+  return html;
+}
+
+export function injectNotFoundSeoIntoHtml(
+  baseHtml: string,
+  requestedSlug: string,
+  origin: string = SITE_BASE_URL
+): string {
+  const cleanOrigin = (origin || SITE_BASE_URL).replace(/\/+$/, '');
+  const cleanUrl = `${cleanOrigin}/products/${encodeURIComponent(requestedSlug)}`;
+  let html = baseHtml;
+  html = replaceMetaOrLink(
+    html,
+    /<title>[\s\S]*?<\/title>/i,
+    '<title>Product Not Found – Playnix</title>'
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="description"[^>]*>/i,
+    '<meta name="description" content="This toy could not be found on Playnix. Browse our catalog of affordable toys and creative 3D-printed products." />'
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<meta\s+name="robots"[^>]*>/i,
+    '<meta name="robots" content="noindex, follow" />'
+  );
+  html = replaceMetaOrLink(
+    html,
+    /<link\s+rel="canonical"[^>]*>/i,
+    `<link rel="canonical" href="${escapeHtmlAttr(cleanUrl)}" />`
+  );
+  return html;
+}
 
 const ROOT_DIR = process.cwd();
 
@@ -330,6 +835,7 @@ interface FirebaseConfigLite {
   projectId: string;
   firestoreDatabaseId: string;
   apiKey: string;
+  appId: string;
 }
 
 function getFirebaseConfigForServer(): FirebaseConfigLite {
@@ -337,6 +843,7 @@ function getFirebaseConfigForServer(): FirebaseConfigLite {
     projectId: 'famous-hook-j3kqt',
     firestoreDatabaseId: 'ai-studio-toynest-c217bca3-03a1-4965-a640-8d7ee4a9c241',
     apiKey: process.env.FIREBASE_WEB_API_KEY || '',
+    appId: process.env.FIREBASE_APP_ID || '',
   };
   try {
     const cfgPath = path.join(ROOT_DIR, 'firebase-applet-config.json');
@@ -346,6 +853,7 @@ function getFirebaseConfigForServer(): FirebaseConfigLite {
         projectId: String(parsed.projectId || fallback.projectId),
         firestoreDatabaseId: String(parsed.firestoreDatabaseId || fallback.firestoreDatabaseId),
         apiKey: String(parsed.apiKey || fallback.apiKey),
+        appId: String(parsed.appId || fallback.appId),
       };
     }
   } catch {}
@@ -426,46 +934,49 @@ export async function loadCatalogProductsForSeo(): Promise<Product[]> {
   try {
     const cfg = getFirebaseConfigForServer();
     if (cfg.projectId && cfg.firestoreDatabaseId) {
-      let pageToken = '';
-      let safetyPages = 0;
+      const params = new URLSearchParams();
+      if (cfg.apiKey) params.set('key', cfg.apiKey);
+      const querySuffix = params.toString() ? `?${params.toString()}` : '';
+      const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        cfg.projectId
+      )}/databases/${encodeURIComponent(
+        cfg.firestoreDatabaseId
+      )}/documents:runQuery${querySuffix}`;
 
-      while (safetyPages < 6) {
-        safetyPages += 1;
-        const params = new URLSearchParams({ pageSize: '300' });
-        if (cfg.apiKey) params.set('key', cfg.apiKey);
-        if (pageToken) params.set('pageToken', pageToken);
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (cfg.appId) {
+        headers['x-firebase-gmpid'] = cfg.appId;
+      }
 
-        const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-          cfg.projectId
-        )}/databases/${encodeURIComponent(
-          cfg.firestoreDatabaseId
-        )}/documents/products?${params.toString()}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'products' }],
+          },
+        }),
+        signal: AbortSignal.timeout(4500),
+      });
 
-        const resp = await fetch(url, {
-          method: 'GET',
-          signal: AbortSignal.timeout(4000),
-        });
-
-        if (!resp.ok) break;
-        const json: any = await resp.json();
-        firestoreSucceeded = true;
-
-        const docs = Array.isArray(json?.documents) ? json.documents : [];
-        for (const docItem of docs) {
-          const docName = String(docItem?.name || '');
-          const docId = docName.split('/').pop() || '';
-          const data = parseFirestoreRestFields(docItem?.fields || {});
-          if (data && data.deleted === true) {
-            deletedIds.add(String(data.id || docId));
-          } else if (data && (data.name || data.id)) {
-            cloudProducts.push(normalizeServerProduct(data, docId));
+      if (resp.ok) {
+        const rows: any = await resp.json();
+        if (Array.isArray(rows)) {
+          firestoreSucceeded = true;
+          for (const row of rows) {
+            const docItem = row?.document;
+            if (!docItem) continue;
+            const docName = String(docItem?.name || '');
+            const docId = docName.split('/').pop() || '';
+            const data = parseFirestoreRestFields(docItem?.fields || {});
+            if (data && data.deleted === true) {
+              deletedIds.add(String(data.id || docId));
+            } else if (data && (data.name || data.id)) {
+              cloudProducts.push(normalizeServerProduct(data, docId));
+            }
           }
-        }
-
-        if (json?.nextPageToken) {
-          pageToken = String(json.nextPageToken);
-        } else {
-          break;
         }
       }
     }
@@ -526,13 +1037,21 @@ async function resolveBuiltIndexHtml(req: express.Request): Promise<string | nul
   }
 
   // On Vercel serverless functions, dist/index.html is served on the CDN at /index.html
+  const candidateOrigins: string[] = [];
   const host = String(req.get('x-forwarded-host') || req.get('host') || '').trim();
   if (host) {
     const proto = String(req.get('x-forwarded-proto') || 'https')
       .split(',')[0]
       .trim();
+    candidateOrigins.push(`${proto}://${host}`);
+  }
+  if (!candidateOrigins.includes(SITE_BASE_URL)) {
+    candidateOrigins.push(SITE_BASE_URL);
+  }
+
+  for (const originUrl of candidateOrigins) {
     try {
-      const cdnResp = await fetch(`${proto}://${host}/index.html`, {
+      const cdnResp = await fetch(`${originUrl}/index.html`, {
         method: 'GET',
         signal: AbortSignal.timeout(4000),
       });
@@ -592,7 +1111,7 @@ app.get('/sitemap.xml', async (_req, res) => {
 });
 
 // Direct Product Page SEO HTML Handler (Production & Vercel SSR Head Injection)
-app.get('/products/:slug', async (req, res, next) => {
+app.get(['/products/:slug', '/products/:slug/'], async (req, res, next) => {
   if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
     return next();
   }

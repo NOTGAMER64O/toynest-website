@@ -2,16 +2,14 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import app, { loadCatalogProductsForSeo } from './api/index.ts';
-import {
+import app, {
   SITE_BASE_URL,
   buildProductSeoMeta,
   findProductBySlugOrId,
-} from './src/utils/productSlug.ts';
-import {
   injectNotFoundSeoIntoHtml,
   injectProductSeoIntoHtml,
-} from './src/utils/productSeoHtml.ts';
+  loadCatalogProductsForSeo,
+} from './api/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,7 +33,7 @@ async function startServer() {
     });
 
     // Inject accurate per-product SEO metadata in dev mode on direct /products/:slug visits or refreshes
-    app.get('/products/:slug', async (req, res, next) => {
+    app.get(['/products/:slug', '/products/:slug/'], async (req, res, next) => {
       try {
         const accept = String(req.headers.accept || '');
         if (!accept.includes('text/html') && accept !== '*/*' && accept !== '') {
