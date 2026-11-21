@@ -3,6 +3,19 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  SITE_BASE_URL,
+  buildProductSeoMeta,
+  findProductBySlugOrId,
+  generateProductSlugForCreate,
+  getCrawlableProductImages,
+  getProductCanonicalUrl,
+} from '../src/utils/productSlug';
+import {
+  escapeHtmlAttr,
+  injectNotFoundSeoIntoHtml,
+  injectProductSeoIntoHtml,
+} from '../src/utils/productSeoHtml';
 
 const ROOT_DIR = process.cwd();
 
@@ -27,6 +40,7 @@ const DB_PATH = process.env.VERCEL
 
 interface Product {
   id: string;
+  slug?: string;
   name: string;
   price: number;
   category: string;
@@ -312,6 +326,304 @@ function computeQueuePositions(orders: Order[], allOrders: Order[] = orders) {
   });
 }
 
+interface FirebaseConfigLite {
+  projectId: string;
+  firestoreDatabaseId: string;
+  apiKey: string;
+}
+
+function getFirebaseConfigForServer(): FirebaseConfigLite {
+  const fallback: FirebaseConfigLite = {
+    projectId: 'famous-hook-j3kqt',
+    firestoreDatabaseId: 'ai-studio-toynest-c217bca3-03a1-4965-a640-8d7ee4a9c241',
+    apiKey: process.env.FIREBASE_WEB_API_KEY || '',
+  };
+  try {
+    const cfgPath = path.join(ROOT_DIR, 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      return {
+        projectId: String(parsed.projectId || fallback.projectId),
+        firestoreDatabaseId: String(parsed.firestoreDatabaseId || fallback.firestoreDatabaseId),
+        apiKey: String(parsed.apiKey || fallback.apiKey),
+      };
+    }
+  } catch {}
+  return fallback;
+}
+
+function parseFirestoreRestValue(val: any): any {
+  if (!val || typeof val !== 'object') return undefined;
+  if ('stringValue' in val) return String(val.stringValue);
+  if ('booleanValue' in val) return Boolean(val.booleanValue);
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return Number(val.doubleValue);
+  if ('timestampValue' in val) return String(val.timestampValue);
+  if ('nullValue' in val) return null;
+  if ('arrayValue' in val) {
+    const arr = Array.isArray(val.arrayValue?.values) ? val.arrayValue.values : [];
+    return arr.map((item: any) => parseFirestoreRestValue(item));
+  }
+  if ('mapValue' in val) {
+    return parseFirestoreRestFields(val.mapValue?.fields || {});
+  }
+  return undefined;
+}
+
+function parseFirestoreRestFields(fields: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(fields || {})) {
+    const parsed = parseFirestoreRestValue(v);
+    if (parsed !== undefined) {
+      result[k] = parsed;
+    }
+  }
+  return result;
+}
+
+function normalizeServerProduct(raw: any, docId: string): Product {
+  const imageUrls =
+    Array.isArray(raw?.imageUrls) && raw.imageUrls.length > 0
+      ? raw.imageUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
+      : raw?.imageUrl
+      ? [String(raw.imageUrl)]
+      : ['/toys/toy-40ba4ba9-1.jpg'];
+
+  const cleanSlug = typeof raw?.slug === 'string' ? raw.slug.trim().toLowerCase() : '';
+
+  return {
+    id: String(raw?.id || docId),
+    ...(cleanSlug ? { slug: cleanSlug } : {}),
+    name: String(raw?.name || '').trim(),
+    price: typeof raw?.price === 'number' ? raw.price : parseFloat(String(raw?.price || 0)) || 0,
+    category: String(raw?.category || 'Other').trim(),
+    description: String(raw?.description || '').trim(),
+    imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
+    imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
+    available: raw?.available === false ? false : true,
+    createdAt: String(raw?.createdAt || new Date().toISOString()),
+  };
+}
+
+let cachedSeoProducts: { products: Product[]; fetchedAt: number } | null = null;
+const SEO_PRODUCTS_CACHE_TTL_MS = 10_000;
+
+export function invalidateSeoProductsCache() {
+  cachedSeoProducts = null;
+}
+
+export async function loadCatalogProductsForSeo(): Promise<Product[]> {
+  const now = Date.now();
+  if (cachedSeoProducts && now - cachedSeoProducts.fetchedAt < SEO_PRODUCTS_CACHE_TTL_MS) {
+    return cachedSeoProducts.products;
+  }
+
+  db = loadDB();
+  const cloudProducts: Product[] = [];
+  const deletedIds = new Set<string>();
+  let firestoreSucceeded = false;
+
+  try {
+    const cfg = getFirebaseConfigForServer();
+    if (cfg.projectId && cfg.firestoreDatabaseId) {
+      let pageToken = '';
+      let safetyPages = 0;
+
+      while (safetyPages < 6) {
+        safetyPages += 1;
+        const params = new URLSearchParams({ pageSize: '300' });
+        if (cfg.apiKey) params.set('key', cfg.apiKey);
+        if (pageToken) params.set('pageToken', pageToken);
+
+        const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          cfg.projectId
+        )}/databases/${encodeURIComponent(
+          cfg.firestoreDatabaseId
+        )}/documents/products?${params.toString()}`;
+
+        const resp = await fetch(url, {
+          method: 'GET',
+          signal: AbortSignal.timeout(4000),
+        });
+
+        if (!resp.ok) break;
+        const json: any = await resp.json();
+        firestoreSucceeded = true;
+
+        const docs = Array.isArray(json?.documents) ? json.documents : [];
+        for (const docItem of docs) {
+          const docName = String(docItem?.name || '');
+          const docId = docName.split('/').pop() || '';
+          const data = parseFirestoreRestFields(docItem?.fields || {});
+          if (data && data.deleted === true) {
+            deletedIds.add(String(data.id || docId));
+          } else if (data && (data.name || data.id)) {
+            cloudProducts.push(normalizeServerProduct(data, docId));
+          }
+        }
+
+        if (json?.nextPageToken) {
+          pageToken = String(json.nextPageToken);
+        } else {
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Firestore REST SEO product fetch fallback:', (err as any)?.message || err);
+  }
+
+  const baseList = firestoreSucceeded ? [...cloudProducts] : [...(db.products || [])];
+  const seenIds = new Set(baseList.map((p) => p.id));
+
+  for (const def of defaultProducts) {
+    if (!seenIds.has(def.id) && !deletedIds.has(def.id)) {
+      baseList.push(def);
+      seenIds.add(def.id);
+    }
+  }
+
+  if (firestoreSucceeded && Array.isArray(db.products)) {
+    for (const localItem of db.products) {
+      if (!seenIds.has(localItem.id) && !deletedIds.has(localItem.id)) {
+        baseList.push(localItem);
+        seenIds.add(localItem.id);
+      }
+    }
+  }
+
+  const sorted = baseList.sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
+
+  cachedSeoProducts = { products: sorted, fetchedAt: now };
+  return sorted;
+}
+
+function resolveRequestOrigin(req: express.Request): string {
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').trim();
+  if (!host || host.includes('localhost') || host.includes('127.0.0.1')) {
+    return SITE_BASE_URL;
+  }
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https')
+    .split(',')[0]
+    .trim();
+  return `${proto}://${host}`;
+}
+
+let cachedBuiltIndexHtml: string | null = null;
+
+async function resolveBuiltIndexHtml(req: express.Request): Promise<string | null> {
+  const distIndexPath = path.join(ROOT_DIR, 'dist/index.html');
+  if (fs.existsSync(distIndexPath)) {
+    try {
+      return fs.readFileSync(distIndexPath, 'utf8');
+    } catch {}
+  }
+
+  if (cachedBuiltIndexHtml) {
+    return cachedBuiltIndexHtml;
+  }
+
+  // On Vercel serverless functions, dist/index.html is served on the CDN at /index.html
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').trim();
+  if (host) {
+    const proto = String(req.get('x-forwarded-proto') || 'https')
+      .split(',')[0]
+      .trim();
+    try {
+      const cdnResp = await fetch(`${proto}://${host}/index.html`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(4000),
+      });
+      if (cdnResp.ok) {
+        const htmlText = await cdnResp.text();
+        if (htmlText && htmlText.includes('<div id="root">')) {
+          cachedBuiltIndexHtml = htmlText;
+          return htmlText;
+        }
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+// Dynamic XML Sitemap containing homepage + all public product pages
+app.get('/sitemap.xml', async (_req, res) => {
+  try {
+    const allProducts = await loadCatalogProductsForSeo();
+    const publicProducts = allProducts.filter((p) => p && p.available !== false);
+    const todayIso = new Date().toISOString().slice(0, 10);
+
+    const urlEntries: string[] = [
+      `  <url>\n    <loc>${SITE_BASE_URL}/</loc>\n    <lastmod>${todayIso}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
+    ];
+
+    for (const product of publicProducts) {
+      const canonicalUrl = getProductCanonicalUrl(product, allProducts, SITE_BASE_URL);
+      const lastModDate = product.createdAt
+        ? new Date(product.createdAt).toISOString().slice(0, 10)
+        : todayIso;
+      const images = getCrawlableProductImages(product, SITE_BASE_URL).slice(0, 4);
+      const imageXml = images
+        .map(
+          (img) =>
+            `\n    <image:image>\n      <image:loc>${escapeHtmlAttr(img)}</image:loc>\n      <image:title>${escapeHtmlAttr(product.name)}</image:title>\n    </image:image>`
+        )
+        .join('');
+
+      urlEntries.push(
+        `  <url>\n    <loc>${escapeHtmlAttr(canonicalUrl)}</loc>\n    <lastmod>${lastModDate}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>${imageXml}\n  </url>`
+      );
+    }
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n${urlEntries.join('\n')}\n</urlset>\n`;
+
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+    return res.status(200).send(xml);
+  } catch (err) {
+    console.error('Dynamic sitemap generation error:', err);
+    const fallbackXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url>\n    <loc>${SITE_BASE_URL}/</loc>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>\n</urlset>\n`;
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    return res.status(200).send(fallbackXml);
+  }
+});
+
+// Direct Product Page SEO HTML Handler (Production & Vercel SSR Head Injection)
+app.get('/products/:slug', async (req, res, next) => {
+  if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
+    return next();
+  }
+
+  try {
+    const baseHtml = await resolveBuiltIndexHtml(req);
+    if (!baseHtml) {
+      return next();
+    }
+
+    const requestedSlug = String(req.params.slug || '').trim();
+    const allProducts = await loadCatalogProductsForSeo();
+    const matched = findProductBySlugOrId(requestedSlug, allProducts);
+    const origin = resolveRequestOrigin(req);
+
+    const renderedHtml = matched
+      ? injectProductSeoIntoHtml(
+          baseHtml,
+          buildProductSeoMeta(matched, allProducts, { origin })
+        )
+      : injectNotFoundSeoIntoHtml(baseHtml, requestedSlug, origin);
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+    return res.status(200).send(renderedHtml);
+  } catch (err) {
+    console.error('Product SEO page render fallback:', err);
+    return next();
+  }
+});
+
 // Health check route
 app.get('/api/health', (_req, res) => {
   const rawKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
@@ -584,7 +896,7 @@ app.post('/api/owner/products/list', (req, res) => {
 });
 
 app.post('/api/owner/products', (req, res) => {
-  const { pin, id, name, price, description, category, images, imageUrl, imageUrls: reqImageUrls, available, createdAt } = req.body;
+  const { pin, id, slug, name, price, description, category, images, imageUrl, imageUrls: reqImageUrls, available, createdAt } = req.body;
   if (!verifyPin(pin)) {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
@@ -618,8 +930,14 @@ app.post('/api/owner/products', (req, res) => {
     });
   }
 
+  const productSlug =
+    typeof slug === 'string' && slug.trim()
+      ? slug.trim().toLowerCase()
+      : generateProductSlugForCreate(name.trim(), db.products, productId);
+
   const newProduct: Product = {
     id: productId,
+    slug: productSlug,
     name: name.trim(),
     price: Number(price),
     description: (description || '').trim(),
@@ -633,12 +951,13 @@ app.post('/api/owner/products', (req, res) => {
   db.products = db.products.filter((p) => p.id !== productId);
   db.products.unshift(newProduct);
   saveDB(db);
+  invalidateSeoProductsCache();
 
   res.json({ success: true, product: newProduct });
 });
 
 app.post('/api/owner/products/update', (req, res) => {
-  const { pin, id, name, price, description, category, available, imageUrl, imageUrls, newImages } = req.body;
+  const { pin, id, slug, name, price, description, category, available, imageUrl, imageUrls, newImages } = req.body;
   if (!verifyPin(pin)) {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
@@ -646,9 +965,14 @@ app.post('/api/owner/products/update', (req, res) => {
   db = loadDB();
   let product = db.products.find((p) => p.id === id);
   if (!product) {
+    const cleanProdName = name ? String(name).trim() : 'Toy';
     product = {
       id,
-      name: name ? String(name).trim() : 'Toy',
+      slug:
+        typeof slug === 'string' && slug.trim()
+          ? slug.trim().toLowerCase()
+          : generateProductSlugForCreate(cleanProdName, db.products, id),
+      name: cleanProdName,
       price: price !== undefined ? Number(price) : 0,
       description: description ? String(description).trim() : '',
       category: category ? String(category).trim() : 'Other',
@@ -663,6 +987,15 @@ app.post('/api/owner/products/update', (req, res) => {
     db.products.unshift(product);
   }
 
+  if (typeof slug === 'string' && slug.trim()) {
+    product.slug = slug.trim().toLowerCase();
+  } else if (!product.slug && name) {
+    product.slug = generateProductSlugForCreate(
+      String(name).trim(),
+      db.products.filter((p) => p.id !== id),
+      id
+    );
+  }
   if (name !== undefined) product.name = name.trim();
   if (price !== undefined) product.price = Number(price);
   if (description !== undefined) product.description = description.trim();
@@ -702,6 +1035,7 @@ app.post('/api/owner/products/update', (req, res) => {
   }
 
   saveDB(db);
+  invalidateSeoProductsCache();
   res.json({ success: true, product });
 });
 
@@ -714,6 +1048,7 @@ app.post('/api/owner/products/delete', (req, res) => {
   db = loadDB();
   db.products = db.products.filter((p) => p.id !== id);
   saveDB(db);
+  invalidateSeoProductsCache();
 
   res.json({ success: true });
 });

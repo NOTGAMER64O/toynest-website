@@ -455,6 +455,15 @@ import {
   OrderSuccessCelebration,
   type OrderCelebrationData,
 } from './components/OrderSuccessCelebration';
+import {
+  SITE_BASE_URL,
+  buildProductSeoMeta,
+  findProductBySlugOrId,
+  generateProductSlugForCreate,
+  getProductPath,
+  getUniqueProductSlug,
+  parseProductSlugFromPath,
+} from './utils/productSlug';
 
 function getStoredColours(): string[] {
   try {
@@ -940,9 +949,27 @@ async function guaranteeSafeImagePayload(imageUrls: string[]): Promise<string[]>
 }
 
 export default function App() {
-  const [page, setPage] = useState<'home' | 'productDetail' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'>('home');
-  const [products, setProducts] = useState<Product[]>(() => getStoredProducts());
-  const [selectedProductForDetail, setSelectedProductForDetail] = useState<Product | null>(null);
+  const initialStoredProducts = useMemo(() => getStoredProducts(), []);
+  const initialUrlSlug = useMemo(
+    () =>
+      typeof window !== 'undefined' ? parseProductSlugFromPath(window.location.pathname) : null,
+    []
+  );
+  const initialUrlMatchedProduct = useMemo(
+    () =>
+      initialUrlSlug ? findProductBySlugOrId(initialUrlSlug, initialStoredProducts) || null : null,
+    [initialUrlSlug, initialStoredProducts]
+  );
+
+  const [products, setProducts] = useState<Product[]>(initialStoredProducts);
+  const [requestedProductSlug, setRequestedProductSlug] = useState<string | null>(initialUrlSlug);
+  const [cloudProductsLoaded, setCloudProductsLoaded] = useState<boolean>(false);
+  const [page, setPage] = useState<
+    'home' | 'productDetail' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'
+  >(() => (initialUrlSlug ? 'productDetail' : 'home'));
+  const [selectedProductForDetail, setSelectedProductForDetail] = useState<Product | null>(
+    initialUrlMatchedProduct
+  );
   const [searchCloudSyncing, setSearchCloudSyncing] = useState<boolean>(false);
   const [lastSearchCloudSyncAt, setLastSearchCloudSyncAt] = useState<number>(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
@@ -3172,21 +3199,177 @@ export default function App() {
     }, 4200);
   };
 
+  const productsRef = useRef<Product[]>(products);
+  productsRef.current = products;
+
+  const navigateToProduct = (prod: Product) => {
+    const slug = getUniqueProductSlug(prod, productsRef.current);
+    const targetPath = `/products/${encodeURIComponent(slug)}`;
+    setRequestedProductSlug(slug);
+    setSelectedProductForDetail(prod);
+    setErrorMessage('');
+    setCheckoutMode(null);
+    setPage('productDetail');
+    if (typeof window !== 'undefined' && window.location.pathname !== targetPath) {
+      window.history.pushState(
+        { page: 'productDetail', productId: prod.id, slug },
+        '',
+        targetPath
+      );
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const navigateToHome = (options: { pushHistory?: boolean } = {}) => {
+    const shouldPush = options.pushHistory !== false;
+    setRequestedProductSlug(null);
+    setSelectedProductForDetail(null);
+    setCheckoutMode(null);
+    setErrorMessage('');
+    setPage('home');
+    if (shouldPush && typeof window !== 'undefined' && window.location.pathname !== '/') {
+      window.history.pushState({ page: 'home' }, '', '/');
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Keep browser Back / Forward buttons in sync with / and /products/:slug
+  useEffect(() => {
+    const handlePopState = () => {
+      const slug = parseProductSlugFromPath(window.location.pathname);
+      if (slug) {
+        const matched = findProductBySlugOrId(slug, productsRef.current);
+        setRequestedProductSlug(slug);
+        setSelectedProductForDetail(matched || null);
+        setCheckoutMode(null);
+        setErrorMessage('');
+        setPage('productDetail');
+      } else {
+        setRequestedProductSlug(null);
+        setSelectedProductForDetail(null);
+        setCheckoutMode(null);
+        setErrorMessage('');
+        setPage('home');
+      }
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Resolve requested product URL slug whenever products load or update from Firestore
+  useEffect(() => {
+    if (!requestedProductSlug) return;
+    const matched = findProductBySlugOrId(requestedProductSlug, products);
+    if (matched) {
+      setSelectedProductForDetail(matched);
+      const canonicalPath = getProductPath(matched, products);
+      if (
+        typeof window !== 'undefined' &&
+        window.location.pathname !== canonicalPath &&
+        parseProductSlugFromPath(window.location.pathname) !== null
+      ) {
+        window.history.replaceState(
+          { page: 'productDetail', productId: matched.id, slug: getUniqueProductSlug(matched, products) },
+          '',
+          canonicalPath
+        );
+      }
+    } else if (cloudProductsLoaded) {
+      setSelectedProductForDetail(null);
+    }
+  }, [requestedProductSlug, products, cloudProductsLoaded]);
+
+  // Keep browser URL clean when user returns to home view via any action
+  useEffect(() => {
+    if (page === 'home' && typeof window !== 'undefined' && window.location.pathname.startsWith('/products/')) {
+      window.history.pushState({ page: 'home' }, '', '/');
+    }
+  }, [page]);
+
+  // Dynamic SEO Head & Structured Data sync (Home vs Individual Product Page)
   useEffect(() => {
     const homeTitle = 'Playnix – Affordable Toys & 3D Printed Products';
     const homeDescription =
       'Playnix – Your trusted online destination for affordable toys, creative 3D-printed products and unique finds. Discover great products at budget-friendly prices with convenient shopping!';
+    const homeCanonical = `${SITE_BASE_URL}/`;
+    const homeImage = `${SITE_BASE_URL}/resources/toynest-logo.png`;
+
+    const setMetaAttr = (selector: string, content: string) => {
+      const el = document.querySelector(selector);
+      if (el) el.setAttribute('content', content);
+    };
+
+    const canonicalEl = document.querySelector('link[rel="canonical"]');
+    const existingProductLd = document.getElementById('playnix-product-jsonld');
+
+    if (page === 'productDetail' && (selectedProductForDetail || requestedProductSlug)) {
+      const liveProd = selectedProductForDetail
+        ? products.find((p) => p.id === selectedProductForDetail.id) || selectedProductForDetail
+        : null;
+
+      if (liveProd) {
+        const activeOffer = activeOffersByProductId.get(liveProd.id);
+        const campaignDiscount = calculateProductDiscount(liveProd, activeDiscountCampaigns);
+        const effectivePrice = activeOffer
+          ? activeOffer.discountedPrice
+          : campaignDiscount.isDiscounted
+          ? campaignDiscount.discountedPrice
+          : liveProd.price;
+
+        const seoMeta = buildProductSeoMeta(liveProd, products, {
+          effectivePrice,
+          activeOfferTitle: activeOffer?.title,
+          origin: SITE_BASE_URL,
+        });
+
+        document.title = seoMeta.title;
+        setMetaAttr('meta[name="description"]', seoMeta.description);
+        setMetaAttr('meta[name="robots"]', seoMeta.robots);
+        if (canonicalEl) canonicalEl.setAttribute('href', seoMeta.canonicalUrl);
+        setMetaAttr('meta[property="og:type"]', 'product');
+        setMetaAttr('meta[property="og:url"]', seoMeta.canonicalUrl);
+        setMetaAttr('meta[property="og:title"]', seoMeta.ogTitle);
+        setMetaAttr('meta[property="og:description"]', seoMeta.ogDescription);
+        setMetaAttr('meta[property="og:image"]', seoMeta.ogImage);
+        setMetaAttr('meta[property="og:image:alt"]', seoMeta.ogImageAlt);
+        setMetaAttr('meta[name="twitter:title"]', seoMeta.ogTitle);
+        setMetaAttr('meta[name="twitter:description"]', seoMeta.ogDescription);
+        setMetaAttr('meta[name="twitter:image"]', seoMeta.ogImage);
+        setMetaAttr('meta[name="twitter:image:alt"]', seoMeta.ogImageAlt);
+
+        const scriptEl =
+          existingProductLd ||
+          (() => {
+            const created = document.createElement('script');
+            created.id = 'playnix-product-jsonld';
+            created.type = 'application/ld+json';
+            document.head.appendChild(created);
+            return created;
+          })();
+        scriptEl.textContent = JSON.stringify(seoMeta.jsonLd);
+        return;
+      }
+
+      // Product not found or still resolving
+      document.title = cloudProductsLoaded
+        ? 'Product Not Found – Playnix'
+        : 'Loading Product – Playnix';
+      setMetaAttr('meta[name="robots"]', 'noindex, follow');
+      if (existingProductLd) existingProductLd.remove();
+      return;
+    }
+
+    if (existingProductLd) {
+      existingProductLd.remove();
+    }
 
     let nextTitle = homeTitle;
     let nextDescription = homeDescription;
     let nextRobots = 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1';
 
-    if (page === 'productDetail' && selectedProductForDetail) {
-      nextTitle = `${selectedProductForDetail.name} – Playnix`;
-      if (selectedProductForDetail.description?.trim()) {
-        nextDescription = `${selectedProductForDetail.name} at Playnix – ${selectedProductForDetail.description.trim().slice(0, 130)}`;
-      }
-    } else if (page === 'myOrders') {
+    if (page === 'myOrders') {
       nextTitle = 'My Orders – Playnix';
     } else if (page === 'buy') {
       nextTitle = 'Checkout – Playnix';
@@ -3197,11 +3380,28 @@ export default function App() {
     }
 
     document.title = nextTitle;
-    const descEl = document.querySelector('meta[name="description"]');
-    if (descEl) descEl.setAttribute('content', nextDescription);
-    const robotsEl = document.querySelector('meta[name="robots"]');
-    if (robotsEl) robotsEl.setAttribute('content', nextRobots);
-  }, [page, selectedProductForDetail]);
+    setMetaAttr('meta[name="description"]', nextDescription);
+    setMetaAttr('meta[name="robots"]', nextRobots);
+    if (canonicalEl) canonicalEl.setAttribute('href', homeCanonical);
+    setMetaAttr('meta[property="og:type"]', 'website');
+    setMetaAttr('meta[property="og:url"]', homeCanonical);
+    setMetaAttr('meta[property="og:title"]', nextTitle);
+    setMetaAttr('meta[property="og:description"]', nextDescription);
+    setMetaAttr('meta[property="og:image"]', homeImage);
+    setMetaAttr('meta[property="og:image:alt"]', homeTitle);
+    setMetaAttr('meta[name="twitter:title"]', nextTitle);
+    setMetaAttr('meta[name="twitter:description"]', nextDescription);
+    setMetaAttr('meta[name="twitter:image"]', homeImage);
+    setMetaAttr('meta[name="twitter:image:alt"]', homeTitle);
+  }, [
+    page,
+    selectedProductForDetail,
+    requestedProductSlug,
+    products,
+    cloudProductsLoaded,
+    activeOffersByProductId,
+    activeDiscountCampaigns,
+  ]);
 
   useEffect(() => {
     loadPaymentQr();
@@ -3212,6 +3412,7 @@ export default function App() {
     let unsubProducts = () => {};
     try {
       unsubProducts = subscribeToProducts((cloudProds) => {
+        setCloudProductsLoaded(true);
         if (Array.isArray(cloudProds) && cloudProds.length > 0) {
           setProducts(cloudProds);
           saveStoredProducts(cloudProds);
@@ -3219,8 +3420,21 @@ export default function App() {
       });
     } catch (err) {
       console.warn('Real-time products subscription error:', err);
-      loadProducts();
+      void loadProducts().finally(() => setCloudProductsLoaded(true));
     }
+
+    // Ensure direct URL visits settle cloudProductsLoaded reliably even if onSnapshot delays
+    void fetchProductsFromCloud()
+      .then((cloudProds) => {
+        if (Array.isArray(cloudProds) && cloudProds.length > 0) {
+          setProducts(cloudProds);
+          saveStoredProducts(cloudProds);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setCloudProductsLoaded(true);
+      });
 
     let unsubColours = () => {};
     try {
@@ -4241,8 +4455,17 @@ export default function App() {
         // Guarantee payload is safely under Firestore limit
         finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
+        const stableSlug =
+          existing?.slug ||
+          generateProductSlugForCreate(
+            existing?.name || cleanName,
+            products.filter((p) => p.id !== editingProductId),
+            editingProductId
+          );
+
         const updatedItem: Product = {
           id: editingProductId,
+          slug: stableSlug,
           name: cleanName,
           price: cleanPrice,
           description: productForm.description.trim(),
@@ -4298,8 +4521,10 @@ export default function App() {
       finalImageUrls = await guaranteeSafeImagePayload(finalImageUrls);
 
       const productId = `toy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      const productSlug = generateProductSlugForCreate(cleanName, products, productId);
       const newProduct: Product = {
         id: productId,
+        slug: productSlug,
         name: cleanName,
         price: cleanPrice,
         description: productForm.description.trim(),
@@ -5940,11 +6165,7 @@ export default function App() {
 
         <button
           className="brand"
-          onClick={() => {
-            setPage('home');
-            setCheckoutMode(null);
-            setErrorMessage('');
-          }}
+          onClick={() => navigateToHome()}
         >
           <span className="brand-icon">
             <img
@@ -6083,11 +6304,8 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setPage('home');
-                  setCheckoutMode(null);
-                  setErrorMessage('');
                   setIsSideMenuOpen(false);
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                  navigateToHome();
                 }}
               >
                 <Boxes size={19} /> Home
@@ -6660,12 +6878,7 @@ export default function App() {
               <HeroToyShowcase
                 products={products}
                 isHomeVisible={page === 'home'}
-                onSelectProduct={(prod) => {
-                  setSelectedProductForDetail(prod);
-                  setErrorMessage('');
-                  setPage('productDetail');
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
+                onSelectProduct={(prod) => navigateToProduct(prod)}
               />
             </section>
 
@@ -6811,14 +7024,26 @@ export default function App() {
                             {eligibleProducts.slice(0, 6).map((p) => {
                               const discountInfo = calculateProductDiscount(p, [currentCamp]);
                               const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl || '/toys/toy-40ba4ba9-1.jpg';
+                              const productHref = getProductPath(p, products);
 
                               return (
                                 <article className="festival-product-card" key={`fest_${p.id}`}>
                                   <span className="festival-card-badge">
                                     {discountInfo.discountLabel}
                                   </span>
-                                  <img src={firstImg} alt={p.name} className="festival-card-image" loading="lazy" />
-                                  <h5 className="festival-card-title">{p.name}</h5>
+                                  <a
+                                    href={productHref}
+                                    className="festival-card-product-link"
+                                    onClick={(e) => {
+                                      if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                                        e.preventDefault();
+                                        navigateToProduct(p);
+                                      }
+                                    }}
+                                  >
+                                    <img src={firstImg} alt={p.name} className="festival-card-image" loading="lazy" />
+                                    <h5 className="festival-card-title">{p.name}</h5>
+                                  </a>
                                   <div className="festival-card-pricing">
                                     <span className="festival-final-price">{da(discountInfo.discountedPrice)}</span>
                                     <span className="festival-original-price">{da(p.price)}</span>
@@ -7114,12 +7339,7 @@ export default function App() {
                 activeDiscountCampaigns={activeDiscountCampaigns}
                 isSyncingCloud={searchCloudSyncing}
                 onEnsureCloudProducts={() => void ensureCloudProductsForSearch()}
-                onSelectProduct={(prod) => {
-                  setSelectedProductForDetail(prod);
-                  setErrorMessage('');
-                  setPage('productDetail');
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
+                onSelectProduct={(prod) => navigateToProduct(prod)}
                 formatCurrency={da}
               />
 
@@ -7238,10 +7458,35 @@ export default function App() {
                               </div>
                             ) : null}
 
-                            <h3>{p.name}</h3>
+                            <h3>
+                              <a
+                                href={getProductPath(p, products)}
+                                className="product-title-link"
+                                onClick={(e) => {
+                                  if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                                    e.preventDefault();
+                                    navigateToProduct(p);
+                                  }
+                                }}
+                              >
+                                {p.name}
+                              </a>
+                            </h3>
                             <p className="product-desc">
                               {p.description || 'A fun new friend for playtime.'}
                             </p>
+                            <a
+                              href={getProductPath(p, products)}
+                              className="product-card-detail-link"
+                              onClick={(e) => {
+                                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                                  e.preventDefault();
+                                  navigateToProduct(p);
+                                }
+                              }}
+                            >
+                              View product details →
+                            </a>
                             <div className="product-bottom">
                               {hasDiscount ? (
                                 <div>
@@ -7309,49 +7554,79 @@ export default function App() {
           </>
         )}
 
-        {/* PRODUCT DETAIL VIEW (opened from Search results) */}
-        {page === 'productDetail' && selectedProductForDetail && (
-          <CustomerProductDetail
-            product={products.find((p) => p.id === selectedProductForDetail.id) || selectedProductForDetail}
-            activeOffer={activeOffersByProductId.get(selectedProductForDetail.id)}
-            activeDiscountCampaigns={activeDiscountCampaigns}
-            currentTime={currentTime}
-            onBack={() => {
-              setPage('home');
-              setErrorMessage('');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            onBuyNow={(prod, activeOffer) => {
-              if (activeOffer) {
-                setSelectedOfferForBuy(activeOffer);
-              } else {
-                setSelectedOfferForBuy(null);
-              }
-              setSelectedProductForBuy(prod);
-              setSelectedDealForBuy(null);
-              setOrderQuantity(1);
-              setCheckoutMode(null);
-              setCheckoutForm({
-                name: '',
-                studentClass: '',
-                section: '',
-                phone: '',
-                address: '',
-                note: '',
-                colour: '',
-              });
-              setErrorMessage('');
-              setPage('buy');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            onAddToCart={(prod, activeOffer) => {
-              void handleAddToCart(prod, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
-            }}
-            formatCurrency={da}
-            customerId={customerId}
-            defaultCustomerName={guestProvidedName}
-            onCustomerNameProvided={associateCheckoutNameWithGuestCart}
-          />
+        {/* INDIVIDUAL PRODUCT DETAIL PAGE (/products/:slug) */}
+        {page === 'productDetail' && (
+          selectedProductForDetail ? (
+            <CustomerProductDetail
+              product={products.find((p) => p.id === selectedProductForDetail.id) || selectedProductForDetail}
+              activeOffer={activeOffersByProductId.get(selectedProductForDetail.id)}
+              activeDiscountCampaigns={activeDiscountCampaigns}
+              currentTime={currentTime}
+              onBack={() => navigateToHome()}
+              onBuyNow={(prod, activeOffer) => {
+                if (activeOffer) {
+                  setSelectedOfferForBuy(activeOffer);
+                } else {
+                  setSelectedOfferForBuy(null);
+                }
+                setSelectedProductForBuy(prod);
+                setSelectedDealForBuy(null);
+                setOrderQuantity(1);
+                setCheckoutMode(null);
+                setCheckoutForm({
+                  name: '',
+                  studentClass: '',
+                  section: '',
+                  phone: '',
+                  address: '',
+                  note: '',
+                  colour: '',
+                });
+                setErrorMessage('');
+                setPage('buy');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              onAddToCart={(prod, activeOffer) => {
+                void handleAddToCart(prod, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
+              }}
+              formatCurrency={da}
+              customerId={customerId}
+              defaultCustomerName={guestProvidedName}
+              onCustomerNameProvided={associateCheckoutNameWithGuestCart}
+            />
+          ) : (
+            <section className="form-page product-detail-page" aria-label="Product lookup">
+              <div className="product-not-found-card">
+                {!cloudProductsLoaded ? (
+                  <>
+                    <div className="empty-icon">🧸</div>
+                    <h1>Loading toy details…</h1>
+                    <p>Fetching the latest product information from Playnix.</p>
+                  </>
+                ) : (
+                  <>
+                    <div className="empty-icon">🔍</div>
+                    <h1>Toy not found</h1>
+                    <p>
+                      We couldn&apos;t find a product at this URL. It may have been removed or renamed.
+                    </p>
+                    <a
+                      href="/"
+                      className="primary-btn"
+                      onClick={(e) => {
+                        if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                          e.preventDefault();
+                          navigateToHome();
+                        }
+                      }}
+                    >
+                      <ArrowLeft size={16} /> Back to Playnix shop
+                    </a>
+                  </>
+                )}
+              </div>
+            </section>
+          )
         )}
 
         {/* SUGGESTIONS VIEW */}
@@ -11718,6 +11993,23 @@ export default function App() {
                     </div>
                     <h2>{galleryProduct.name}</h2>
                     <p>{galleryProduct.description || 'A fun new friend for playtime.'}</p>
+                    <a
+                      href={getProductPath(galleryProduct, products)}
+                      className="product-card-detail-link"
+                      style={{ marginTop: '4px', marginBottom: '2px' }}
+                      onClick={(e) => {
+                        if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                          e.preventDefault();
+                          const targetProd = galleryProduct;
+                          setIsGalleryZoomOpen(false);
+                          setGalleryAskTrigger(0);
+                          setGalleryProduct(null);
+                          navigateToProduct(targetProd);
+                        }
+                      }}
+                    >
+                      Open full product page →
+                    </a>
                     <div className="gallery-footer">
                       <strong>{da(galleryProduct.price)}</strong>
                       <div className="gallery-footer-actions">

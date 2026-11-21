@@ -79,6 +79,7 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
     setIsFullScreenOpen(true);
   };
 
+  const isAvailable = product.available !== false;
   const campaignDiscount = calculateProductDiscount(product, activeDiscountCampaigns);
   const matchedCampaign = campaignDiscount.campaignId
     ? activeDiscountCampaigns.find((c) => c.id === campaignDiscount.campaignId)
@@ -97,9 +98,38 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
 
   return (
     <section className="form-page product-detail-page" aria-label={`${product.name} details`}>
-      <button className="back-link" type="button" onClick={onBack}>
-        <ArrowLeft size={16} /> Back to shop
-      </button>
+      <div className="product-detail-nav-bar">
+        <a
+          href="/"
+          className="back-link"
+          onClick={(e) => {
+            if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+              e.preventDefault();
+              onBack();
+            }
+          }}
+        >
+          <ArrowLeft size={16} /> Back to shop
+        </a>
+
+        <nav className="product-detail-breadcrumb" aria-label="Breadcrumb">
+          <a
+            href="/"
+            onClick={(e) => {
+              if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                e.preventDefault();
+                onBack();
+              }
+            }}
+          >
+            Home
+          </a>
+          <span aria-hidden="true">/</span>
+          <span>{product.category || 'Toys'}</span>
+          <span aria-hidden="true">/</span>
+          <span className="breadcrumb-current">{product.name}</span>
+        </nav>
+      </div>
 
       <div className="product-detail-card">
         {/* Left: Product Image Showcase */}
@@ -213,7 +243,17 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
         {/* Right: Product Info & Actions */}
         <div className="product-detail-info">
           <div className="product-detail-meta-row">
-            <span className="product-category">{product.category || 'Other'}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span className="product-category">{product.category || 'Other'}</span>
+              <span
+                className={`product-detail-availability ${
+                  isAvailable ? 'is-in-stock' : 'is-out-of-stock'
+                }`}
+              >
+                <span className="availability-dot" aria-hidden="true" />
+                {isAvailable ? 'In Stock · Available' : 'Currently Unavailable'}
+              </span>
+            </div>
             {urls.length > 1 && (
               <span className="gallery-counter">
                 PHOTO {imageIndex + 1} OF {urls.length}
@@ -267,6 +307,21 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
             <h3>About this toy</h3>
             <p>{product.description || 'A fun new friend for playtime.'}</p>
 
+            <dl className="product-detail-specs">
+              <div>
+                <dt>Category</dt>
+                <dd>{product.category || 'Other'}</dd>
+              </div>
+              <div>
+                <dt>Availability</dt>
+                <dd>{isAvailable ? 'In Stock (Ready to order)' : 'Currently Unavailable'}</dd>
+              </div>
+              <div>
+                <dt>Photos</dt>
+                <dd>{urls.length > 0 ? `${urls.length} photo${urls.length === 1 ? '' : 's'}` : 'Preview ready'}</dd>
+              </div>
+            </dl>
+
             {Array.isArray(product.highlights) && product.highlights.length > 0 && (
               <div className="product-detail-highlights">
                 <h4>Key Highlights</h4>
@@ -282,19 +337,28 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
             )}
           </div>
 
+          {!isAvailable && (
+            <p className="product-detail-unavailable-note">
+              This toy is temporarily out of stock or paused by the shop owner. Check back soon or browse more toys in the shop.
+            </p>
+          )}
+
           <div className="product-detail-actions">
             <button
               type="button"
               className="primary-btn product-detail-buy-btn"
-              onClick={() => onBuyNow(product, activeOffer)}
+              disabled={!isAvailable}
+              onClick={() => isAvailable && onBuyNow(product, activeOffer)}
             >
               <ShoppingBag size={17} />
-              {hasDiscount ? 'Grab Deal' : 'Buy now'}
+              {!isAvailable ? 'Unavailable' : hasDiscount ? 'Grab Deal' : 'Buy now'}
             </button>
             <button
               type="button"
               className={`secondary-btn product-detail-cart-btn ${justAdded ? 'is-just-added' : ''}`}
+              disabled={!isAvailable}
               onClick={() => {
+                if (!isAvailable) return;
                 onAddToCart(product, activeOffer);
                 setJustAdded(true);
                 window.setTimeout(() => setJustAdded(false), 1100);

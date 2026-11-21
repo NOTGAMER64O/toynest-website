@@ -497,8 +497,11 @@ function normalizeProductData(data: any, docId: string): Product {
     : ['/toys/toy-40ba4ba9-1.jpg'];
   const highlights = sanitizeProductHighlights(data.highlights);
 
+  const cleanSlug = typeof data.slug === 'string' ? data.slug.trim().toLowerCase() : '';
+
   return {
     id: data.id || docId,
+    ...(cleanSlug ? { slug: cleanSlug } : {}),
     name: String(data.name || '').trim(),
     price: typeof data.price === 'number' ? data.price : parseFloat(data.price) || 0,
     category: String(data.category || 'Other').trim(),
@@ -652,6 +655,9 @@ export async function saveProductToCloud(product: Product): Promise<void> {
 
     const cleanData = {
       id: product.id,
+      ...(typeof product.slug === 'string' && product.slug.trim()
+        ? { slug: product.slug.trim().toLowerCase() }
+        : {}),
       name: String(product.name || '').trim(),
       price: typeof product.price === 'number' ? product.price : parseFloat(String(product.price)) || 0,
       category: String(product.category || 'Other').trim(),

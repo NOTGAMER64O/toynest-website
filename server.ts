@@ -2,7 +2,16 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import app from './api/index.ts';
+import app, { loadCatalogProductsForSeo } from './api/index.ts';
+import {
+  SITE_BASE_URL,
+  buildProductSeoMeta,
+  findProductBySlugOrId,
+} from './src/utils/productSlug.ts';
+import {
+  injectNotFoundSeoIntoHtml,
+  injectProductSeoIntoHtml,
+} from './src/utils/productSeoHtml.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +33,35 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa',
     });
+
+    // Inject accurate per-product SEO metadata in dev mode on direct /products/:slug visits or refreshes
+    app.get('/products/:slug', async (req, res, next) => {
+      try {
+        const accept = String(req.headers.accept || '');
+        if (!accept.includes('text/html') && accept !== '*/*' && accept !== '') {
+          return next();
+        }
+        const rawTemplate = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+        const transformed = await vite.transformIndexHtml(req.originalUrl, rawTemplate);
+
+        const requestedSlug = String(req.params.slug || '').trim();
+        const allProducts = await loadCatalogProductsForSeo();
+        const matched = findProductBySlugOrId(requestedSlug, allProducts);
+
+        const html = matched
+          ? injectProductSeoIntoHtml(
+              transformed,
+              buildProductSeoMeta(matched, allProducts, { origin: SITE_BASE_URL })
+            )
+          : injectNotFoundSeoIntoHtml(transformed, requestedSlug, SITE_BASE_URL);
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.status(200).send(html);
+      } catch (err) {
+        return next(err);
+      }
+    });
+
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, 'dist')));
