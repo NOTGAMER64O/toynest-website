@@ -1,4 +1,4 @@
-import { type ProductSeoMeta, SITE_BASE_URL } from './productSlug';
+import { type ProductSeoMeta, SITE_BASE_URL } from './productSlug.ts';
 
 export function escapeHtmlAttr(value: string): string {
   return String(value || '')

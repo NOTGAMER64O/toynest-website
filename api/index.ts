@@ -10,12 +10,12 @@ import {
   generateProductSlugForCreate,
   getCrawlableProductImages,
   getProductCanonicalUrl,
-} from '../src/utils/productSlug';
+} from '../src/utils/productSlug.ts';
 import {
   escapeHtmlAttr,
   injectNotFoundSeoIntoHtml,
   injectProductSeoIntoHtml,
-} from '../src/utils/productSeoHtml';
+} from '../src/utils/productSeoHtml.ts';
 
 const ROOT_DIR = process.cwd();
 

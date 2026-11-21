@@ -7027,7 +7027,15 @@ export default function App() {
                               const productHref = getProductPath(p, products);
 
                               return (
-                                <article className="festival-product-card" key={`fest_${p.id}`}>
+                                <article
+                                  className="festival-product-card"
+                                  key={`fest_${p.id}`}
+                                  style={{ cursor: 'pointer' }}
+                                  onClick={() => {
+                                    if (window.getSelection()?.toString().trim()) return;
+                                    navigateToProduct(p);
+                                  }}
+                                >
                                   <span className="festival-card-badge">
                                     {discountInfo.discountLabel}
                                   </span>
@@ -7035,6 +7043,7 @@ export default function App() {
                                     href={productHref}
                                     className="festival-card-product-link"
                                     onClick={(e) => {
+                                      e.stopPropagation();
                                       if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
                                         e.preventDefault();
                                         navigateToProduct(p);
@@ -7054,7 +7063,8 @@ export default function App() {
                                   <button
                                     type="button"
                                     className="festival-card-buy-btn"
-                                    onClick={() => {
+                                    onClick={(e) => {
+                                      e.stopPropagation();
                                       setSelectedProductForBuy(p);
                                       setSelectedDealForBuy(null);
                                       setSelectedOfferForBuy(null);
@@ -7396,6 +7406,8 @@ export default function App() {
                         originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
                       const isJustAdded = justAddedProductId === p.id;
 
+                      const productHref = getProductPath(p, products);
+
                       return (
                         <article
                           className="product-card product-card-reveal"
@@ -7405,16 +7417,22 @@ export default function App() {
                               '--reveal-delay': `${Math.min(idx % 6, 5) * 45}ms`,
                             } as React.CSSProperties
                           }
+                          onClick={() => {
+                            if (window.getSelection()?.toString().trim()) return;
+                            navigateToProduct(p);
+                          }}
                         >
                           <div className="product-media-wrap">
-                            <button
-                              type="button"
+                            <a
+                              href={productHref}
                               className="product-image product-image-button"
-                              aria-label={`View photos and details for ${p.name}`}
-                              onClick={() => {
-                                setGalleryAskTrigger(0);
-                                setGalleryProduct(p);
-                                setGalleryImageIndex(0);
+                              aria-label={`View details and photos for ${p.name}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                                  e.preventDefault();
+                                  navigateToProduct(p);
+                                }
                               }}
                             >
                               {firstImg ? (
@@ -7442,7 +7460,7 @@ export default function App() {
                               <span className="product-badge">
                                 {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
                               </span>
-                            </button>
+                            </a>
                           </div>
 
                           <div className="product-info">
@@ -7460,9 +7478,10 @@ export default function App() {
 
                             <h3>
                               <a
-                                href={getProductPath(p, products)}
+                                href={productHref}
                                 className="product-title-link"
                                 onClick={(e) => {
+                                  e.stopPropagation();
                                   if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
                                     e.preventDefault();
                                     navigateToProduct(p);
@@ -7475,18 +7494,6 @@ export default function App() {
                             <p className="product-desc">
                               {p.description || 'A fun new friend for playtime.'}
                             </p>
-                            <a
-                              href={getProductPath(p, products)}
-                              className="product-card-detail-link"
-                              onClick={(e) => {
-                                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                                  e.preventDefault();
-                                  navigateToProduct(p);
-                                }
-                              }}
-                            >
-                              View product details →
-                            </a>
                             <div className="product-bottom">
                               {hasDiscount ? (
                                 <div>
@@ -7508,7 +7515,8 @@ export default function App() {
                                   style={{ padding: '8px 11px', borderRadius: '10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   title="Add to cart"
                                   aria-label={`Add ${p.name} to cart`}
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     void handleAddToCart(p, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
                                   }}
                                 >
@@ -7517,7 +7525,8 @@ export default function App() {
                                 <button
                                   className="buy-btn"
                                   style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     if (activeOffer) {
                                       setSelectedOfferForBuy(activeOffer);
                                     } else {
@@ -11993,23 +12002,6 @@ export default function App() {
                     </div>
                     <h2>{galleryProduct.name}</h2>
                     <p>{galleryProduct.description || 'A fun new friend for playtime.'}</p>
-                    <a
-                      href={getProductPath(galleryProduct, products)}
-                      className="product-card-detail-link"
-                      style={{ marginTop: '4px', marginBottom: '2px' }}
-                      onClick={(e) => {
-                        if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                          e.preventDefault();
-                          const targetProd = galleryProduct;
-                          setIsGalleryZoomOpen(false);
-                          setGalleryAskTrigger(0);
-                          setGalleryProduct(null);
-                          navigateToProduct(targetProd);
-                        }
-                      }}
-                    >
-                      Open full product page →
-                    </a>
                     <div className="gallery-footer">
                       <strong>{da(galleryProduct.price)}</strong>
                       <div className="gallery-footer-actions">

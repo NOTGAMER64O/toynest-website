@@ -243,17 +243,7 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
         {/* Right: Product Info & Actions */}
         <div className="product-detail-info">
           <div className="product-detail-meta-row">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-              <span className="product-category">{product.category || 'Other'}</span>
-              <span
-                className={`product-detail-availability ${
-                  isAvailable ? 'is-in-stock' : 'is-out-of-stock'
-                }`}
-              >
-                <span className="availability-dot" aria-hidden="true" />
-                {isAvailable ? 'In Stock · Available' : 'Currently Unavailable'}
-              </span>
-            </div>
+            <span className="product-category">{product.category || 'Other'}</span>
             {urls.length > 1 && (
               <span className="gallery-counter">
                 PHOTO {imageIndex + 1} OF {urls.length}
@@ -311,10 +301,6 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
               <div>
                 <dt>Category</dt>
                 <dd>{product.category || 'Other'}</dd>
-              </div>
-              <div>
-                <dt>Availability</dt>
-                <dd>{isAvailable ? 'In Stock (Ready to order)' : 'Currently Unavailable'}</dd>
               </div>
               <div>
                 <dt>Photos</dt>
