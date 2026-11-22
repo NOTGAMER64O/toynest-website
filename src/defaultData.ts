@@ -10,6 +10,8 @@ export interface Product {
   imageUrls: string[];
   available: boolean;
   createdAt: string;
+  photoCount?: number;
+  isSummaryOnly?: boolean;
 }
 
 export type OrderRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';

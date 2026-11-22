@@ -238,17 +238,27 @@ export const CustomerProductDetail: React.FC<CustomerProductDetailProps> = ({
               ))}
             </div>
           )}
+
+          {product.isSummaryOnly && (product.photoCount ?? 1) > urls.length && (
+            <div className="product-detail-gallery-loading" role="status" aria-live="polite">
+              Loading {product.photoCount} gallery photos…
+            </div>
+          )}
         </div>
 
         {/* Right: Product Info & Actions */}
         <div className="product-detail-info">
           <div className="product-detail-meta-row">
             <span className="product-category">{product.category || 'Other'}</span>
-            {urls.length > 1 && (
+            {urls.length > 1 ? (
               <span className="gallery-counter">
                 PHOTO {imageIndex + 1} OF {urls.length}
               </span>
-            )}
+            ) : product.isSummaryOnly && (product.photoCount ?? 1) > 1 ? (
+              <span className="gallery-counter">
+                {product.photoCount} PHOTOS
+              </span>
+            ) : null}
           </div>
 
           <h1 className="product-detail-title">{product.name}</h1>

@@ -914,7 +914,7 @@ function normalizeServerProduct(raw: any, docId: string): Product {
 }
 
 let cachedSeoProducts: { products: Product[]; fetchedAt: number } | null = null;
-const SEO_PRODUCTS_CACHE_TTL_MS = 10_000;
+const SEO_PRODUCTS_CACHE_TTL_MS = 300_000;
 
 export function invalidateSeoProductsCache() {
   cachedSeoProducts = null;
@@ -955,10 +955,24 @@ export async function loadCatalogProductsForSeo(): Promise<Product[]> {
         headers,
         body: JSON.stringify({
           structuredQuery: {
+            select: {
+              fields: [
+                { fieldPath: 'id' },
+                { fieldPath: 'slug' },
+                { fieldPath: 'name' },
+                { fieldPath: 'price' },
+                { fieldPath: 'category' },
+                { fieldPath: 'description' },
+                { fieldPath: 'imageUrl' },
+                { fieldPath: 'available' },
+                { fieldPath: 'createdAt' },
+                { fieldPath: 'deleted' },
+              ],
+            },
             from: [{ collectionId: 'products' }],
           },
         }),
-        signal: AbortSignal.timeout(4500),
+        signal: AbortSignal.timeout(6000),
       });
 
       if (resp.ok) {
@@ -984,6 +998,10 @@ export async function loadCatalogProductsForSeo(): Promise<Product[]> {
     console.warn('Firestore REST SEO product fetch fallback:', (err as any)?.message || err);
   }
 
+  if (!firestoreSucceeded && cachedSeoProducts && cachedSeoProducts.products.length > 0) {
+    return cachedSeoProducts.products;
+  }
+
   const baseList = firestoreSucceeded ? [...cloudProducts] : [...(db.products || [])];
   const seenIds = new Set(baseList.map((p) => p.id));
 
@@ -1007,7 +1025,9 @@ export async function loadCatalogProductsForSeo(): Promise<Product[]> {
     (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
-  cachedSeoProducts = { products: sorted, fetchedAt: now };
+  if (firestoreSucceeded || !cachedSeoProducts) {
+    cachedSeoProducts = { products: sorted, fetchedAt: now };
+  }
   return sorted;
 }
 

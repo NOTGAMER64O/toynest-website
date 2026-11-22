@@ -8,6 +8,9 @@ import {
 import {
   getFirestore,
   initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  memoryLocalCache,
   type FirestoreSettings,
   collection,
   doc,
@@ -19,6 +22,8 @@ import {
   query,
   where,
   orderBy,
+  limit,
+  startAfter,
   onSnapshot,
   updateDoc,
   deleteDoc,
@@ -60,6 +65,7 @@ import {
   isRegisteredCustomerId,
 } from './defaultData';
 import { smartSearchProducts } from './utils/smartSearch';
+import { findProductBySlugOrId } from './utils/productSlug';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
@@ -68,14 +74,29 @@ function createFirestoreInstance() {
     return initializeFirestore(
       app,
       {
-        experimentalForceLongPolling: true,
-        useFetchStreams: false,
+        localCache:
+          typeof window !== 'undefined' && typeof indexedDB !== 'undefined'
+            ? persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+            : memoryLocalCache(),
+        experimentalAutoDetectLongPolling: true,
         ignoreUndefinedProperties: true,
-      } as FirestoreSettings & { useFetchStreams?: boolean },
+      } as FirestoreSettings,
       firebaseConfig.firestoreDatabaseId
     );
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    try {
+      return initializeFirestore(
+        app,
+        {
+          localCache: memoryLocalCache(),
+          experimentalAutoDetectLongPolling: true,
+          ignoreUndefinedProperties: true,
+        } as FirestoreSettings,
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch {
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
   }
 }
 
@@ -154,16 +175,123 @@ export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): any
   return clean;
 }
 
-function isOfflineOrTransientError(error: unknown): boolean {
+export function isOfflineOrTransientError(error: unknown): boolean {
   const code = typeof (error as any)?.code === 'string' ? (error as any).code : '';
+  const status = Number((error as any)?.status || 0);
   const message = error instanceof Error ? error.message : String(error || '');
   return (
+    status === 429 ||
+    status === 503 ||
     code === 'unavailable' ||
     code === 'failed-precondition' ||
+    code === 'resource-exhausted' ||
+    code === 'deadline-exceeded' ||
+    code === 'aborted' ||
     message.includes('the client is offline') ||
     message.includes('Failed to get document because the client is offline') ||
-    message.includes('Could not reach Cloud Firestore backend')
+    message.includes('Could not reach Cloud Firestore backend') ||
+    message.includes('Quota limit exceeded') ||
+    message.includes('RESOURCE_EXHAUSTED') ||
+    message.includes('timed out') ||
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError')
   );
+}
+
+const DEFAULT_FIRESTORE_TIMEOUT_MS = 10000;
+
+export async function withFirestoreTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number = DEFAULT_FIRESTORE_TIMEOUT_MS,
+  label: string = 'Firestore request'
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`${label} timed out after ${timeoutMs}ms`);
+          (err as any).code = 'deadline-exceeded';
+          reject(err);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+// ----------------- IN-FLIGHT DEDUP & SHORT-TTL CACHE -----------------
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const responseCache = new Map<string, CacheEntry<any>>();
+const inFlightRequests = new Map<string, Promise<any>>();
+
+function getCachedValue<T>(key: string): T | null {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    responseCache.delete(key);
+    return null;
+  }
+  return entry.data as T;
+}
+
+function setCachedValue<T>(key: string, data: T, ttlMs: number): void {
+  if (ttlMs <= 0) return;
+  responseCache.set(key, {
+    data,
+    expiresAt: Date.now() + ttlMs,
+  });
+}
+
+export function invalidateFirestoreCache(prefix?: string): void {
+  if (!prefix) {
+    responseCache.clear();
+    return;
+  }
+  for (const k of Array.from(responseCache.keys())) {
+    if (k === prefix || k.startsWith(prefix)) {
+      responseCache.delete(k);
+    }
+  }
+}
+
+async function dedupedCachedFetch<T>(
+  key: string,
+  ttlMs: number,
+  forceRefresh: boolean,
+  fetcher: () => Promise<T>
+): Promise<T> {
+  if (!forceRefresh) {
+    const cached = getCachedValue<T>(key);
+    if (cached !== null) {
+      return cached;
+    }
+  }
+
+  const inflightKey = forceRefresh ? `${key}::force` : key;
+  const existingPromise = inFlightRequests.get(inflightKey);
+  if (existingPromise) {
+    return existingPromise as Promise<T>;
+  }
+
+  const runPromise = (async () => {
+    try {
+      const result = await fetcher();
+      setCachedValue(key, result, ttlMs);
+      return result;
+    } finally {
+      inFlightRequests.delete(inflightKey);
+    }
+  })();
+
+  inFlightRequests.set(inflightKey, runPromise);
+  return runPromise;
 }
 
 function parseFirestoreRestValue(val: any): any {
@@ -197,28 +325,94 @@ function parseFirestoreRestFields(fields: Record<string, any>): Record<string, a
 
 async function fetchFirestoreDocViaRest(collectionName: string, docId: string): Promise<Record<string, any> | null> {
   try {
-    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
-    const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (!json || !json.fields) return null;
-    return parseFirestoreRestFields(json.fields);
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+    try {
+      const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        signal: controller ? controller.signal : undefined,
+      });
+      if (!res.ok) return null;
+      const json = await res.json();
+      if (!json || !json.fields) return null;
+      return parseFirestoreRestFields(json.fields);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   } catch {
     return null;
   }
 }
 
-// Initial connection test
+async function runFirestoreStructuredQueryViaRest(
+  structuredQuery: Record<string, any>,
+  timeoutMs: number = 9000
+): Promise<Array<{ id: string; fields: Record<string, any> }>> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery }),
+      signal: controller ? controller.signal : undefined,
+    });
+    if (!res.ok) {
+      const err: any = new Error(`Firestore REST runQuery HTTP ${res.status}`);
+      err.status = res.status;
+      if (res.status === 429) err.code = 'resource-exhausted';
+      throw err;
+    }
+    const rows = (await res.json()) as any[];
+    if (!Array.isArray(rows)) return [];
+    const results: Array<{ id: string; fields: Record<string, any> }> = [];
+    for (const row of rows) {
+      if (!row?.document?.name || !row?.document?.fields) continue;
+      const parts = String(row.document.name).split('/');
+      const docId = parts[parts.length - 1] || '';
+      results.push({
+        id: docId,
+        fields: parseFirestoreRestFields(row.document.fields),
+      });
+    }
+    return results;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+function buildSettingsFromRaw(data: Record<string, any>): StoreSettings {
+  return {
+    adultPublished: data.adultPublished !== false,
+    childPublished: data.childPublished !== false,
+    paymentQrUrl: data.paymentQrUrl || '',
+    manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
+    moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
+    filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
+    filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
+  };
+}
+
+// Initial connection test — also primes settings cache so startup avoids duplicate reads
 export async function testConnection() {
   try {
-    await getDocFromServer(doc(db, 'settings', 'store_config'));
+    const snap = await withFirestoreTimeout(
+      getDocFromServer(doc(db, 'settings', 'store_config')),
+      7000,
+      'testConnection'
+    );
+    if (snap.exists()) {
+      setCachedValue('settings:store_config', buildSettingsFromRaw(snap.data()), 60000);
+    }
   } catch (error) {
     if (!isOfflineOrTransientError(error)) {
       console.warn('Firestore connection check warning:', error);
     }
   }
 }
-testConnection();
+void testConnection();
 
 // Compute queue positions relative to all active orders
 export function computeQueue(orders: Order[]): Order[] {
@@ -248,6 +442,8 @@ export function computeQueue(orders: Order[]): Order[] {
 // ----------------- ORDERS -----------------
 export async function saveOrderToCloud(order: Order): Promise<void> {
   const path = `orders/${order.id}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     const payload = sanitizeForFirestore({
       ...order,
@@ -275,27 +471,37 @@ export async function fetchCustomerOrdersByIds(orderIds: string[]): Promise<Orde
   return results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
-export async function fetchCustomerOrdersFromCloud(customerId: string): Promise<Order[]> {
+export async function fetchCustomerOrdersFromCloud(
+  customerId: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<Order[]> {
+  if (!customerId) return [];
   const path = `orders (customerId: ${customerId})`;
-  try {
-    const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
-    const snapshot = await getDocs(q);
-    const userOrders: Order[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data() as Order;
-      if (!data.customerDeleted) {
-        userOrders.push(data);
+  return dedupedCachedFetch(`customerOrders:${customerId}`, 15000, Boolean(options.forceRefresh), async () => {
+    try {
+      const q = query(collection(db, 'orders'), where('customerId', '==', customerId));
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(q) : getDocs(q),
+        10000,
+        'fetchCustomerOrdersFromCloud'
+      );
+      const userOrders: Order[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data() as Order;
+        if (!data.customerDeleted) {
+          userOrders.push(data);
+        }
+      });
+      return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    } catch (err) {
+      if (isOfflineOrTransientError(err)) {
+        console.warn('Customer orders fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  } catch (err) {
-    if (isOfflineOrTransientError(err)) {
-      console.warn('Customer orders fetch skipped while offline.');
+      handleFirestoreError(err, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(err, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToCustomerOrders(
@@ -328,26 +534,36 @@ export function subscribeToCustomerOrders(
   }
 }
 
-export async function fetchAllOrdersFromCloud(): Promise<Order[]> {
+export async function fetchAllOrdersFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<Order[]> {
   const path = 'orders';
-  try {
-    const snapshot = await getDocs(collection(db, 'orders'));
-    const orders: Order[] = [];
-    snapshot.forEach((d) => {
-      orders.push(d.data() as Order);
-    });
+  return dedupedCachedFetch('allOrders', 15000, Boolean(options.forceRefresh), async () => {
+    try {
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh
+          ? getDocsFromServer(collection(db, 'orders'))
+          : getDocs(collection(db, 'orders')),
+        12000,
+        'fetchAllOrdersFromCloud'
+      );
+      const orders: Order[] = [];
+      snapshot.forEach((d) => {
+        orders.push(d.data() as Order);
+      });
 
-    return computeQueue(orders).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Orders list fetch skipped while offline.');
+      return computeQueue(orders).sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Orders list fetch skipped while offline/rate-limited.');
+        return [];
+      }
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToAllOrders(callback: (orders: Order[]) => void): () => void {
@@ -375,6 +591,8 @@ export function subscribeToAllOrders(callback: (orders: Order[]) => void): () =>
 
 export async function updateOrderStatusInCloud(orderId: string, updates: Partial<Order>): Promise<void> {
   const path = `orders/${orderId}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await updateDoc(
       doc(db, 'orders', orderId),
@@ -395,6 +613,8 @@ export async function submitCustomerOrderClarificationInCloud(
   optionalContactUpdates?: { phone?: string; address?: string; studentClass?: string; section?: string }
 ): Promise<void> {
   const path = `orders/${orderId}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await updateDoc(
       doc(db, 'orders', orderId),
@@ -416,6 +636,8 @@ export async function submitCustomerOrderClarificationInCloud(
 
 export async function updateCustomerOrderNoteInCloud(orderId: string, note: string): Promise<void> {
   const path = `orders/${orderId}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await updateDoc(doc(db, 'orders', orderId), {
       note: String(note || '').trim(),
@@ -428,6 +650,8 @@ export async function updateCustomerOrderNoteInCloud(orderId: string, note: stri
 
 export async function deleteOrderFromCloud(orderId: string): Promise<void> {
   const path = `orders/${orderId}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await deleteDoc(doc(db, 'orders', orderId));
   } catch (error) {
@@ -437,6 +661,8 @@ export async function deleteOrderFromCloud(orderId: string): Promise<void> {
 
 export async function markOrderDeletedByCustomerInCloud(orderId: string): Promise<void> {
   const path = `orders/${orderId}`;
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await updateDoc(doc(db, 'orders', orderId), {
       customerDeleted: true,
@@ -489,7 +715,11 @@ function sanitizeProductHighlights(raw: unknown): string[] {
     .slice(0, 6);
 }
 
-function normalizeProductData(data: any, docId: string): Product {
+function normalizeProductData(
+  data: any,
+  docId: string,
+  options: { isSummaryOnly?: boolean } = {}
+): Product {
   const imageUrls = Array.isArray(data.imageUrls) && data.imageUrls.length > 0
     ? data.imageUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
     : data.imageUrl
@@ -498,6 +728,10 @@ function normalizeProductData(data: any, docId: string): Product {
   const highlights = sanitizeProductHighlights(data.highlights);
 
   const cleanSlug = typeof data.slug === 'string' ? data.slug.trim().toLowerCase() : '';
+  const photoCount =
+    typeof data.photoCount === 'number' && isFinite(data.photoCount) && data.photoCount > 0
+      ? Math.round(data.photoCount)
+      : imageUrls.length;
 
   return {
     id: data.id || docId,
@@ -511,53 +745,363 @@ function normalizeProductData(data: any, docId: string): Product {
     imageUrls: imageUrls.length > 0 ? imageUrls : ['/toys/toy-40ba4ba9-1.jpg'],
     available: data.available === false ? false : true,
     createdAt: data.createdAt || new Date().toISOString(),
+    photoCount,
+    ...(options.isSummaryOnly ? { isSummaryOnly: true } : {}),
   };
 }
 
-export async function fetchProductsFromCloud(): Promise<Product[]> {
-  const path = 'products';
-  try {
-    let snapshot;
+const PRODUCT_SUMMARY_SELECT_FIELDS = [
+  { fieldPath: 'id' },
+  { fieldPath: 'slug' },
+  { fieldPath: 'name' },
+  { fieldPath: 'price' },
+  { fieldPath: 'category' },
+  { fieldPath: 'description' },
+  { fieldPath: 'highlights' },
+  { fieldPath: 'imageUrl' },
+  { fieldPath: 'photoCount' },
+  { fieldPath: 'available' },
+  { fieldPath: 'createdAt' },
+  { fieldPath: 'deleted' },
+];
+
+export interface ProductPageResult {
+  products: Product[];
+  hasMore: boolean;
+  nextCursorCreatedAt: string | null;
+  degradedOffline?: boolean;
+}
+
+/**
+ * Fetches a paginated slice of lightweight product summaries (cover image only,
+ * omitting heavy base64 gallery arrays) sorted newest-first using Firestore's
+ * built-in single-field `createdAt` index (zero composite indexes required).
+ * Falls back cleanly to SDK cache (`getDocs`) and DEFAULT_PRODUCTS on transient/quota errors.
+ */
+export async function fetchProductsPageFromCloud(
+  options: {
+    pageSize?: number;
+    cursorCreatedAt?: string | null;
+    forceRefresh?: boolean;
+  } = {}
+): Promise<ProductPageResult> {
+  const pageSize = Math.max(4, Math.min(36, options.pageSize || 12));
+  const cursor = options.cursorCreatedAt || null;
+  const cacheKey = `products:page:${pageSize}:${cursor || 'first'}`;
+
+  return dedupedCachedFetch(cacheKey, 60000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'products'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'products'));
-    }
-
-    const list: Product[] = [];
-    const deletedIds = new Set<string>();
-    snapshot.forEach((d) => {
-      const data = d.data() as any;
-      if (data && data.deleted === true) {
-        deletedIds.add(data.id || d.id);
-      } else if (data && (data.name || data.id)) {
-        list.push(normalizeProductData(data, d.id));
+      const structuredQuery: Record<string, any> = {
+        from: [{ collectionId: 'products' }],
+        select: { fields: PRODUCT_SUMMARY_SELECT_FIELDS },
+        orderBy: [{ field: { fieldPath: 'createdAt' }, direction: 'DESCENDING' }],
+        limit: pageSize + 1,
+      };
+      if (cursor) {
+        structuredQuery.startAt = {
+          values: [{ stringValue: cursor }],
+          before: false,
+        };
       }
-    });
 
-    // Merge default products that have not been explicitly modified or deleted
-    const cloudIds = new Set(list.map((p) => p.id));
-    const merged = [...list];
-    for (const def of DEFAULT_PRODUCTS) {
-      if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
-        merged.push(def);
+      const rows = await runFirestoreStructuredQueryViaRest(structuredQuery, 9000);
+      const hasMore = rows.length > pageSize;
+      const slicedRows = hasMore ? rows.slice(0, pageSize) : rows;
+      const lastRaw = slicedRows[slicedRows.length - 1];
+      const nextCursorCreatedAt =
+        hasMore && lastRaw?.fields?.createdAt ? String(lastRaw.fields.createdAt) : null;
+
+      const list: Product[] = [];
+      const deletedIds = new Set<string>();
+      for (const row of slicedRows) {
+        const data = row.fields;
+        if (data && data.deleted === true) {
+          deletedIds.add(String(data.id || row.id));
+        } else if (data && (data.name || data.id)) {
+          list.push(normalizeProductData(data, row.id, { isSummaryOnly: true }));
+        }
+      }
+
+      if (!hasMore && !cursor) {
+        const cloudIds = new Set(list.map((p) => p.id));
+        for (const def of DEFAULT_PRODUCTS) {
+          if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+            list.push(def);
+          }
+        }
+      } else if (!hasMore && cursor) {
+        const cloudIds = new Set(list.map((p) => p.id));
+        for (const def of DEFAULT_PRODUCTS) {
+          if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+            list.push(def);
+          }
+        }
+      }
+
+      return {
+        products: list.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        ),
+        hasMore,
+        nextCursorCreatedAt,
+      };
+    } catch (restError) {
+      // Fallback to Firestore Web SDK cache/network query
+      try {
+        const baseRef = collection(db, 'products');
+        const q = cursor
+          ? query(baseRef, orderBy('createdAt', 'desc'), startAfter(cursor), limit(pageSize + 1))
+          : query(baseRef, orderBy('createdAt', 'desc'), limit(pageSize + 1));
+        const snapshot = await withFirestoreTimeout(
+          options.forceRefresh ? getDocsFromServer(q) : getDocs(q),
+          9000,
+          'fetchProductsPageFromCloud'
+        );
+
+        const docs = snapshot.docs;
+        const hasMore = docs.length > pageSize;
+        const slicedDocs = hasMore ? docs.slice(0, pageSize) : docs;
+        const lastDoc = slicedDocs[slicedDocs.length - 1];
+        const nextCursorCreatedAt =
+          hasMore && lastDoc?.data()?.createdAt ? String(lastDoc.data().createdAt) : null;
+
+        const list: Product[] = [];
+        const deletedIds = new Set<string>();
+        for (const d of slicedDocs) {
+          const data = d.data() as any;
+          if (data && data.deleted === true) {
+            deletedIds.add(data.id || d.id);
+          } else if (data && (data.name || data.id)) {
+            list.push(normalizeProductData(data, d.id, { isSummaryOnly: false }));
+          }
+        }
+
+        if (!hasMore) {
+          const cloudIds = new Set(list.map((p) => p.id));
+          for (const def of DEFAULT_PRODUCTS) {
+            if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+              list.push(def);
+            }
+          }
+        }
+
+        return {
+          products: list.sort(
+            (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+          ),
+          hasMore,
+          nextCursorCreatedAt,
+        };
+      } catch (sdkErr) {
+        if (isOfflineOrTransientError(sdkErr) || isOfflineOrTransientError(restError)) {
+          console.warn('Products page fetch degraded gracefully while offline/rate-limited.');
+          return {
+            products: cursor
+              ? []
+              : [...DEFAULT_PRODUCTS].sort(
+                  (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+                ),
+            hasMore: false,
+            nextCursorCreatedAt: null,
+            degradedOffline: true,
+          };
+        }
+        throw sdkErr;
       }
     }
+  });
+}
 
-    return merged.sort(
-      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-    );
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Firestore products fetch skipped while offline; using default catalog.');
-      return [...DEFAULT_PRODUCTS].sort(
+/**
+ * Fetches lightweight summaries for all products (no multi-image arrays) — ideal for
+ * category filtering, search expansion, and dynamic slug resolution (~80% smaller than full collection).
+ */
+export async function fetchAllProductSummariesFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<Product[]> {
+  return dedupedCachedFetch('products:summaries_all', 60000, Boolean(options.forceRefresh), async () => {
+    try {
+      const rows = await runFirestoreStructuredQueryViaRest(
+        {
+          from: [{ collectionId: 'products' }],
+          select: { fields: PRODUCT_SUMMARY_SELECT_FIELDS },
+          limit: 200,
+        },
+        10000
+      );
+
+      const list: Product[] = [];
+      const deletedIds = new Set<string>();
+      for (const row of rows) {
+        const data = row.fields;
+        if (data && data.deleted === true) {
+          deletedIds.add(String(data.id || row.id));
+        } else if (data && (data.name || data.id)) {
+          list.push(normalizeProductData(data, row.id, { isSummaryOnly: true }));
+        }
+      }
+
+      const cloudIds = new Set(list.map((p) => p.id));
+      for (const def of DEFAULT_PRODUCTS) {
+        if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+          list.push(def);
+        }
+      }
+
+      return list.sort(
         (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
       );
+    } catch {
+      return fetchProductsFromCloud(options);
     }
-    console.error('Firestore products fetch error:', error);
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
+  });
+}
+
+/**
+ * Fetches a single full product document (including full gallery `imageUrls`) by ID.
+ * Uses Firestore SDK `getDoc` so IndexedDB cache hits instantaneously on repeat views.
+ */
+export async function fetchProductByIdFromCloud(
+  productId: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<Product | null> {
+  if (!productId) return null;
+  const cacheKey = `products:detail:${productId}`;
+  return dedupedCachedFetch(cacheKey, 120000, Boolean(options.forceRefresh), async () => {
+    try {
+      const snap = await withFirestoreTimeout(
+        options.forceRefresh
+          ? getDocFromServer(doc(db, 'products', productId))
+          : getDoc(doc(db, 'products', productId)),
+        9000,
+        `fetchProductByIdFromCloud(${productId})`
+      );
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        if (data?.deleted === true) return null;
+        return normalizeProductData(data, snap.id, { isSummaryOnly: false });
+      }
+    } catch (err) {
+      if (isOfflineOrTransientError(err)) {
+        const restData = await fetchFirestoreDocViaRest('products', productId);
+        if (restData && restData.deleted !== true) {
+          return normalizeProductData(restData, productId, { isSummaryOnly: false });
+        }
+      }
+    }
+    const def = DEFAULT_PRODUCTS.find((p) => p.id === productId);
+    return def || null;
+  });
+}
+
+/**
+ * Resolves a product from a clean URL slug or document ID efficiently (single-doc or lightweight
+ * slug query first; falls back to lightweight summary scan only if needed), then hydrates its
+ * single full product document for gallery images.
+ */
+export async function fetchProductBySlugOrIdFromCloud(
+  slugOrId: string,
+  existingProducts: Product[] = []
+): Promise<Product | null> {
+  const cleanTarget = String(slugOrId || '').trim();
+  if (!cleanTarget) return null;
+
+  const localMatch = findProductBySlugOrId(cleanTarget, existingProducts);
+  if (localMatch) {
+    if (!localMatch.isSummaryOnly) return localMatch;
+    const full = await fetchProductByIdFromCloud(localMatch.id);
+    return full || localMatch;
   }
+
+  // 1. Try direct ID lookup if target matches doc ID format or already exists as ID
+  try {
+    const directSnap = await withFirestoreTimeout(
+      getDoc(doc(db, 'products', cleanTarget)),
+      7000,
+      'directProductLookup'
+    );
+    if (directSnap.exists()) {
+      const data = directSnap.data() as any;
+      if (data?.deleted !== true) {
+        return normalizeProductData(data, directSnap.id, { isSummaryOnly: false });
+      }
+    }
+  } catch {}
+
+  // 2. Try indexed single-field `slug` equality query (0 composite index required)
+  const normalizedSlug = cleanTarget.toLowerCase();
+  try {
+    const slugQ = query(collection(db, 'products'), where('slug', '==', normalizedSlug), limit(1));
+    const slugSnap = await withFirestoreTimeout(getDocs(slugQ), 7000, 'slugLookup');
+    if (!slugSnap.empty) {
+      const d = slugSnap.docs[0];
+      const data = d.data() as any;
+      if (data?.deleted !== true) {
+        return normalizeProductData(data, d.id, { isSummaryOnly: false });
+      }
+    }
+  } catch {}
+
+  // 3. Fallback: lightweight projected summary scan (no multi-photo bloat), then hydrate single doc
+  try {
+    const summaries = await fetchAllProductSummariesFromCloud();
+    const matched = findProductBySlugOrId(cleanTarget, summaries);
+    if (!matched) return null;
+    const full = await fetchProductByIdFromCloud(matched.id);
+    return full || matched;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchProductsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<Product[]> {
+  const path = 'products';
+  return dedupedCachedFetch('products:all', 60000, Boolean(options.forceRefresh), async () => {
+    try {
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh
+          ? getDocsFromServer(collection(db, 'products'))
+          : getDocs(collection(db, 'products')),
+        12000,
+        'fetchProductsFromCloud'
+      );
+
+      const list: Product[] = [];
+      const deletedIds = new Set<string>();
+      snapshot.forEach((d) => {
+        const data = d.data() as any;
+        if (data && data.deleted === true) {
+          deletedIds.add(data.id || d.id);
+        } else if (data && (data.name || data.id)) {
+          list.push(normalizeProductData(data, d.id, { isSummaryOnly: false }));
+        }
+      });
+
+      const cloudIds = new Set(list.map((p) => p.id));
+      const merged = [...list];
+      for (const def of DEFAULT_PRODUCTS) {
+        if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+          merged.push(def);
+        }
+      }
+
+      return merged.sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Firestore products fetch skipped while offline/rate-limited; using cached/default catalog.');
+        return [...DEFAULT_PRODUCTS].sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+      }
+      console.error('Firestore products fetch error:', error);
+      handleFirestoreError(error, OperationType.LIST, path);
+      return [];
+    }
+  });
 }
 
 export function subscribeToProducts(callback: (products: Product[]) => void): () => void {
@@ -572,7 +1116,7 @@ export function subscribeToProducts(callback: (products: Product[]) => void): ()
           if (data && data.deleted === true) {
             deletedIds.add(data.id || d.id);
           } else if (data && (data.name || data.id)) {
-            list.push(normalizeProductData(data, d.id));
+            list.push(normalizeProductData(data, d.id, { isSummaryOnly: false }));
           }
         });
 
@@ -587,6 +1131,7 @@ export function subscribeToProducts(callback: (products: Product[]) => void): ()
         const sorted = merged.sort(
           (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
         );
+        setCachedValue('products:all', sorted, 60000);
         callback(sorted);
       },
       (error) => {
@@ -607,24 +1152,23 @@ export function filterAndRankProducts(products: Product[], rawQuery: string): Pr
 }
 
 export async function searchProductsFromCloud(rawQuery: string): Promise<Product[]> {
-  const allProducts = await fetchProductsFromCloud();
+  const allProducts = await fetchAllProductSummariesFromCloud();
   return filterAndRankProducts(allProducts, rawQuery);
 }
 
 export async function updateProductAvailabilityInCloud(productId: string, available: boolean): Promise<void> {
   const path = `products/${productId}`;
   const isAvailable = Boolean(available);
+  invalidateFirestoreCache('products:');
   try {
     await updateDoc(doc(db, 'products', productId), {
       available: isAvailable,
       updatedAt: new Date().toISOString(),
     });
-    // Server confirmation
     try {
       await getDocFromServer(doc(db, 'products', productId));
     } catch {}
   } catch (error) {
-    // If the doc did not exist in cloud yet (e.g., toggling a seed default product), create it
     const def = DEFAULT_PRODUCTS.find((p) => p.id === productId);
     if (def) {
       await setDoc(doc(db, 'products', productId), {
@@ -644,6 +1188,7 @@ export async function updateProductAvailabilityInCloud(productId: string, availa
 
 export async function saveProductToCloud(product: Product): Promise<void> {
   const path = `products/${product.id}`;
+  invalidateFirestoreCache('products:');
   try {
     const imageUrls = Array.isArray(product.imageUrls) && product.imageUrls.length > 0
       ? product.imageUrls.filter((u) => typeof u === 'string' && u.trim().length > 0)
@@ -665,6 +1210,7 @@ export async function saveProductToCloud(product: Product): Promise<void> {
       highlights,
       imageUrl: imageUrls[0] || '/toys/toy-40ba4ba9-1.jpg',
       imageUrls: imageUrls,
+      photoCount: imageUrls.length,
       available: product.available === false ? false : true,
       createdAt: product.createdAt || new Date().toISOString(),
       deleted: false,
@@ -673,7 +1219,6 @@ export async function saveProductToCloud(product: Product): Promise<void> {
 
     await setDoc(doc(db, 'products', product.id), cleanData);
 
-    // CRITICAL: Explicitly verify the write reached and exists on the Firestore server
     const verifySnap = await getDocFromServer(doc(db, 'products', product.id));
     if (!verifySnap.exists()) {
       throw new Error(`Server verification failed: product ${product.id} could not be confirmed in Firestore.`);
@@ -685,6 +1230,7 @@ export async function saveProductToCloud(product: Product): Promise<void> {
 
 export async function deleteProductFromCloud(productId: string): Promise<void> {
   const path = `products/${productId}`;
+  invalidateFirestoreCache('products:');
   try {
     await setDoc(
       doc(db, 'products', productId),
@@ -722,52 +1268,45 @@ function parseFilamentCostPerGram(raw: any): number | null {
   return null;
 }
 
-export async function fetchSettingsFromCloud(): Promise<StoreSettings> {
+export async function fetchSettingsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<StoreSettings> {
   const path = 'settings/store_config';
-  try {
-    const snap = await getDoc(doc(db, 'settings', 'store_config'));
-    if (snap.exists()) {
-      const data = snap.data();
-      return {
-        adultPublished: data.adultPublished !== false,
-        childPublished: data.childPublished !== false,
-        paymentQrUrl: data.paymentQrUrl || '',
-        manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
-        moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
-        filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
-        filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
-      };
-    }
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      const restData = await fetchFirestoreDocViaRest('settings', 'store_config');
-      if (restData) {
-        return {
-          adultPublished: restData.adultPublished !== false,
-          childPublished: restData.childPublished !== false,
-          paymentQrUrl: restData.paymentQrUrl || '',
-          manualMoneyAdjustment: typeof restData.manualMoneyAdjustment === 'number' ? restData.manualMoneyAdjustment : 0,
-          moneyAdjustmentHistory: Array.isArray(restData.moneyAdjustmentHistory) ? restData.moneyAdjustmentHistory : [],
-          filamentCostPerGram: parseFilamentCostPerGram(restData.filamentCostPerGram),
-          filamentCostUpdatedAt: typeof restData.filamentCostUpdatedAt === 'string' ? restData.filamentCostUpdatedAt : undefined,
-        };
+  return dedupedCachedFetch('settings:store_config', 60000, Boolean(options.forceRefresh), async () => {
+    try {
+      const ref = doc(db, 'settings', 'store_config');
+      const snap = await withFirestoreTimeout(
+        options.forceRefresh ? getDocFromServer(ref) : getDoc(ref),
+        8000,
+        'fetchSettingsFromCloud'
+      );
+      if (snap.exists()) {
+        return buildSettingsFromRaw(snap.data());
       }
-      throw error;
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        const restData = await fetchFirestoreDocViaRest('settings', 'store_config');
+        if (restData) {
+          return buildSettingsFromRaw(restData);
+        }
+        throw error;
+      }
+      handleFirestoreError(error, OperationType.GET, path);
     }
-    handleFirestoreError(error, OperationType.GET, path);
-  }
-  return {
-    adultPublished: true,
-    childPublished: true,
-    paymentQrUrl: '',
-    manualMoneyAdjustment: 0,
-    moneyAdjustmentHistory: [],
-    filamentCostPerGram: null,
-  };
+    return {
+      adultPublished: true,
+      childPublished: true,
+      paymentQrUrl: '',
+      manualMoneyAdjustment: 0,
+      moneyAdjustmentHistory: [],
+      filamentCostPerGram: null,
+    };
+  });
 }
 
 export async function saveSettingsToCloud(updates: Partial<StoreSettings>): Promise<void> {
   const path = 'settings/store_config';
+  invalidateFirestoreCache('settings:');
   try {
     const payload = sanitizeForFirestore(updates);
     await setDoc(doc(db, 'settings', 'store_config'), payload, { merge: true });
@@ -782,16 +1321,9 @@ export function subscribeToSettings(callback: (settings: StoreSettings) => void)
       doc(db, 'settings', 'store_config'),
       (snapshot) => {
         if (snapshot.exists()) {
-          const data = snapshot.data();
-          callback({
-            adultPublished: data.adultPublished !== false,
-            childPublished: data.childPublished !== false,
-            paymentQrUrl: data.paymentQrUrl || '',
-            manualMoneyAdjustment: typeof data.manualMoneyAdjustment === 'number' ? data.manualMoneyAdjustment : 0,
-            moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
-            filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
-            filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
-          });
+          const parsed = buildSettingsFromRaw(snapshot.data());
+          setCachedValue('settings:store_config', parsed, 60000);
+          callback(parsed);
         }
       },
       (error) => {
@@ -804,31 +1336,41 @@ export function subscribeToSettings(callback: (settings: StoreSettings) => void)
 }
 
 // ----------------- COLOUR MANAGEMENT -----------------
-export async function fetchColoursFromCloud(): Promise<string[]> {
+export async function fetchColoursFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<string[]> {
   const path = 'settings/colours';
-  try {
-    const snap = await getDoc(doc(db, 'settings', 'colours'));
-    if (snap.exists()) {
-      const data = snap.data();
-      if (Array.isArray(data.list)) {
-        return data.list.map(String).filter(Boolean);
+  return dedupedCachedFetch('settings:colours', 120000, Boolean(options.forceRefresh), async () => {
+    try {
+      const ref = doc(db, 'settings', 'colours');
+      const snap = await withFirestoreTimeout(
+        options.forceRefresh ? getDocFromServer(ref) : getDoc(ref),
+        8000,
+        'fetchColoursFromCloud'
+      );
+      if (snap.exists()) {
+        const data = snap.data();
+        if (Array.isArray(data.list)) {
+          return data.list.map(String).filter(Boolean);
+        }
       }
-    }
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      const restData = await fetchFirestoreDocViaRest('settings', 'colours');
-      if (restData && Array.isArray(restData.list)) {
-        return restData.list.map(String).filter(Boolean);
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        const restData = await fetchFirestoreDocViaRest('settings', 'colours');
+        if (restData && Array.isArray(restData.list)) {
+          return restData.list.map(String).filter(Boolean);
+        }
+        throw error;
       }
-      throw error;
+      handleFirestoreError(error, OperationType.GET, path);
     }
-    handleFirestoreError(error, OperationType.GET, path);
-  }
-  return [];
+    return [];
+  });
 }
 
 export async function saveColoursToCloud(colours: string[]): Promise<void> {
   const path = 'settings/colours';
+  invalidateFirestoreCache('settings:colours');
   try {
     await setDoc(
       doc(db, 'settings', 'colours'),
@@ -968,45 +1510,48 @@ export function normalizeRescueDealData(data: any, docId: string): RescueDeal {
   };
 }
 
-export async function fetchRescueDealsFromCloud(): Promise<RescueDeal[]> {
-  const path = 'rescueDeals';
-  try {
-    let snapshot;
+export async function fetchRescueDealsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<RescueDeal[]> {
+  return dedupedCachedFetch('rescueDeals:all', 30000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'rescueDeals'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'rescueDeals'));
-    }
+      const ref = collection(db, 'rescueDeals');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        9000,
+        'fetchRescueDealsFromCloud'
+      );
 
-    const list: RescueDeal[] = [];
-    const deletedIds = new Set<string>(getStoredDeletedRescueDealIds());
+      const list: RescueDeal[] = [];
+      const deletedIds = new Set<string>(getStoredDeletedRescueDealIds());
 
-    snapshot.forEach((d) => {
-      const data = d.data() as any;
-      if (data && (data.deleted === true || data.status === 'deleted')) {
-        deletedIds.add(data.id || d.id);
-        markRescueDealDeletedLocally(data.id || d.id);
-      } else if (data && (data.title || data.name || data.id)) {
-        list.push(normalizeRescueDealData(data, d.id));
+      snapshot.forEach((d) => {
+        const data = d.data() as any;
+        if (data && (data.deleted === true || data.status === 'deleted')) {
+          deletedIds.add(data.id || d.id);
+          markRescueDealDeletedLocally(data.id || d.id);
+        } else if (data && (data.title || data.name || data.id)) {
+          list.push(normalizeRescueDealData(data, d.id));
+        }
+      });
+
+      const cloudIds = new Set(list.map((d) => d.id));
+      const merged = list.filter((d) => !deletedIds.has(d.id));
+      for (const def of DEFAULT_RESCUE_DEALS) {
+        if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
+          merged.push(def);
+        }
       }
-    });
 
-    const cloudIds = new Set(list.map((d) => d.id));
-    const merged = list.filter((d) => !deletedIds.has(d.id));
-    for (const def of DEFAULT_RESCUE_DEALS) {
-      if (!cloudIds.has(def.id) && !deletedIds.has(def.id)) {
-        merged.push(def);
-      }
+      return merged.sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    } catch (error) {
+      console.warn('Firestore rescue deals fetch warning:', error);
+      const deletedIds = new Set(getStoredDeletedRescueDealIds());
+      return DEFAULT_RESCUE_DEALS.filter((d) => !deletedIds.has(d.id));
     }
-
-    return merged.sort(
-      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-    );
-  } catch (error) {
-    console.error('Firestore rescue deals fetch error:', error);
-    const deletedIds = new Set(getStoredDeletedRescueDealIds());
-    return DEFAULT_RESCUE_DEALS.filter((d) => !deletedIds.has(d.id));
-  }
+  });
 }
 
 export function subscribeToRescueDeals(callback: (deals: RescueDeal[]) => void): () => void {
@@ -1038,6 +1583,7 @@ export function subscribeToRescueDeals(callback: (deals: RescueDeal[]) => void):
         const sorted = merged.sort(
           (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
         );
+        setCachedValue('rescueDeals:all', sorted, 30000);
         callback(sorted);
       },
       (error) => {
@@ -1052,6 +1598,7 @@ export function subscribeToRescueDeals(callback: (deals: RescueDeal[]) => void):
 
 export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
   const path = `rescueDeals/${deal.id}`;
+  invalidateFirestoreCache('rescueDeals:');
   try {
     const imageUrls = Array.isArray(deal.imageUrls) && deal.imageUrls.length > 0
       ? deal.imageUrls.filter((u) => typeof u === 'string' && u.trim().length > 0)
@@ -1093,8 +1640,8 @@ export async function saveRescueDealToCloud(deal: RescueDeal): Promise<void> {
 export async function deleteRescueDealFromCloud(dealId: string): Promise<void> {
   const path = `rescueDeals/${dealId}`;
   markRescueDealDeletedLocally(dealId);
+  invalidateFirestoreCache('rescueDeals:');
   try {
-    // 1. Mark deal as deleted in Firestore so all connected devices immediately hide it in real time
     await setDoc(
       doc(db, 'rescueDeals', dealId),
       {
@@ -1105,12 +1652,10 @@ export async function deleteRescueDealFromCloud(dealId: string): Promise<void> {
       },
       { merge: true }
     );
-    // Explicit server verification
     try {
       await getDocFromServer(doc(db, 'rescueDeals', dealId));
     } catch {}
   } catch (error) {
-    // 2. If setDoc fails, fallback to deleteDoc
     try {
       await deleteDoc(doc(db, 'rescueDeals', dealId));
     } catch {
@@ -1119,16 +1664,9 @@ export async function deleteRescueDealFromCloud(dealId: string): Promise<void> {
   }
 }
 
-/**
- * ATOMIC TRANSACTION:
- * Ensures the deal has not been claimed yet, creates the order,
- * and marks the deal claimed in a single atomic Firestore transaction.
- * If another customer attempts to claim the deal simultaneously,
- * one will succeed and the other will fail with an explicit concurrency error.
- * If saving the order fails, the deal is NOT marked as sold.
- */
 export async function claimRescueDealInCloud(dealId: string, order: Order): Promise<void> {
   const path = `rescueDeals/${dealId} & orders/${order.id}`;
+  invalidateFirestoreCache('rescueDeals:');
   try {
     await runTransaction(db, async (transaction) => {
       const dealRef = doc(db, 'rescueDeals', dealId);
@@ -1146,12 +1684,10 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
         }
       }
 
-      // Check if already claimed
       if (dealData.claimed === true || dealData.status === 'claimed' || dealData.status === 'sold') {
         throw new Error('This Rescue Deal has already been claimed by another customer.');
       }
 
-      // 1. Write the order atomically to Firestore
       const orderRef = doc(db, 'orders', order.id);
       transaction.set(
         orderRef,
@@ -1163,7 +1699,6 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
         })
       );
 
-      // 2. Mark the deal as claimed atomically
       transaction.set(
         dealRef,
         sanitizeForFirestore({
@@ -1180,7 +1715,6 @@ export async function claimRescueDealInCloud(dealId: string, order: Order): Prom
       );
     });
 
-    // Server verification after transaction commit
     try {
       await getDocFromServer(doc(db, 'orders', order.id));
     } catch {}
@@ -1219,31 +1753,34 @@ export function normalizeScheduledOfferData(data: any, docId: string): Scheduled
   };
 }
 
-export async function fetchScheduledOffersFromCloud(): Promise<ScheduledOffer[]> {
-  const path = 'scheduledOffers';
-  try {
-    let snapshot;
+export async function fetchScheduledOffersFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<ScheduledOffer[]> {
+  return dedupedCachedFetch('scheduledOffers:all', 30000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'scheduledOffers'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'scheduledOffers'));
+      const ref = collection(db, 'scheduledOffers');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        9000,
+        'fetchScheduledOffersFromCloud'
+      );
+
+      const list: ScheduledOffer[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        if (data && data.deleted !== true) {
+          list.push(normalizeScheduledOfferData(data, d.id));
+        }
+      });
+
+      return list.sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    } catch (error) {
+      console.warn('Firestore scheduled offers fetch warning:', error);
+      return [];
     }
-
-    const list: ScheduledOffer[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data();
-      if (data && data.deleted !== true) {
-        list.push(normalizeScheduledOfferData(data, d.id));
-      }
-    });
-
-    return list.sort(
-      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-    );
-  } catch (error) {
-    console.error('Firestore scheduled offers fetch error:', error);
-    return [];
-  }
+  });
 }
 
 export function subscribeToScheduledOffers(callback: (offers: ScheduledOffer[]) => void): () => void {
@@ -1262,6 +1799,7 @@ export function subscribeToScheduledOffers(callback: (offers: ScheduledOffer[]) 
         const sorted = list.sort(
           (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
         );
+        setCachedValue('scheduledOffers:all', sorted, 30000);
         callback(sorted);
       },
       (error) => {
@@ -1276,6 +1814,7 @@ export function subscribeToScheduledOffers(callback: (offers: ScheduledOffer[]) 
 
 export async function saveScheduledOfferToCloud(offer: ScheduledOffer): Promise<void> {
   const path = `scheduledOffers/${offer.id}`;
+  invalidateFirestoreCache('scheduledOffers:');
   try {
     const cleanData = {
       id: offer.id,
@@ -1313,6 +1852,7 @@ export async function saveScheduledOfferToCloud(offer: ScheduledOffer): Promise<
 
 export async function cancelScheduledOfferInCloud(offerId: string): Promise<void> {
   const path = `scheduledOffers/${offerId}`;
+  invalidateFirestoreCache('scheduledOffers:');
   try {
     await updateDoc(doc(db, 'scheduledOffers', offerId), {
       cancelled: true,
@@ -1326,6 +1866,7 @@ export async function cancelScheduledOfferInCloud(offerId: string): Promise<void
 
 export async function deleteScheduledOfferFromCloud(offerId: string): Promise<void> {
   const path = `scheduledOffers/${offerId}`;
+  invalidateFirestoreCache('scheduledOffers:');
   try {
     await setDoc(
       doc(db, 'scheduledOffers', offerId),
@@ -1352,6 +1893,9 @@ export async function deleteScheduledOfferFromCloud(offerId: string): Promise<vo
  */
 export async function claimScheduledOfferInCloud(offerId: string, order: Order): Promise<void> {
   const path = `scheduledOffers/${offerId} & orders/${order.id}`;
+  invalidateFirestoreCache('scheduledOffers:');
+  invalidateFirestoreCache('customerOrders:');
+  invalidateFirestoreCache('allOrders');
   try {
     await runTransaction(db, async (transaction) => {
       const offerRef = doc(db, 'scheduledOffers', offerId);
@@ -1482,27 +2026,35 @@ export function normalizeDiscountCampaignData(docId: string, raw: any): Discount
   };
 }
 
-export async function fetchDiscountCampaignsFromCloud(): Promise<DiscountCampaign[]> {
+export async function fetchDiscountCampaignsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<DiscountCampaign[]> {
   const path = 'discountCampaigns';
-  try {
-    const q = query(collection(db, 'discountCampaigns'));
-    const snap = await getDocs(q);
-    const campaigns: DiscountCampaign[] = [];
-    snap.forEach((d) => {
-      const data = d.data();
-      if (!data.deleted) {
-        campaigns.push(normalizeDiscountCampaignData(d.id, data));
+  return dedupedCachedFetch('discountCampaigns:all', 60000, Boolean(options.forceRefresh), async () => {
+    try {
+      const q = query(collection(db, 'discountCampaigns'));
+      const snap = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(q) : getDocs(q),
+        9000,
+        'fetchDiscountCampaignsFromCloud'
+      );
+      const campaigns: DiscountCampaign[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (!data.deleted) {
+          campaigns.push(normalizeDiscountCampaignData(d.id, data));
+        }
+      });
+      return campaigns;
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Discount campaigns fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return campaigns;
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Discount campaigns fetch skipped while offline.');
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToDiscountCampaigns(
@@ -1522,6 +2074,7 @@ export function subscribeToDiscountCampaigns(
             campaigns.push(normalizeDiscountCampaignData(d.id, data));
           }
         });
+        setCachedValue('discountCampaigns:all', campaigns, 60000);
         callback(campaigns);
       },
       (error) => {
@@ -1542,6 +2095,7 @@ export function subscribeToDiscountCampaigns(
 
 export async function saveDiscountCampaignToCloud(campaign: DiscountCampaign): Promise<void> {
   const path = `discountCampaigns/${campaign.id}`;
+  invalidateFirestoreCache('discountCampaigns:');
   try {
     const docRef = doc(db, 'discountCampaigns', campaign.id);
     const dataToSave = sanitizeForFirestore({
@@ -1556,6 +2110,7 @@ export async function saveDiscountCampaignToCloud(campaign: DiscountCampaign): P
 
 export async function cancelDiscountCampaignInCloud(campaignId: string): Promise<void> {
   const path = `discountCampaigns/${campaignId}`;
+  invalidateFirestoreCache('discountCampaigns:');
   try {
     const docRef = doc(db, 'discountCampaigns', campaignId);
     await setDoc(
@@ -1574,6 +2129,7 @@ export async function cancelDiscountCampaignInCloud(campaignId: string): Promise
 
 export async function deleteDiscountCampaignFromCloud(campaignId: string): Promise<void> {
   const path = `discountCampaigns/${campaignId}`;
+  invalidateFirestoreCache('discountCampaigns:');
   try {
     const docRef = doc(db, 'discountCampaigns', campaignId);
     await setDoc(
@@ -1678,30 +2234,34 @@ export async function deleteCartItemFromCloud(cartItemId: string): Promise<void>
   }
 }
 
-export async function fetchCartItemsFromCloud(customerId: string): Promise<CartItem[]> {
+export async function fetchCartItemsFromCloud(
+  customerId: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<CartItem[]> {
   if (!customerId) return [];
   const path = `cartItems (customerId: ${customerId})`;
-  try {
-    const q = query(collection(db, 'cartItems'), where('customerId', '==', customerId));
-    let snapshot;
+  return dedupedCachedFetch(`cartItems:${customerId}`, 15000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(q);
-    } catch {
-      snapshot = await getDocs(q);
-    }
-    const items: CartItem[] = [];
-    snapshot.forEach((d) => {
-      items.push(d.data() as CartItem);
-    });
-    return items.sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Cart items fetch skipped while offline.');
+      const q = query(collection(db, 'cartItems'), where('customerId', '==', customerId));
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(q) : getDocs(q),
+        8000,
+        'fetchCartItemsFromCloud'
+      );
+      const items: CartItem[] = [];
+      snapshot.forEach((d) => {
+        items.push(d.data() as CartItem);
+      });
+      return items.sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Cart items fetch skipped while offline/rate-limited.');
+        return [];
+      }
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToCartItems(
@@ -1722,6 +2282,7 @@ export function subscribeToCartItems(
           items.push(d.data() as CartItem);
         });
         items.sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime());
+        setCachedValue(`cartItems:${customerId}`, items, 15000);
         callback(items);
       },
       (error) => {
@@ -1767,24 +2328,28 @@ function normalizeActiveCartSnapshot(snapshot: any): CartItem[] {
   );
 }
 
-export async function fetchAllCartItemsFromCloud(): Promise<CartItem[]> {
+export async function fetchAllCartItemsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<CartItem[]> {
   const path = 'cartItems';
-  try {
-    let snapshot;
+  return dedupedCachedFetch('cartItems:all', 15000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'cartItems'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'cartItems'));
-    }
-    return normalizeActiveCartSnapshot(snapshot);
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('All cart items fetch skipped while offline.');
+      const ref = collection(db, 'cartItems');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        9000,
+        'fetchAllCartItemsFromCloud'
+      );
+      return normalizeActiveCartSnapshot(snapshot);
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('All cart items fetch skipped while offline/rate-limited.');
+        return [];
+      }
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToAllCartItems(
@@ -1795,7 +2360,9 @@ export function subscribeToAllCartItems(
     return onSnapshot(
       collection(db, 'cartItems'),
       (snapshot) => {
-        callback(normalizeActiveCartSnapshot(snapshot));
+        const items = normalizeActiveCartSnapshot(snapshot);
+        setCachedValue('cartItems:all', items, 15000);
+        callback(items);
       },
       (error) => {
         console.warn('All cart items subscription warning:', error);
@@ -1822,34 +2389,38 @@ function normalizePopularSearch(data: any, docId: string): PopularSearchItem {
   };
 }
 
-export async function fetchPopularSearchesFromCloud(): Promise<PopularSearchItem[]> {
+export async function fetchPopularSearchesFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<PopularSearchItem[]> {
   const path = 'popularSearches';
-  try {
-    let snapshot;
+  return dedupedCachedFetch('popularSearches:all', 120000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'popularSearches'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'popularSearches'));
-    }
-    const items: PopularSearchItem[] = [];
-    snapshot.forEach((d) => {
-      const normalized = normalizePopularSearch(d.data(), d.id);
-      if (normalized.term) {
-        items.push(normalized);
+      const ref = collection(db, 'popularSearches');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        8000,
+        'fetchPopularSearchesFromCloud'
+      );
+      const items: PopularSearchItem[] = [];
+      snapshot.forEach((d) => {
+        const normalized = normalizePopularSearch(d.data(), d.id);
+        if (normalized.term) {
+          items.push(normalized);
+        }
+      });
+      return items.sort((a, b) => {
+        if (a.order !== b.order) return a.order - b.order;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Popular searches fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return items.sort((a, b) => {
-      if (a.order !== b.order) return a.order - b.order;
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    });
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Popular searches fetch skipped while offline.');
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToPopularSearches(
@@ -1871,6 +2442,7 @@ export function subscribeToPopularSearches(
           if (a.order !== b.order) return a.order - b.order;
           return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
         });
+        setCachedValue('popularSearches:all', items, 120000);
         callback(items);
       },
       (error) => {
@@ -1889,6 +2461,7 @@ export function subscribeToPopularSearches(
 
 export async function savePopularSearchToCloud(item: PopularSearchItem): Promise<void> {
   const path = `popularSearches/${item.id}`;
+  invalidateFirestoreCache('popularSearches:');
   try {
     const cleanTerm = String(item.term || '').trim().slice(0, 100);
     if (!cleanTerm) {
@@ -1909,6 +2482,7 @@ export async function savePopularSearchToCloud(item: PopularSearchItem): Promise
 
 export async function deletePopularSearchFromCloud(searchId: string): Promise<void> {
   const path = `popularSearches/${searchId}`;
+  invalidateFirestoreCache('popularSearches:');
   try {
     await deleteDoc(doc(db, 'popularSearches', searchId));
   } catch (error) {
@@ -1918,6 +2492,7 @@ export async function deletePopularSearchFromCloud(searchId: string): Promise<vo
 
 export async function reorderPopularSearchesInCloud(orderedItems: PopularSearchItem[]): Promise<void> {
   const path = 'popularSearches (batch reorder)';
+  invalidateFirestoreCache('popularSearches:');
   try {
     const batch = writeBatch(db);
     const nowIso = new Date().toISOString();
@@ -2279,31 +2854,35 @@ export async function syncAnalyticsCustomerOrderProfile(
   });
 }
 
-export async function fetchAnalyticsEventsFromCloud(): Promise<AnalyticsEvent[]> {
+export async function fetchAnalyticsEventsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AnalyticsEvent[]> {
   const path = 'analyticsEvents';
-  try {
-    let snapshot;
+  return dedupedCachedFetch('analyticsEvents:all', 30000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'analyticsEvents'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'analyticsEvents'));
-    }
-    const list: AnalyticsEvent[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data() as AnalyticsEvent;
-      if (data && data.type && data.dateKey) {
-        list.push({ ...data, id: data.id || d.id });
+      const ref = collection(db, 'analyticsEvents');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        10000,
+        'fetchAnalyticsEventsFromCloud'
+      );
+      const list: AnalyticsEvent[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data() as AnalyticsEvent;
+        if (data && data.type && data.dateKey) {
+          list.push({ ...data, id: data.id || d.id });
+        }
+      });
+      return list;
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Analytics events fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return list;
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Analytics events fetch skipped while offline.');
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToAnalyticsEvents(
@@ -2321,6 +2900,7 @@ export function subscribeToAnalyticsEvents(
             list.push({ ...data, id: data.id || d.id });
           }
         });
+        setCachedValue('analyticsEvents:all', list, 30000);
         callback(list);
       },
       (error) => {
@@ -2337,31 +2917,35 @@ export function subscribeToAnalyticsEvents(
   }
 }
 
-export async function fetchAnalyticsCustomersFromCloud(): Promise<AnalyticsCustomer[]> {
+export async function fetchAnalyticsCustomersFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AnalyticsCustomer[]> {
   const path = 'analyticsCustomers';
-  try {
-    let snapshot;
+  return dedupedCachedFetch('analyticsCustomers:all', 30000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'analyticsCustomers'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'analyticsCustomers'));
-    }
-    const list: AnalyticsCustomer[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data() as AnalyticsCustomer;
-      if (data && data.customerId) {
-        list.push({ ...data, id: data.id || d.id });
+      const ref = collection(db, 'analyticsCustomers');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        10000,
+        'fetchAnalyticsCustomersFromCloud'
+      );
+      const list: AnalyticsCustomer[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data() as AnalyticsCustomer;
+        if (data && data.customerId) {
+          list.push({ ...data, id: data.id || d.id });
+        }
+      });
+      return list;
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Analytics customers fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return list;
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Analytics customers fetch skipped while offline.');
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToAnalyticsCustomers(
@@ -2483,33 +3067,37 @@ export function subscribeToProductQuestionsByProduct(
   }
 }
 
-export async function fetchAllProductQuestionsFromCloud(): Promise<ProductQuestion[]> {
+export async function fetchAllProductQuestionsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<ProductQuestion[]> {
   const path = 'productQuestions';
-  try {
-    let snapshot;
+  return dedupedCachedFetch('productQuestions:all', 20000, Boolean(options.forceRefresh), async () => {
     try {
-      snapshot = await getDocsFromServer(collection(db, 'productQuestions'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'productQuestions'));
-    }
-    const list: ProductQuestion[] = [];
-    snapshot.forEach((d) => {
-      const data = d.data() as any;
-      if (data && data.question) {
-        list.push(normalizeProductQuestion(data, d.id));
+      const ref = collection(db, 'productQuestions');
+      const snapshot = await withFirestoreTimeout(
+        options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+        9000,
+        'fetchAllProductQuestionsFromCloud'
+      );
+      const list: ProductQuestion[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data() as any;
+        if (data && data.question) {
+          list.push(normalizeProductQuestion(data, d.id));
+        }
+      });
+      return list.sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    } catch (error) {
+      if (isOfflineOrTransientError(error)) {
+        console.warn('Product questions fetch skipped while offline/rate-limited.');
+        return [];
       }
-    });
-    return list.sort(
-      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-    );
-  } catch (error) {
-    if (isOfflineOrTransientError(error)) {
-      console.warn('Product questions fetch skipped while offline.');
+      handleFirestoreError(error, OperationType.LIST, path);
       return [];
     }
-    handleFirestoreError(error, OperationType.LIST, path);
-    return [];
-  }
+  });
 }
 
 export function subscribeToAllProductQuestions(
@@ -2674,15 +3262,17 @@ function normalizeAiTrainingAnswer(data: any, docId: string): AiTrainingAnswer {
   };
 }
 
-export async function fetchAiAssistantStateFromCloud(): Promise<AiAssistantState> {
+export async function fetchAiAssistantStateFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AiAssistantState> {
   const path = 'aiAssistantState/config';
   try {
-    let snap;
-    try {
-      snap = await getDocFromServer(doc(db, 'aiAssistantState', 'config'));
-    } catch {
-      snap = await getDoc(doc(db, 'aiAssistantState', 'config'));
-    }
+    const ref = doc(db, 'aiAssistantState', 'config');
+    const snap = await withFirestoreTimeout(
+      options.forceRefresh ? getDocFromServer(ref) : getDoc(ref),
+      8000,
+      'fetchAiAssistantStateFromCloud'
+    );
     if (snap.exists()) {
       return normalizeAiAssistantState(snap.data());
     }
@@ -2766,15 +3356,17 @@ export async function saveAiAssistantStateToCloud(state: AiAssistantState): Prom
   }
 }
 
-export async function fetchAiKnowledgeFromCloud(): Promise<AiKnowledgeEntry[]> {
+export async function fetchAiKnowledgeFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AiKnowledgeEntry[]> {
   const path = 'aiKnowledge';
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(collection(db, 'aiKnowledge'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'aiKnowledge'));
-    }
+    const ref = collection(db, 'aiKnowledge');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchAiKnowledgeFromCloud'
+    );
     const list: AiKnowledgeEntry[] = [];
     snapshot.forEach((d) => {
       const data = d.data();
@@ -2870,9 +3462,6 @@ export async function deleteAiKnowledgeEntryFromCloud(entryId: string): Promise<
   }
 }
 
-/**
- * Replaces website-derived knowledge docs cleanly while leaving all owner-provided entries untouched.
- */
 export async function replaceWebsiteScanKnowledgeInCloud(
   websiteEntries: AiKnowledgeEntry[]
 ): Promise<void> {
@@ -2919,15 +3508,17 @@ export async function replaceWebsiteScanKnowledgeInCloud(
   }
 }
 
-export async function fetchAiTrainingAnswersFromCloud(): Promise<AiTrainingAnswer[]> {
+export async function fetchAiTrainingAnswersFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AiTrainingAnswer[]> {
   const path = 'aiTrainingAnswers';
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(collection(db, 'aiTrainingAnswers'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'aiTrainingAnswers'));
-    }
+    const ref = collection(db, 'aiTrainingAnswers');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchAiTrainingAnswersFromCloud'
+    );
     const list: AiTrainingAnswer[] = [];
     snapshot.forEach((d) => {
       const data = d.data();
@@ -3036,15 +3627,17 @@ function normalizeAiGuidanceQuestion(data: any, docId: string): AiGuidanceQuesti
   };
 }
 
-export async function fetchAiGuidanceQuestionsFromCloud(): Promise<AiGuidanceQuestion[]> {
+export async function fetchAiGuidanceQuestionsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AiGuidanceQuestion[]> {
   const path = 'aiGuidanceQuestions';
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(collection(db, 'aiGuidanceQuestions'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'aiGuidanceQuestions'));
-    }
+    const ref = collection(db, 'aiGuidanceQuestions');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchAiGuidanceQuestionsFromCloud'
+    );
     const list: AiGuidanceQuestion[] = [];
     snapshot.forEach((d) => {
       const data = d.data();
@@ -3208,15 +3801,17 @@ function normalizeWatchdogLog(data: any, docId: string): WatchdogActivityLog {
   };
 }
 
-export async function fetchWatchdogAlertsFromCloud(): Promise<WatchdogAlert[]> {
+export async function fetchWatchdogAlertsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<WatchdogAlert[]> {
   const path = 'watchdogAlerts';
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(collection(db, 'watchdogAlerts'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'watchdogAlerts'));
-    }
+    const ref = collection(db, 'watchdogAlerts');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchWatchdogAlertsFromCloud'
+    );
     const list: WatchdogAlert[] = [];
     snapshot.forEach((d) => {
       const data = d.data();
@@ -3297,15 +3892,17 @@ export async function saveWatchdogAlertToCloud(alert: WatchdogAlert): Promise<vo
   }
 }
 
-export async function fetchWatchdogLogsFromCloud(): Promise<WatchdogActivityLog[]> {
+export async function fetchWatchdogLogsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<WatchdogActivityLog[]> {
   const path = 'watchdogLogs';
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(collection(db, 'watchdogLogs'));
-    } catch {
-      snapshot = await getDocs(collection(db, 'watchdogLogs'));
-    }
+    const ref = collection(db, 'watchdogLogs');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchWatchdogLogsFromCloud'
+    );
     const list: WatchdogActivityLog[] = [];
     snapshot.forEach((d) => {
       const data = d.data();

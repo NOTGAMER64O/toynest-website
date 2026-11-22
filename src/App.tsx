@@ -348,7 +348,11 @@ import {
   fetchSuggestionsFromCloud,
   deleteSuggestionFromCloud,
   fetchProductsFromCloud,
-  subscribeToProducts,
+  fetchProductsPageFromCloud,
+  fetchAllProductSummariesFromCloud,
+  fetchProductByIdFromCloud,
+  fetchProductBySlugOrIdFromCloud,
+  invalidateFirestoreCache,
   updateProductAvailabilityInCloud,
   saveProductToCloud,
   deleteProductFromCloud,
@@ -357,7 +361,6 @@ import {
   subscribeToSettings,
   fetchColoursFromCloud,
   saveColoursToCloud,
-  subscribeToColours,
   fetchRescueDealsFromCloud,
   subscribeToRescueDeals,
   saveRescueDealToCloud,
@@ -370,7 +373,6 @@ import {
   cancelScheduledOfferInCloud,
   claimScheduledOfferInCloud,
   fetchDiscountCampaignsFromCloud,
-  subscribeToDiscountCampaigns,
   saveDiscountCampaignToCloud,
   cancelDiscountCampaignInCloud,
   deleteDiscountCampaignFromCloud,
@@ -385,7 +387,6 @@ import {
   syncCustomerNameWithCartInCloud,
   searchProductsFromCloud,
   fetchPopularSearchesFromCloud,
-  subscribeToPopularSearches,
   savePopularSearchToCloud,
   deletePopularSearchFromCloud,
   reorderPopularSearchesInCloud,
@@ -774,7 +775,25 @@ function getStoredProducts(): Product[] {
 
 function saveStoredProducts(products: Product[]) {
   try {
-    localStorage.setItem('toynest_local_products', JSON.stringify(products));
+    // Store lightweight product summaries in localStorage to stay safely below the 5MB browser quota;
+    // full multi-image galleries are cached automatically in Firestore IndexedDB persistentLocalCache.
+    const compact = products.slice(0, 60).map((p) => {
+      const cover = p.imageUrl || (p.imageUrls && p.imageUrls[0]) || '/toys/toy-40ba4ba9-1.jpg';
+      const photoCount = p.photoCount || (p.imageUrls ? p.imageUrls.length : 1);
+      return {
+        ...p,
+        imageUrl: cover,
+        imageUrls: [cover],
+        photoCount,
+        isSummaryOnly: photoCount > 1 ? true : p.isSummaryOnly,
+      };
+    });
+    const serialized = JSON.stringify(compact);
+    if (serialized.length < 1_800_000) {
+      localStorage.setItem('toynest_local_products', serialized);
+    } else {
+      localStorage.setItem('toynest_local_products', JSON.stringify(compact.slice(0, 12)));
+    }
   } catch {}
 }
 
@@ -964,6 +983,11 @@ export default function App() {
   const [products, setProducts] = useState<Product[]>(initialStoredProducts);
   const [requestedProductSlug, setRequestedProductSlug] = useState<string | null>(initialUrlSlug);
   const [cloudProductsLoaded, setCloudProductsLoaded] = useState<boolean>(false);
+  const [productsLoading, setProductsLoading] = useState<boolean>(true);
+  const [loadingMoreProducts, setLoadingMoreProducts] = useState<boolean>(false);
+  const [hasMoreProducts, setHasMoreProducts] = useState<boolean>(false);
+  const [productsNextCursor, setProductsNextCursor] = useState<string | null>(null);
+  const [productsError, setProductsError] = useState<string | null>(null);
   const [page, setPage] = useState<
     'home' | 'productDetail' | 'buy' | 'myOrders' | 'suggestions' | 'ownerLogin' | 'owner'
   >(() => (initialUrlSlug ? 'productDetail' : 'home'));
@@ -973,6 +997,7 @@ export default function App() {
   const [searchCloudSyncing, setSearchCloudSyncing] = useState<boolean>(false);
   const [lastSearchCloudSyncAt, setLastSearchCloudSyncAt] = useState<number>(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
+  const allSummariesLoadedRef = useRef<boolean>(false);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
   const [manualMoneyAdjustment, setManualMoneyAdjustment] = useState<number>(() => getStoredMoneyAdjustment());
@@ -1393,60 +1418,186 @@ export default function App() {
     } catch {}
   };
 
-  const loadProducts = async () => {
+  const mergePreservingFullGalleries = (
+    incoming: Product[],
+    existing: Product[],
+    options: { replaceCatalog?: boolean } = {}
+  ): Product[] => {
+    const existingById = new Map(existing.map((p) => [p.id, p]));
+    const normalizedIncoming = incoming.map((p) => {
+      const prev = existingById.get(p.id);
+      if (
+        prev &&
+        !prev.isSummaryOnly &&
+        Array.isArray(prev.imageUrls) &&
+        prev.imageUrls.length > 1 &&
+        p.isSummaryOnly
+      ) {
+        return {
+          ...p,
+          imageUrls: prev.imageUrls,
+          imageUrl: prev.imageUrl || p.imageUrl,
+          photoCount: prev.imageUrls.length,
+          isSummaryOnly: false,
+        };
+      }
+      return p;
+    });
+
+    if (options.replaceCatalog) {
+      return normalizedIncoming;
+    }
+
+    const incomingIds = new Set(normalizedIncoming.map((p) => p.id));
+    return [...normalizedIncoming, ...existing.filter((p) => !incomingIds.has(p.id))].sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+  };
+
+  const loadProducts = async (options: { forceRefresh?: boolean } = {}) => {
+    setProductsLoading(true);
+    setProductsError(null);
+    if (options.forceRefresh) {
+      allSummariesLoadedRef.current = false;
+      invalidateFirestoreCache('products:');
+    }
     try {
-      const cloudProds = await fetchProductsFromCloud();
-      if (Array.isArray(cloudProds) && cloudProds.length > 0) {
-        setProducts(cloudProds);
-        saveStoredProducts(cloudProds);
+      const pageRes = await fetchProductsPageFromCloud({
+        pageSize: 12,
+        forceRefresh: options.forceRefresh,
+      });
+
+      if (pageRes.degradedOffline) {
+        setProductsError('Showing saved toys — live cloud sync is temporarily unavailable.');
+      }
+
+      if (Array.isArray(pageRes.products) && pageRes.products.length > 0) {
+        const shouldReplace = !pageRes.hasMore;
+        setProducts((prev) => {
+          const next = mergePreservingFullGalleries(pageRes.products, prev, {
+            replaceCatalog: shouldReplace,
+          });
+          saveStoredProducts(next);
+          return next;
+        });
+        setHasMoreProducts(pageRes.hasMore);
+        setProductsNextCursor(pageRes.nextCursorCreatedAt);
+        setCloudProductsLoaded(true);
+        setProductsLoading(false);
         return;
       }
     } catch (err) {
       console.warn('Could not load products from cloud:', err);
+      setProductsError('Could not reach Playnix cloud right now. Showing saved toys.');
     }
+
     try {
       const res = await api.get('/api/products');
       if (res.data?.products && Array.isArray(res.data.products) && res.data.products.length > 0) {
-        const currentStored = getStoredProducts();
-        const serverIds = new Set(res.data.products.map((p: Product) => p.id));
-        const merged = [
-          ...res.data.products,
-          ...currentStored.filter((p) => !serverIds.has(p.id)),
-        ];
-        setProducts(merged);
-        saveStoredProducts(merged);
+        setProducts((prev) => {
+          const next = mergePreservingFullGalleries(res.data.products, prev, {
+            replaceCatalog: true,
+          });
+          saveStoredProducts(next);
+          return next;
+        });
+        setHasMoreProducts(false);
+        setProductsNextCursor(null);
+        setProductsError(null);
+        setCloudProductsLoaded(true);
+        setProductsLoading(false);
         return;
       }
     } catch {}
+
     setProducts(getStoredProducts());
+    setCloudProductsLoaded(true);
+    setProductsLoading(false);
   };
 
-  const ensureCloudProductsForSearch = async () => {
+  const loadMoreProducts = async () => {
+    if (loadingMoreProducts || !hasMoreProducts || !productsNextCursor) return;
+    setLoadingMoreProducts(true);
+    try {
+      const nextRes = await fetchProductsPageFromCloud({
+        pageSize: 12,
+        cursorCreatedAt: productsNextCursor,
+      });
+      if (Array.isArray(nextRes.products) && nextRes.products.length > 0) {
+        setProducts((prev) => {
+          const next = mergePreservingFullGalleries(nextRes.products, prev);
+          saveStoredProducts(next);
+          return next;
+        });
+      }
+      setHasMoreProducts(nextRes.hasMore);
+      setProductsNextCursor(nextRes.nextCursorCreatedAt);
+      if (!nextRes.hasMore) {
+        allSummariesLoadedRef.current = true;
+      }
+    } catch (err) {
+      console.warn('Could not load more products:', err);
+    } finally {
+      setLoadingMoreProducts(false);
+    }
+  };
+
+  const ensureAllProductSummariesLoaded = async (forceRefresh = false) => {
+    if (!forceRefresh && (allSummariesLoadedRef.current || !hasMoreProducts)) return;
     const now = Date.now();
-    if (searchCloudSyncing || now - lastSearchCloudSyncAt < 30000) return;
+    if (!forceRefresh && (searchCloudSyncing || now - lastSearchCloudSyncAt < 30000)) return;
     setSearchCloudSyncing(true);
     try {
-      const cloudProds = await searchProductsFromCloud('');
-      if (Array.isArray(cloudProds) && cloudProds.length > 0) {
+      const cloudSummaries = await fetchAllProductSummariesFromCloud({ forceRefresh });
+      if (Array.isArray(cloudSummaries) && cloudSummaries.length > 0) {
         setProducts((prev) => {
-          const drafts = prev.filter((p) => p.available === false);
-          const cloudIds = new Set(cloudProds.map((p) => p.id));
-          return [...cloudProds, ...drafts.filter((d) => !cloudIds.has(d.id))];
+          const next = mergePreservingFullGalleries(cloudSummaries, prev, {
+            replaceCatalog: true,
+          });
+          saveStoredProducts(next);
+          return next;
         });
+        setHasMoreProducts(false);
+        setProductsNextCursor(null);
+        allSummariesLoadedRef.current = true;
       }
       setLastSearchCloudSyncAt(Date.now());
     } catch (err) {
-      console.warn('Search Firebase sync notice:', err);
+      console.warn('Catalog summary sync notice:', err);
     } finally {
       setSearchCloudSyncing(false);
     }
   };
 
-  const loadOwnerProducts = async () => {
+  const hydrateSingleProductGallery = async (productId: string) => {
+    if (!productId) return;
     try {
-      const cloudProds = await fetchProductsFromCloud();
+      const fullProd = await fetchProductByIdFromCloud(productId);
+      if (!fullProd) return;
+      setProducts((prev) =>
+        prev.map((item) => (item.id === fullProd.id ? fullProd : item))
+      );
+      setSelectedProductForDetail((curr) =>
+        curr && curr.id === fullProd.id ? fullProd : curr
+      );
+      setGalleryProduct((curr) =>
+        curr && curr.id === fullProd.id ? fullProd : curr
+      );
+    } catch {}
+  };
+
+  const ensureCloudProductsForSearch = async () => {
+    await ensureAllProductSummariesLoaded(false);
+  };
+
+  const loadOwnerProducts = async (forceRefresh = false) => {
+    try {
+      const cloudProds = await fetchProductsFromCloud({ forceRefresh });
       if (Array.isArray(cloudProds) && cloudProds.length > 0) {
         setProducts(cloudProds);
+        setHasMoreProducts(false);
+        setProductsNextCursor(null);
+        allSummariesLoadedRef.current = true;
         saveStoredProducts(cloudProds);
         return;
       }
@@ -2738,59 +2889,76 @@ export default function App() {
     setHasOwnerOrderNotification(false);
   };
 
-  const loadPaymentQr = async () => {
-    try {
-      const settings = await fetchSettingsFromCloud();
-      if (settings.paymentQrUrl) {
-        setPaymentQrUrl(settings.paymentQrUrl);
-        return;
-      }
-    } catch {}
-    try {
-      const res = await api.get('/api/payment-qr');
-      if (res.data?.url) {
-        setPaymentQrUrl(res.data.url);
-        return;
-      }
-    } catch {}
-    setPaymentQrUrl(localStorage.getItem('toynest_payment_qr') || '/payment/adult-qr.jpg');
+  const applyStoreSettings = (settings: any) => {
+    if (!settings) return false;
+    if (settings.paymentQrUrl) {
+      setPaymentQrUrl(settings.paymentQrUrl);
+      try {
+        localStorage.setItem('toynest_payment_qr', settings.paymentQrUrl);
+      } catch {}
+    } else {
+      setPaymentQrUrl((prev) => prev || localStorage.getItem('toynest_payment_qr') || '/payment/adult-qr.jpg');
+    }
+    if (settings.adultPublished !== undefined || settings.childPublished !== undefined) {
+      setAdultPublished(settings.adultPublished !== false);
+      setChildPublished(settings.childPublished !== false);
+      try {
+        localStorage.setItem(
+          'toynest_shop_modes',
+          JSON.stringify({
+            adultPublished: settings.adultPublished !== false,
+            childPublished: settings.childPublished !== false,
+          })
+        );
+      } catch {}
+    }
+    if (typeof settings.manualMoneyAdjustment === 'number') {
+      setManualMoneyAdjustment(settings.manualMoneyAdjustment);
+      saveStoredMoneyAdjustment(settings.manualMoneyAdjustment);
+    }
+    if (Array.isArray(settings.moneyAdjustmentHistory)) {
+      setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+      saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
+    }
+    if (
+      typeof settings.filamentCostPerGram === 'number' &&
+      isFinite(settings.filamentCostPerGram) &&
+      settings.filamentCostPerGram > 0
+    ) {
+      const cleanRate = Math.round(settings.filamentCostPerGram * 100) / 100;
+      setFilamentCostPerGram(cleanRate);
+      setFilamentCostInput(String(cleanRate));
+      try {
+        localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
+      } catch {}
+    }
+    return true;
   };
 
-  const loadShopModes = async () => {
+  const loadStoreSettings = async (forceRefresh = false) => {
     try {
-      const settings = await fetchSettingsFromCloud();
-      if (settings) {
-        if (settings.adultPublished !== undefined || settings.childPublished !== undefined) {
-          setAdultPublished(settings.adultPublished !== false);
-          setChildPublished(settings.childPublished !== false);
-        }
-        if (typeof settings.manualMoneyAdjustment === 'number') {
-          setManualMoneyAdjustment(settings.manualMoneyAdjustment);
-          saveStoredMoneyAdjustment(settings.manualMoneyAdjustment);
-        }
-        if (Array.isArray(settings.moneyAdjustmentHistory)) {
-          setMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
-          saveStoredMoneyAdjustmentHistory(settings.moneyAdjustmentHistory);
-        }
-        if (typeof settings.filamentCostPerGram === 'number' && isFinite(settings.filamentCostPerGram) && settings.filamentCostPerGram > 0) {
-          const cleanRate = Math.round(settings.filamentCostPerGram * 100) / 100;
-          setFilamentCostPerGram(cleanRate);
-          setFilamentCostInput(String(cleanRate));
-          try {
-            localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
-          } catch {}
-        }
+      const settings = await fetchSettingsFromCloud({ forceRefresh });
+      if (applyStoreSettings(settings)) {
         return;
       }
     } catch {}
     try {
-      const res = await api.get('/api/shop-modes');
-      if (res.data) {
-        setAdultPublished(res.data.adultPublished !== false);
-        setChildPublished(res.data.childPublished !== false);
+      const [qrRes, modesRes] = await Promise.allSettled([
+        api.get('/api/payment-qr'),
+        api.get('/api/shop-modes'),
+      ]);
+      if (qrRes.status === 'fulfilled' && qrRes.value.data?.url) {
+        setPaymentQrUrl(qrRes.value.data.url);
+      } else {
+        setPaymentQrUrl((prev) => prev || localStorage.getItem('toynest_payment_qr') || '/payment/adult-qr.jpg');
+      }
+      if (modesRes.status === 'fulfilled' && modesRes.value.data) {
+        setAdultPublished(modesRes.value.data.adultPublished !== false);
+        setChildPublished(modesRes.value.data.childPublished !== false);
         return;
       }
     } catch {}
+    setPaymentQrUrl((prev) => prev || localStorage.getItem('toynest_payment_qr') || '/payment/adult-qr.jpg');
     try {
       const local = localStorage.getItem('toynest_shop_modes');
       if (local) {
@@ -2802,6 +2970,14 @@ export default function App() {
     } catch {}
     setAdultPublished(true);
     setChildPublished(true);
+  };
+
+  const loadPaymentQr = async (forceRefresh = false) => {
+    await loadStoreSettings(forceRefresh);
+  };
+
+  const loadShopModes = async (forceRefresh = false) => {
+    await loadStoreSettings(forceRefresh);
   };
 
   const handleSaveFilamentCost = async (e?: React.FormEvent) => {
@@ -2913,9 +3089,9 @@ export default function App() {
     }
   };
 
-  const loadColours = async () => {
+  const loadColours = async (forceRefresh = false) => {
     try {
-      const cloudColours = await fetchColoursFromCloud();
+      const cloudColours = await fetchColoursFromCloud({ forceRefresh });
       if (cloudColours && Array.isArray(cloudColours) && cloudColours.length > 0) {
         setAvailableColours(cloudColours);
         saveStoredColours(cloudColours);
@@ -2995,9 +3171,9 @@ export default function App() {
     setLoading(false);
   };
 
-  const loadPopularSearches = async () => {
+  const loadPopularSearches = async (forceRefresh = false) => {
     try {
-      const cloudItems = await fetchPopularSearchesFromCloud();
+      const cloudItems = await fetchPopularSearchesFromCloud({ forceRefresh });
       setPopularSearches(cloudItems);
       saveStoredPopularSearches(cloudItems);
     } catch (err) {
@@ -3218,6 +3394,9 @@ export default function App() {
       );
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (prod.isSummaryOnly || (prod.imageUrls && prod.imageUrls.length <= 1 && (prod.photoCount ?? 1) > 1)) {
+      void hydrateSingleProductGallery(prod.id);
+    }
   };
 
   const navigateToHome = (options: { pushHistory?: boolean } = {}) => {
@@ -3244,6 +3423,9 @@ export default function App() {
         setCheckoutMode(null);
         setErrorMessage('');
         setPage('productDetail');
+        if (matched && (matched.isSummaryOnly || (matched.photoCount ?? 1) > (matched.imageUrls?.length ?? 1))) {
+          void hydrateSingleProductGallery(matched.id);
+        }
       } else {
         setRequestedProductSlug(null);
         setSelectedProductForDetail(null);
@@ -3258,12 +3440,15 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Resolve requested product URL slug whenever products load or update from Firestore
+  // Resolve requested product URL slug cleanly (direct 1-doc lookup first, full summary scan only if needed)
   useEffect(() => {
     if (!requestedProductSlug) return;
     const matched = findProductBySlugOrId(requestedProductSlug, products);
     if (matched) {
       setSelectedProductForDetail(matched);
+      if (matched.isSummaryOnly) {
+        void hydrateSingleProductGallery(matched.id);
+      }
       const canonicalPath = getProductPath(matched, products);
       if (
         typeof window !== 'undefined' &&
@@ -3276,8 +3461,22 @@ export default function App() {
           canonicalPath
         );
       }
-    } else if (cloudProductsLoaded) {
-      setSelectedProductForDetail(null);
+    } else {
+      let cancelled = false;
+      void fetchProductBySlugOrIdFromCloud(requestedProductSlug, products)
+        .then((resolved) => {
+          if (cancelled) return;
+          if (resolved) {
+            setProducts((prev) => mergePreservingFullGalleries([resolved], prev));
+            setSelectedProductForDetail(resolved);
+          } else if (cloudProductsLoaded) {
+            setSelectedProductForDetail(null);
+          }
+        })
+        .catch(() => {});
+      return () => {
+        cancelled = true;
+      };
     }
   }, [requestedProductSlug, products, cloudProductsLoaded]);
 
@@ -3404,58 +3603,21 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    loadPaymentQr();
-    loadShopModes();
-    loadColours();
-    loadPopularSearches();
-
-    let unsubProducts = () => {};
-    try {
-      unsubProducts = subscribeToProducts((cloudProds) => {
-        setCloudProductsLoaded(true);
-        if (Array.isArray(cloudProds) && cloudProds.length > 0) {
-          setProducts(cloudProds);
-          saveStoredProducts(cloudProds);
-        }
-      });
-    } catch (err) {
-      console.warn('Real-time products subscription error:', err);
-      void loadProducts().finally(() => setCloudProductsLoaded(true));
-    }
-
-    // Ensure direct URL visits settle cloudProductsLoaded reliably even if onSnapshot delays
-    void fetchProductsFromCloud()
-      .then((cloudProds) => {
-        if (Array.isArray(cloudProds) && cloudProds.length > 0) {
-          setProducts(cloudProds);
-          saveStoredProducts(cloudProds);
+    // Single deduplicated startup fetches (no duplicate subscriptions + parallel full scans)
+    void loadStoreSettings();
+    void loadColours();
+    void loadPopularSearches();
+    void loadProducts();
+    void fetchDiscountCampaignsFromCloud()
+      .then((cloudCampaigns) => {
+        if (Array.isArray(cloudCampaigns)) {
+          setDiscountCampaigns(cloudCampaigns);
+          saveStoredDiscountCampaigns(cloudCampaigns);
         }
       })
-      .catch(() => {})
-      .finally(() => {
-        setCloudProductsLoaded(true);
-      });
+      .catch(() => {});
 
-    let unsubColours = () => {};
-    try {
-      unsubColours = subscribeToColours((colours) => {
-        if (Array.isArray(colours)) {
-          setAvailableColours(colours);
-          saveStoredColours(colours);
-        }
-      });
-    } catch {}
-
-    let unsubPopularSearches = () => {};
-    try {
-      unsubPopularSearches = subscribeToPopularSearches((cloudPopular) => {
-        if (Array.isArray(cloudPopular)) {
-          setPopularSearches(cloudPopular);
-          saveStoredPopularSearches(cloudPopular);
-        }
-      });
-    } catch {}
-
+    // Keep real-time listeners only where live concurrent inventory / offer updates matter
     let unsubDeals = () => {};
     try {
       unsubDeals = subscribeToRescueDeals((cloudDeals) => {
@@ -3490,164 +3652,25 @@ export default function App() {
       }).catch(() => {});
     }
 
-    let unsubCampaigns = () => {};
-    try {
-      unsubCampaigns = subscribeToDiscountCampaigns((cloudCampaigns) => {
-        if (Array.isArray(cloudCampaigns)) {
-          setDiscountCampaigns(cloudCampaigns);
-          saveStoredDiscountCampaigns(cloudCampaigns);
-        }
-      });
-    } catch (err) {
-      console.warn('Real-time discount campaigns subscription error:', err);
-      fetchDiscountCampaignsFromCloud().then((campaigns) => {
-        if (Array.isArray(campaigns)) {
-          setDiscountCampaigns(campaigns);
-          saveStoredDiscountCampaigns(campaigns);
-        }
-      }).catch(() => {});
-    }
-
-    // 1-second live clock for campaign & offer activation, countdowns, and instant expiration without page reload
-    const clockTimer = setInterval(() => {
-      setCurrentTime(Date.now());
-    }, 1000);
-
     return () => {
-      unsubProducts();
-      unsubColours();
-      unsubPopularSearches();
       unsubDeals();
       unsubOffers();
-      unsubCampaigns();
-      clearInterval(clockTimer);
     };
   }, []);
 
-  const checkOrderUpdates = async () => {
-    if (!customerId) return;
-    const deletedIds = new Set(getCustomerDeletedOrderIds());
-    try {
-      const cloudOrders = await fetchCustomerOrdersFromCloud(customerId);
-      if (Array.isArray(cloudOrders)) {
-        const visibleOrders = cloudOrders.filter(
-          (o) => !o.customerDeleted && !deletedIds.has(o.id)
-        );
-        const otherOrders = getStoredOrders().filter((o) => o.customerId !== customerId);
-        saveStoredOrders([...cloudOrders, ...otherOrders]);
-
-        const seen = getSeenOrderStatuses();
-        const hasUnseenStatus = visibleOrders.some((o) => seen[o.id] !== o.status);
-        setHasStatusUpdateNotification(hasUnseenStatus);
-        return;
-      }
-    } catch {}
-
-    const stored = getStoredOrders().filter(
-      (o) => o.customerId === customerId && !o.customerDeleted && !deletedIds.has(o.id)
-    );
-    if (stored.length === 0) return;
-    const seen = getSeenOrderStatuses();
-    const hasUnseenStatus = stored.some((o) => seen[o.id] !== o.status);
-    setHasStatusUpdateNotification(hasUnseenStatus);
-  };
-
-  const checkOwnerOrderUpdates = async () => {
-    const getAcknowledgedTime = (): number => {
-      try {
-        const raw = localStorage.getItem('toynest_owner_acknowledged_time');
-        if (raw) {
-          const t = new Date(raw).getTime();
-          if (!isNaN(t)) return t;
-        }
-      } catch {}
-      return 0;
-    };
-    const ackTime = getAcknowledgedTime();
-
-    try {
-      const cloudOrders = await fetchAllOrdersFromCloud();
-      if (Array.isArray(cloudOrders) && cloudOrders.length > 0) {
-        saveStoredOrders(cloudOrders);
-        const seenIds = new Set(getSeenOwnerOrderIds());
-        const unseenNewOrders = cloudOrders.filter((o) => {
-          if (o.status !== 'New') return false;
-          if (seenIds.has(o.id)) return false;
-          if (ackTime > 0) {
-            const orderTime = new Date(o.createdAt).getTime();
-            if (!isNaN(orderTime) && orderTime <= ackTime) return false;
-          }
-          return true;
-        });
-
-        setOwnerNewOrdersCount(unseenNewOrders.length);
-        setHasOwnerOrderNotification(unseenNewOrders.length > 0);
-        return;
-      }
-    } catch {}
-
-    try {
-      const res = await api.get('/api/orders/pending-summary');
-      const { newCount, latestOrderId, latestOrderTime } = res.data || {};
-      const seenIds = new Set(getSeenOwnerOrderIds());
-
-      if (newCount > 0 && latestOrderId) {
-        let isAcknowledged = seenIds.has(latestOrderId);
-        if (!isAcknowledged && ackTime > 0 && latestOrderTime) {
-          const orderTime = new Date(latestOrderTime).getTime();
-          if (!isNaN(orderTime) && orderTime <= ackTime) {
-            isAcknowledged = true;
-          }
-        }
-        if (!isAcknowledged) {
-          setHasOwnerOrderNotification(true);
-          setOwnerNewOrdersCount(newCount);
-          return;
-        }
-      }
-    } catch {}
-
-    const stored = getStoredOrders();
-    const seenIds = new Set(getSeenOwnerOrderIds());
-    const unseenNewOrders = stored.filter((o) => {
-      if (o.status !== 'New') return false;
-      if (seenIds.has(o.id)) return false;
-      if (ackTime > 0) {
-        const orderTime = new Date(o.createdAt).getTime();
-        if (!isNaN(orderTime) && orderTime <= ackTime) return false;
-      }
-      return true;
-    });
-
-    setOwnerNewOrdersCount(unseenNewOrders.length);
-    setHasOwnerOrderNotification(unseenNewOrders.length > 0);
-  };
-
+  // Only run 1-second live clock timer while offers or campaigns exist (avoids idle re-renders)
   useEffect(() => {
-    checkOrderUpdates();
-    if (page === 'owner') {
-      checkOwnerOrderUpdates();
-    }
-    const interval = setInterval(() => {
-      checkOrderUpdates();
-      if (page === 'owner') {
-        checkOwnerOrderUpdates();
-      }
-    }, 15000);
-    const handleFocus = () => {
-      checkOrderUpdates();
-      if (page === 'owner') {
-        checkOwnerOrderUpdates();
-      }
-    };
-    window.addEventListener('focus', handleFocus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [customerId, page]);
+    const hasTimedPromos =
+      scheduledOffers.some((o) => !o.deleted && !o.claimed && !o.cancelled && !o.isDraft) ||
+      discountCampaigns.some((c) => !c.deleted && !c.cancelled && !c.isDraft);
+    if (!hasTimedPromos) return;
+    const clockTimer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    return () => clearInterval(clockTimer);
+  }, [scheduledOffers, discountCampaigns]);
 
-  // Real-time Firestore sync for customer orders across devices
+  // Real-time Firestore sync for customer orders (drives status badges without 15s polling)
   useEffect(() => {
     if (!customerId) return;
     let unsub = () => {};
@@ -3662,6 +3685,10 @@ export default function App() {
           setMyOrders(enriched);
           const otherStored = getStoredOrders().filter((o) => o.customerId !== customerId);
           saveStoredOrders([...liveOrders, ...otherStored]);
+
+          const seen = getSeenOrderStatuses();
+          const hasUnseenStatus = visibleOrders.some((o) => seen[o.id] !== o.status);
+          setHasStatusUpdateNotification(hasUnseenStatus);
         }
       });
     } catch (err) {
@@ -3725,12 +3752,14 @@ export default function App() {
     }
   }, [page, guestProvidedName]);
 
-  // Real-time permanent cart synchronization across visits & cloud storage
+  // Real-time permanent cart synchronization across visits & cloud storage (no duplicate simultaneous getDocs)
   useEffect(() => {
     if (!customerId) return;
     let unsubCart = () => {};
+    let settledInitialSnapshot = false;
 
     const reconcileWithCloud = (cloudItems: CartItem[]) => {
+      settledInitialSnapshot = true;
       const localItems = getStoredCart(customerId);
       const { merged, missingInCloud, staleInCloudIds } = mergePermanentCartItems(
         customerId,
@@ -3761,12 +3790,18 @@ export default function App() {
       console.warn('Cart subscription error:', err);
     }
 
-    // Fetch latest cloud cart and merge with any locally persisted items
-    fetchCartItemsFromCloud(customerId)
-      .then((items) => {
-        reconcileWithCloud(items || []);
-      })
-      .catch(() => {});
+    // Fallback one-time fetch ONLY if real-time listener doesn't deliver within 3.5s
+    const fallbackTimer = window.setTimeout(() => {
+      if (!settledInitialSnapshot) {
+        fetchCartItemsFromCloud(customerId)
+          .then((items) => {
+            if (!settledInitialSnapshot) {
+              reconcileWithCloud(items || []);
+            }
+          })
+          .catch(() => {});
+      }
+    }, 3500);
 
     const flushCartToStorage = () => {
       saveStoredCart(customerId, cartItemsRef.current);
@@ -3775,6 +3810,7 @@ export default function App() {
     window.addEventListener('pagehide', flushCartToStorage);
 
     return () => {
+      window.clearTimeout(fallbackTimer);
       flushCartToStorage();
       window.removeEventListener('beforeunload', flushCartToStorage);
       window.removeEventListener('pagehide', flushCartToStorage);
@@ -3799,13 +3835,28 @@ export default function App() {
     }
   }, [customerId, page, selectedProductForDetail, galleryProduct]);
 
-  // Real-time Firestore sync when owner dashboard is active
+  // Real-time Firestore sync when owner dashboard is active (updates unseen new order badge live without polling)
   useEffect(() => {
     if (page === 'owner') {
       const unsubOrders = subscribeToAllOrders((liveOrders) => {
         if (Array.isArray(liveOrders)) {
           setOwnerOrders(liveOrders);
           saveStoredOrders(liveOrders);
+          try {
+            const rawAck = localStorage.getItem('toynest_owner_acknowledged_time');
+            const ackTime = rawAck ? new Date(rawAck).getTime() : 0;
+            const seenIds = new Set(getSeenOwnerOrderIds());
+            const unseenNewOrders = liveOrders.filter((o) => {
+              if (o.status !== 'New' || seenIds.has(o.id)) return false;
+              if (ackTime > 0 && !isNaN(ackTime)) {
+                const orderTime = new Date(o.createdAt).getTime();
+                if (!isNaN(orderTime) && orderTime <= ackTime) return false;
+              }
+              return true;
+            });
+            setOwnerNewOrdersCount(unseenNewOrders.length);
+            setHasOwnerOrderNotification(unseenNewOrders.length > 0);
+          } catch {}
         }
       });
       const unsubSettings = subscribeToSettings((settings) => {
@@ -4326,10 +4377,21 @@ export default function App() {
     setErrorMessage('');
     try {
       await Promise.all([
-        loadProducts(),
-        loadShopModes(),
-        loadColours(),
-        fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
+        loadProducts({ forceRefresh: true }),
+        loadStoreSettings(true),
+        loadColours(true),
+        loadPopularSearches(true),
+        fetchDiscountCampaignsFromCloud({ forceRefresh: true })
+          .then((campaigns) => {
+            if (Array.isArray(campaigns)) {
+              setDiscountCampaigns(campaigns);
+              saveStoredDiscountCampaigns(campaigns);
+            }
+          })
+          .catch(() => {}),
+        fetchRescueDealsFromCloud({ forceRefresh: true })
+          .then((d) => Array.isArray(d) && setRescueDeals(d))
+          .catch(() => {}),
       ]);
       setSuccessMessage('Shop refreshed. You are seeing the latest published toys.');
     } finally {
@@ -4341,13 +4403,16 @@ export default function App() {
     setIsRefreshing(true);
     setErrorMessage('');
     setSuccessMessage('');
+    invalidateFirestoreCache();
     try {
       await Promise.all([
-        loadOwnerProducts(),
+        loadOwnerProducts(true),
         loadOwnerOrders(),
-        loadColours(),
-        loadShopModes(),
-        fetchRescueDealsFromCloud().then((d) => Array.isArray(d) && setRescueDeals(d)).catch(() => {}),
+        loadColours(true),
+        loadStoreSettings(true),
+        fetchRescueDealsFromCloud({ forceRefresh: true })
+          .then((d) => Array.isArray(d) && setRescueDeals(d))
+          .catch(() => {}),
       ]);
       if (ownerTab === 'suggestions') await loadOwnerSuggestions();
       if (ownerTab === 'questions') await loadOwnerProductQuestions();
@@ -4356,11 +4421,7 @@ export default function App() {
         await loadOwnerWatchdogData();
         await runWatchdogScan(true);
       }
-      if (ownerTab === 'sections') await loadShopModes();
-      if (ownerTab === 'filamentSettings') await loadShopModes();
-      if (ownerTab === 'payment') await loadPaymentQr();
-      if (ownerTab === 'colours') await loadColours();
-      if (ownerTab === 'popularSearches') await loadPopularSearches();
+      if (ownerTab === 'popularSearches') await loadPopularSearches(true);
       if (ownerTab === 'analytics') await loadAnalyticsData();
       setSuccessMessage('Dashboard refreshed with the latest data.');
     } finally {
@@ -4393,8 +4454,7 @@ export default function App() {
       setErrorMessage('');
       setPage('owner');
       setOwnerTab('products');
-      loadOwnerProducts().catch(() => {});
-      loadOwnerOrders().catch(() => {});
+      void loadOwnerProducts();
       setLoading(false);
       return;
     }
@@ -4405,7 +4465,6 @@ export default function App() {
       setPage('owner');
       setOwnerTab('products');
       await loadOwnerProducts();
-      await loadOwnerOrders();
     } catch {
       setErrorMessage('Incorrect PIN. Please try again.');
     } finally {
@@ -7367,10 +7426,43 @@ export default function App() {
                     )
                   ).sort(),
                 ]}
-                onChange={(cat) => setSelectedCategory(cat)}
+                onChange={(cat) => {
+                  setSelectedCategory(cat);
+                  if (cat !== 'All categories' && hasMoreProducts) {
+                    void ensureAllProductSummariesLoaded();
+                  }
+                }}
               />
 
-              {products.filter((p) => p.available !== false).length === 0 ? (
+              {productsError && (
+                <div className="catalog-sync-notice" role="status">
+                  <span>{productsError}</span>
+                  <button
+                    type="button"
+                    className="catalog-sync-retry-btn"
+                    onClick={() => void loadProducts({ forceRefresh: true })}
+                    disabled={productsLoading || isRefreshing}
+                  >
+                    <RefreshCw size={13} className={productsLoading ? 'refresh-spinning' : ''} /> Retry
+                  </button>
+                </div>
+              )}
+
+              {productsLoading && products.filter((p) => p.available !== false).length === 0 ? (
+                <div className="product-grid" aria-busy="true" aria-label="Loading Playnix toys">
+                  {Array.from({ length: 6 }).map((_, sIdx) => (
+                    <div className="product-card product-skeleton-card" key={`skel-${sIdx}`}>
+                      <div className="product-image product-skeleton-media" />
+                      <div className="product-info">
+                        <div className="product-skeleton-line short" />
+                        <div className="product-skeleton-line title" />
+                        <div className="product-skeleton-line" />
+                        <div className="product-skeleton-line medium" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : products.filter((p) => p.available !== false).length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-icon">🪁</div>
                   <h3>The toy shelf is waiting!</h3>
@@ -7380,106 +7472,54 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                <div className="product-grid category-transition-grid" key={`cat-grid-${selectedCategory}`}>
-                  {products
-                    .filter(
-                      (p) =>
-                        p.available !== false &&
-                        (selectedCategory === 'All categories' ||
-                          (p.category || 'Other') === selectedCategory)
-                    )
-                    .map((p, idx) => {
-                      const count = (p.imageUrls && p.imageUrls.length) || (p.imageUrl ? 1 : 0);
-                      const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
-                      const isAboveFold = idx < 2;
-                      const activeOffer = activeOffersByProductId.get(p.id);
-                      const campaignDiscount = calculateProductDiscount(p, activeDiscountCampaigns);
-                      const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
-                      const effectivePrice = activeOffer
-                        ? activeOffer.discountedPrice
-                        : campaignDiscount.isDiscounted
-                        ? campaignDiscount.discountedPrice
-                        : p.price;
-                      const originalPrice = p.price;
-                      const savingsAmount = originalPrice - effectivePrice;
-                      const discountPct =
-                        originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
-                      const isJustAdded = justAddedProductId === p.id;
+                <>
+                  <div className="product-grid category-transition-grid" key={`cat-grid-${selectedCategory}`}>
+                    {products
+                      .filter(
+                        (p) =>
+                          p.available !== false &&
+                          (selectedCategory === 'All categories' ||
+                            (p.category || 'Other') === selectedCategory)
+                      )
+                      .map((p, idx) => {
+                        const count = p.photoCount || (p.imageUrls && p.imageUrls.length) || (p.imageUrl ? 1 : 0);
+                        const firstImg = (p.imageUrls && p.imageUrls[0]) || p.imageUrl;
+                        const isAboveFold = idx < 4;
+                        const activeOffer = activeOffersByProductId.get(p.id);
+                        const campaignDiscount = calculateProductDiscount(p, activeDiscountCampaigns);
+                        const hasDiscount = Boolean(activeOffer || campaignDiscount.isDiscounted);
+                        const effectivePrice = activeOffer
+                          ? activeOffer.discountedPrice
+                          : campaignDiscount.isDiscounted
+                          ? campaignDiscount.discountedPrice
+                          : p.price;
+                        const originalPrice = p.price;
+                        const savingsAmount = originalPrice - effectivePrice;
+                        const discountPct =
+                          originalPrice > 0 ? Math.round((savingsAmount / originalPrice) * 100) : 0;
+                        const isJustAdded = justAddedProductId === p.id;
 
-                      const productHref = getProductPath(p, products);
+                        const productHref = getProductPath(p, products);
 
-                      return (
-                        <article
-                          className="product-card product-card-reveal"
-                          key={p.id}
-                          style={
-                            {
-                              '--reveal-delay': `${Math.min(idx % 6, 5) * 45}ms`,
-                            } as React.CSSProperties
-                          }
-                          onClick={() => {
-                            if (window.getSelection()?.toString().trim()) return;
-                            navigateToProduct(p);
-                          }}
-                        >
-                          <div className="product-media-wrap">
-                            <a
-                              href={productHref}
-                              className="product-image product-image-button"
-                              aria-label={`View details and photos for ${p.name}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                                  e.preventDefault();
-                                  navigateToProduct(p);
-                                }
-                              }}
-                            >
-                              {firstImg ? (
-                                <img
-                                  src={firstImg}
-                                  alt={p.name}
-                                  loading={isAboveFold ? 'eager' : 'lazy'}
-                                  decoding={isAboveFold ? 'sync' : 'async'}
-                                  fetchPriority={isAboveFold ? 'high' : 'low'}
-                                  width={320}
-                                  height={220}
-                                />
-                              ) : (
-                                <div className="placeholder-toy">🧸</div>
-                              )}
-                              {activeOffer ? (
-                                <span className="catalog-card-offer-badge">
-                                  <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
-                                </span>
-                              ) : campaignDiscount.isDiscounted ? (
-                                <span className="catalog-festival-badge">
-                                  <Sparkles size={10} /> {campaignDiscount.discountLabel}
-                                </span>
-                              ) : null}
-                              <span className="product-badge">
-                                {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
-                              </span>
-                            </a>
-                          </div>
-
-                          <div className="product-info">
-                            <span className="product-category">{p.category || 'Other'}</span>
-
-                            {activeOffer ? (
-                              <div className="catalog-offer-timer-strip">
-                                <Clock size={12} /> Ends: {formatTimeRemaining(activeOffer.endAt, currentTime).formatted}
-                              </div>
-                            ) : campaignDiscount.isDiscounted && primaryActiveCampaign ? (
-                              <div className="catalog-offer-timer-strip" style={{ color: '#b45309', background: '#fef3c7' }}>
-                                <Clock size={12} /> {primaryActiveCampaign.name}: {formatTimeRemaining(primaryActiveCampaign.endAt, currentTime).formatted}
-                              </div>
-                            ) : null}
-
-                            <h3>
+                        return (
+                          <article
+                            className="product-card product-card-reveal"
+                            key={p.id}
+                            style={
+                              {
+                                '--reveal-delay': `${Math.min(idx % 6, 5) * 45}ms`,
+                              } as React.CSSProperties
+                            }
+                            onClick={() => {
+                              if (window.getSelection()?.toString().trim()) return;
+                              navigateToProduct(p);
+                            }}
+                          >
+                            <div className="product-media-wrap">
                               <a
                                 href={productHref}
-                                className="product-title-link"
+                                className="product-image product-image-button"
+                                aria-label={`View details and photos for ${p.name}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -7488,76 +7528,149 @@ export default function App() {
                                   }
                                 }}
                               >
-                                {p.name}
+                                {firstImg ? (
+                                  <img
+                                    src={firstImg}
+                                    alt={p.name}
+                                    loading={isAboveFold ? 'eager' : 'lazy'}
+                                    decoding="async"
+                                    fetchPriority={isAboveFold ? 'high' : 'low'}
+                                    width={320}
+                                    height={220}
+                                  />
+                                ) : (
+                                  <div className="placeholder-toy">🧸</div>
+                                )}
+                                {activeOffer ? (
+                                  <span className="catalog-card-offer-badge">
+                                    <Sparkles size={10} style={{ display: 'inline', marginRight: '3px' }} /> SPECIAL OFFER
+                                  </span>
+                                ) : campaignDiscount.isDiscounted ? (
+                                  <span className="catalog-festival-badge">
+                                    <Sparkles size={10} /> {campaignDiscount.discountLabel}
+                                  </span>
+                                ) : null}
+                                <span className="product-badge">
+                                  {count > 1 ? `${count} PHOTOS · TAP TO VIEW` : 'TAP TO VIEW'}
+                                </span>
                               </a>
-                            </h3>
-                            <p className="product-desc">
-                              {p.description || 'A fun new friend for playtime.'}
-                            </p>
-                            <div className="product-bottom">
-                              {hasDiscount ? (
-                                <div>
-                                  <span style={{ fontSize: '12px', color: '#88927e', textDecoration: 'line-through', marginRight: '6px' }}>
-                                    {da(originalPrice)}
-                                  </span>
-                                  <strong style={{ color: '#15803d', fontSize: '20px' }}>{da(effectivePrice)}</strong>
-                                  <span style={{ display: 'block', fontSize: '10px', color: '#15803d', fontWeight: 800 }}>
-                                    Save {da(savingsAmount)} ({discountPct}% OFF)
-                                  </span>
+                            </div>
+
+                            <div className="product-info">
+                              <span className="product-category">{p.category || 'Other'}</span>
+
+                              {activeOffer ? (
+                                <div className="catalog-offer-timer-strip">
+                                  <Clock size={12} /> Ends: {formatTimeRemaining(activeOffer.endAt, currentTime).formatted}
                                 </div>
-                              ) : (
-                                <strong>{da(p.price)}</strong>
-                              )}
-                              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                                <button
-                                  type="button"
-                                  className={`secondary-btn product-add-cart-btn ${isJustAdded ? 'is-just-added' : ''}`}
-                                  style={{ padding: '8px 11px', borderRadius: '10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                                  title="Add to cart"
-                                  aria-label={`Add ${p.name} to cart`}
+                              ) : campaignDiscount.isDiscounted && primaryActiveCampaign ? (
+                                <div className="catalog-offer-timer-strip" style={{ color: '#b45309', background: '#fef3c7' }}>
+                                  <Clock size={12} /> {primaryActiveCampaign.name}: {formatTimeRemaining(primaryActiveCampaign.endAt, currentTime).formatted}
+                                </div>
+                              ) : null}
+
+                              <h3>
+                                <a
+                                  href={productHref}
+                                  className="product-title-link"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    void handleAddToCart(p, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
-                                  }}
-                                >
-                                  {isJustAdded ? <Check size={15} /> : <ShoppingCart size={15} />}
-                                </button>
-                                <button
-                                  className="buy-btn"
-                                  style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (activeOffer) {
-                                      setSelectedOfferForBuy(activeOffer);
-                                    } else {
-                                      setSelectedOfferForBuy(null);
+                                    if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                                      e.preventDefault();
+                                      navigateToProduct(p);
                                     }
-                                    setSelectedProductForBuy(p);
-                                    setSelectedDealForBuy(null);
-                                    setOrderQuantity(1);
-                                    setCheckoutMode(null);
-                                    setCheckoutForm({
-                                      name: '',
-                                      studentClass: '',
-                                      section: '',
-                                      phone: '',
-                                      address: '',
-                                      note: '',
-                                      colour: '',
-                                    });
-                                    setErrorMessage('');
-                                    setPage('buy');
                                   }}
                                 >
-                                  {hasDiscount ? 'Grab Deal' : 'Buy now'} <ArrowLeft size={15} />
-                                </button>
+                                  {p.name}
+                                </a>
+                              </h3>
+                              <p className="product-desc">
+                                {p.description || 'A fun new friend for playtime.'}
+                              </p>
+                              <div className="product-bottom">
+                                {hasDiscount ? (
+                                  <div>
+                                    <span style={{ fontSize: '12px', color: '#88927e', textDecoration: 'line-through', marginRight: '6px' }}>
+                                      {da(originalPrice)}
+                                    </span>
+                                    <strong style={{ color: '#15803d', fontSize: '20px' }}>{da(effectivePrice)}</strong>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#15803d', fontWeight: 800 }}>
+                                      Save {da(savingsAmount)} ({discountPct}% OFF)
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <strong>{da(p.price)}</strong>
+                                )}
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                  <button
+                                    type="button"
+                                    className={`secondary-btn product-add-cart-btn ${isJustAdded ? 'is-just-added' : ''}`}
+                                    style={{ padding: '8px 11px', borderRadius: '10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                                    title="Add to cart"
+                                    aria-label={`Add ${p.name} to cart`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleAddToCart(p, '', 1, false, undefined, Boolean(activeOffer), activeOffer?.id);
+                                    }}
+                                  >
+                                    {isJustAdded ? <Check size={15} /> : <ShoppingCart size={15} />}
+                                  </button>
+                                  <button
+                                    className="buy-btn"
+                                    style={hasDiscount ? { background: '#273824', color: '#ffffff' } : {}}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (activeOffer) {
+                                        setSelectedOfferForBuy(activeOffer);
+                                      } else {
+                                        setSelectedOfferForBuy(null);
+                                      }
+                                      setSelectedProductForBuy(p);
+                                      setSelectedDealForBuy(null);
+                                      setOrderQuantity(1);
+                                      setCheckoutMode(null);
+                                      setCheckoutForm({
+                                        name: '',
+                                        studentClass: '',
+                                        section: '',
+                                        phone: '',
+                                        address: '',
+                                        note: '',
+                                        colour: '',
+                                      });
+                                      setErrorMessage('');
+                                      setPage('buy');
+                                    }}
+                                  >
+                                    {hasDiscount ? 'Grab Deal' : 'Buy now'} <ArrowLeft size={15} />
+                                  </button>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        </article>
-                      );
-                    })}
-                </div>
+                          </article>
+                        );
+                      })}
+                  </div>
+
+                  {hasMoreProducts && selectedCategory === 'All categories' && (
+                    <div className="catalog-load-more-wrap">
+                      <button
+                        type="button"
+                        className="secondary-btn catalog-load-more-btn"
+                        onClick={() => void loadMoreProducts()}
+                        disabled={loadingMoreProducts}
+                      >
+                        {loadingMoreProducts ? (
+                          <>
+                            <RefreshCw size={15} className="refresh-spinning" /> Loading more toys…
+                          </>
+                        ) : (
+                          <>Load more toys</>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </section>
           </>
@@ -7617,20 +7730,33 @@ export default function App() {
                     <div className="empty-icon">🔍</div>
                     <h1>Toy not found</h1>
                     <p>
-                      We couldn&apos;t find a product at this URL. It may have been removed or renamed.
+                      {productsError
+                        ? 'We could not reach the shop right now. Check your connection and try again.'
+                        : "We couldn't find a product at this URL. It may have been removed or renamed."}
                     </p>
-                    <a
-                      href="/"
-                      className="primary-btn"
-                      onClick={(e) => {
-                        if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                          e.preventDefault();
-                          navigateToHome();
-                        }
-                      }}
-                    >
-                      <ArrowLeft size={16} /> Back to Playnix shop
-                    </a>
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                      {productsError && (
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          onClick={() => void loadProducts({ forceRefresh: true })}
+                        >
+                          <RefreshCw size={15} /> Retry
+                        </button>
+                      )}
+                      <a
+                        href="/"
+                        className="primary-btn"
+                        onClick={(e) => {
+                          if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                            e.preventDefault();
+                            navigateToHome();
+                          }
+                        }}
+                      >
+                        <ArrowLeft size={16} /> Back to Playnix shop
+                      </a>
+                    </div>
                   </>
                 )}
               </div>
