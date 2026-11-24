@@ -72,6 +72,9 @@
         "paymentQrUrl": { "type": "string", "maxLength": 1000 },
         "filamentCostPerGram": { "type": "number", "description": "Configured cost of 1 gram of filament in INR for the AI Filament Price Calculator" },
         "filamentCostUpdatedAt": { "type": "string", "maxLength": 64 },
+        "productShuffleOrder": { "type": "array", "description": "Ordered array of product IDs for homepage catalog display without mutating product records" },
+        "productAutoShuffle": { "type": "boolean", "description": "Whether Playnix automatically shuffles products when a visitor opens the website" },
+        "productShuffledAt": { "type": "string", "maxLength": 64 },
         "list": { "type": "array" }
       }
     },

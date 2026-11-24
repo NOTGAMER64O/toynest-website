@@ -383,6 +383,19 @@ async function runFirestoreStructuredQueryViaRest(
   }
 }
 
+function parseShuffleOrderIds(raw: any): string[] {
+  if (!Array.isArray(raw)) return [];
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const clean = typeof item === 'string' ? item.trim() : '';
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    unique.push(clean);
+  }
+  return unique;
+}
+
 function buildSettingsFromRaw(data: Record<string, any>): StoreSettings {
   return {
     adultPublished: data.adultPublished !== false,
@@ -392,6 +405,9 @@ function buildSettingsFromRaw(data: Record<string, any>): StoreSettings {
     moneyAdjustmentHistory: Array.isArray(data.moneyAdjustmentHistory) ? data.moneyAdjustmentHistory : [],
     filamentCostPerGram: parseFilamentCostPerGram(data.filamentCostPerGram),
     filamentCostUpdatedAt: typeof data.filamentCostUpdatedAt === 'string' ? data.filamentCostUpdatedAt : undefined,
+    productShuffleOrder: parseShuffleOrderIds(data.productShuffleOrder),
+    productAutoShuffle: data.productAutoShuffle === true,
+    productShuffledAt: typeof data.productShuffledAt === 'string' ? data.productShuffledAt : undefined,
   };
 }
 
@@ -1259,6 +1275,9 @@ export interface StoreSettings {
   moneyAdjustmentHistory?: MoneyAdjustmentItem[];
   filamentCostPerGram?: number | null;
   filamentCostUpdatedAt?: string;
+  productShuffleOrder?: string[];
+  productAutoShuffle?: boolean;
+  productShuffledAt?: string;
 }
 
 function parseFilamentCostPerGram(raw: any): number | null {
@@ -1300,6 +1319,8 @@ export async function fetchSettingsFromCloud(
       manualMoneyAdjustment: 0,
       moneyAdjustmentHistory: [],
       filamentCostPerGram: null,
+      productShuffleOrder: [],
+      productAutoShuffle: false,
     };
   });
 }

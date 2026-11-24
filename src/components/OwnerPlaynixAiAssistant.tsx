@@ -15,9 +15,11 @@ import {
   Plus,
   Power,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
+  Shuffle,
   SkipForward,
   SlidersHorizontal,
   Sparkles,
@@ -39,7 +41,7 @@ import {
 } from '../defaultData';
 import { OrderVerificationCard } from './OrderVerificationCard';
 
-export type PlaynixAiSubView = 'overview' | 'orderGuard' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
+export type PlaynixAiSubView = 'overview' | 'shuffler' | 'orderGuard' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
 
 interface OwnerPlaynixAiAssistantProps {
   aiState: AiAssistantState;
@@ -97,6 +99,15 @@ interface OwnerPlaynixAiAssistantProps {
   onRejectOrder?: (order: Order, reason?: string) => Promise<void>;
   onReinspectOrder?: (order: Order) => Promise<void>;
   onOpenOrderInDashboard?: (order: Order) => void;
+  homepageProducts?: Product[];
+  productAutoShuffle?: boolean;
+  productShuffleOrder?: string[];
+  productShuffledAt?: string;
+  shuffleSaving?: boolean;
+  onShuffleAllProducts?: () => Promise<void>;
+  onShuffleAgain?: () => Promise<void>;
+  onToggleAutoShuffle?: (enabled: boolean) => Promise<void>;
+  onResetShuffleOrder?: () => Promise<void>;
 }
 
 const KNOWLEDGE_CATEGORIES: Array<{ value: AiKnowledgeCategory; label: string }> = [
@@ -147,9 +158,20 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   onRejectOrder,
   onReinspectOrder,
   onOpenOrderInDashboard,
+  homepageProducts,
+  productAutoShuffle = false,
+  productShuffleOrder = [],
+  productShuffledAt = '',
+  shuffleSaving = false,
+  onShuffleAllProducts,
+  onShuffleAgain,
+  onToggleAutoShuffle,
+  onResetShuffleOrder,
 }) => {
   const [subView, setSubView] = useState<PlaynixAiSubView>('overview');
   const [orderGuardFilter, setOrderGuardFilter] = useState<'review' | 'clarification' | 'approved' | 'rejected' | 'all'>('review');
+  const [shuffleNotice, setShuffleNotice] = useState<string>('');
+  const [shuffleError, setShuffleError] = useState<string>('');
 
   // Guidance ("AI Needs Help") States
   const [guidanceFilter, setGuidanceFilter] = useState<'open' | 'answered' | 'dismissed'>('open');
@@ -814,6 +836,15 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
         <button
           type="button"
           role="tab"
+          aria-selected={subView === 'shuffler'}
+          className={`offers-filter-tab-btn ${subView === 'shuffler' ? 'active' : ''}`}
+          onClick={() => setSubView('shuffler')}
+        >
+          <Shuffle size={14} /> Product Shuffler
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={subView === 'orderGuard'}
           className={`offers-filter-tab-btn ${subView === 'orderGuard' ? 'active' : ''}`}
           onClick={() => setSubView('orderGuard')}
@@ -941,6 +972,13 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               >
                 <Database size={15} /> Browse Knowledge Base
               </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setSubView('shuffler')}
+              >
+                <Shuffle size={15} /> Product Shuffler
+              </button>
             </div>
           </div>
 
@@ -998,6 +1036,210 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
           </div>
         </div>
       )}
+
+      {/* =====================================================================
+          VIEW: PRODUCT SHUFFLER (HOMEPAGE CATALOG ORDERING)
+         ===================================================================== */}
+      {subView === 'shuffler' && (() => {
+        const previewList = (homepageProducts || products.filter((p) => p.available !== false));
+        const hasCustomOrder = productShuffleOrder.length > 0;
+        const activeModeLabel = productAutoShuffle
+          ? 'Automatic Shuffle on Visit'
+          : hasCustomOrder
+          ? 'Custom Shuffled Order'
+          : 'Default Latest Order';
+
+        const runShufflerAction = async (
+          actionFn: (() => Promise<void>) | undefined,
+          successText: string
+        ) => {
+          if (!actionFn || shuffleSaving) return;
+          setShuffleError('');
+          setShuffleNotice('');
+          try {
+            await actionFn();
+            setShuffleNotice(successText);
+          } catch (err: any) {
+            setShuffleError(err?.message || 'Could not update product arrangement right now.');
+          }
+        };
+
+        return (
+          <div className="playnix-ai-card playnix-shuffler-card">
+            <div className="playnix-ai-card-head">
+              <div>
+                <span className="eyebrow">PLAYNIX AI · CATALOG ARRANGEMENT</span>
+                <h3>Product Shuffler</h3>
+                <p className="playnix-ai-subtitle">
+                  Randomly rearrange the display order of all products on your homepage without modifying prices, descriptions, inventory data, or product URLs.
+                </p>
+              </div>
+              <div className="playnix-shuffler-meta-line">
+                <span>{previewList.length} live toys</span>
+                <span aria-hidden="true">·</span>
+                <span>{activeModeLabel}</span>
+                {productShuffledAt && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>Updated {formatInIST(productShuffledAt)}</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="playnix-shuffler-actions-row">
+              <button
+                type="button"
+                className="primary-btn"
+                disabled={shuffleSaving || previewList.length < 2 || !onShuffleAllProducts}
+                onClick={() =>
+                  void runShufflerAction(
+                    onShuffleAllProducts,
+                    `Shuffled all ${previewList.length} products across your homepage.`
+                  )
+                }
+              >
+                <Shuffle size={15} />
+                {shuffleSaving ? 'Shuffling...' : 'Shuffle All Products'}
+              </button>
+
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={shuffleSaving || previewList.length < 2 || !onShuffleAgain}
+                onClick={() =>
+                  void runShufflerAction(
+                    onShuffleAgain,
+                    'Generated a brand-new random product arrangement.'
+                  )
+                }
+              >
+                <RefreshCw size={15} className={shuffleSaving ? 'refresh-spinning' : ''} />
+                Shuffle Again
+              </button>
+
+              {(hasCustomOrder || productAutoShuffle) && onResetShuffleOrder && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={shuffleSaving}
+                  onClick={() =>
+                    void runShufflerAction(
+                      onResetShuffleOrder,
+                      'Restored default newest-first homepage product order.'
+                    )
+                  }
+                >
+                  <RotateCcw size={15} />
+                  Restore Default Order
+                </button>
+              )}
+            </div>
+
+            <div className="playnix-shuffler-auto-row">
+              <div className="playnix-shuffler-auto-copy">
+                <strong>Automatic Shuffle</strong>
+                <p>
+                  When enabled, Playnix automatically generates a fresh random order for all products whenever a visitor opens the website.
+                </p>
+              </div>
+              <div className="playnix-shuffler-switch-wrap">
+                <span className="playnix-shuffler-switch-label">
+                  {productAutoShuffle ? 'Enabled' : 'Disabled'}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={productAutoShuffle}
+                  aria-label="Toggle automatic product shuffle on visitor open"
+                  className={`playnix-shuffler-switch ${productAutoShuffle ? 'is-on' : ''}`}
+                  disabled={shuffleSaving || !onToggleAutoShuffle}
+                  onClick={() =>
+                    void runShufflerAction(
+                      () => (onToggleAutoShuffle ? onToggleAutoShuffle(!productAutoShuffle) : Promise.resolve()),
+                      !productAutoShuffle
+                        ? 'Automatic Shuffle enabled — every website visit gets a fresh arrangement.'
+                        : 'Automatic Shuffle turned off.'
+                    )
+                  }
+                >
+                  <span className="playnix-shuffler-switch-thumb" />
+                </button>
+              </div>
+            </div>
+
+            {shuffleError && (
+              <p className="error-msg" style={{ margin: 0 }}>
+                {shuffleError}
+              </p>
+            )}
+            {shuffleNotice && (
+              <p className="success-msg" style={{ margin: 0 }}>
+                {shuffleNotice}
+              </p>
+            )}
+
+            <div className="playnix-shuffler-preview">
+              <div className="playnix-shuffler-preview-head">
+                <strong>Homepage Display Order Preview</strong>
+                <span>
+                  {productAutoShuffle
+                    ? 'Current session sample · visitors see a fresh shuffle on open'
+                    : hasCustomOrder
+                    ? 'Live shuffled order visible on homepage'
+                    : 'Current default homepage order'}
+                </span>
+              </div>
+
+              {previewList.length === 0 ? (
+                <div className="empty-state compact">
+                  <div className="empty-icon">
+                    <Shuffle size={28} />
+                  </div>
+                  <h3>No published products to shuffle</h3>
+                  <p>Publish toys in Manage Toys first, then return here to shuffle their display order.</p>
+                </div>
+              ) : (
+                <ol className="playnix-shuffler-order-list">
+                  {previewList.slice(0, 12).map((item, idx) => {
+                    const thumb = (item.imageUrls && item.imageUrls[0]) || item.imageUrl;
+                    return (
+                      <li key={item.id} className="playnix-shuffler-order-item">
+                        <span className="playnix-shuffler-rank">#{idx + 1}</span>
+                        <div className="playnix-shuffler-thumb">
+                          {thumb ? (
+                            <img
+                              src={thumb}
+                              alt={item.name}
+                              loading="lazy"
+                              decoding="async"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : (
+                            <span aria-hidden="true">🧸</span>
+                          )}
+                        </div>
+                        <div className="playnix-shuffler-item-info">
+                          <strong>{item.name}</strong>
+                          <span>
+                            {item.category || 'Other'} · ₹{item.price}
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+
+              {previewList.length > 12 && (
+                <p className="playnix-shuffler-more-note">
+                  Showing first 12 positions of {previewList.length} live products · all {previewList.length} products are included when shuffling.
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* =====================================================================
           VIEW 1-GUARD: PLAYNIX AI ORDER VERIFICATION & SUSPICIOUS ORDER GUARD

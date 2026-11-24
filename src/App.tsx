@@ -465,6 +465,10 @@ import {
   getUniqueProductSlug,
   parseProductSlugFromPath,
 } from './utils/productSlug';
+import {
+  shuffleProductIds,
+  orderProductsByShuffleIds,
+} from './utils/productShuffle';
 
 function getStoredColours(): string[] {
   try {
@@ -998,6 +1002,32 @@ export default function App() {
   const [lastSearchCloudSyncAt, setLastSearchCloudSyncAt] = useState<number>(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('All categories');
   const allSummariesLoadedRef = useRef<boolean>(false);
+  const [productShuffleOrder, setProductShuffleOrder] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('playnix_product_shuffle_order');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [productAutoShuffle, setProductAutoShuffle] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('playnix_product_auto_shuffle') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [productShuffledAt, setProductShuffledAt] = useState<string>(() => {
+    try {
+      return localStorage.getItem('playnix_product_shuffled_at') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [sessionAutoShuffleOrder, setSessionAutoShuffleOrder] = useState<string[]>([]);
+  const [shuffleSaving, setShuffleSaving] = useState<boolean>(false);
+  const autoShuffleVisitDoneRef = useRef<boolean>(false);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [ownerOrders, setOwnerOrders] = useState<Order[]>([]);
   const [manualMoneyAdjustment, setManualMoneyAdjustment] = useState<number>(() => getStoredMoneyAdjustment());
@@ -2932,6 +2962,27 @@ export default function App() {
         localStorage.setItem('playnix_filament_cost_per_gram', String(cleanRate));
       } catch {}
     }
+    if (Array.isArray(settings.productShuffleOrder)) {
+      const cleanOrder = settings.productShuffleOrder.filter(
+        (id: any): id is string => typeof id === 'string' && id.trim().length > 0
+      );
+      setProductShuffleOrder(cleanOrder);
+      try {
+        localStorage.setItem('playnix_product_shuffle_order', JSON.stringify(cleanOrder));
+      } catch {}
+    }
+    if (typeof settings.productAutoShuffle === 'boolean') {
+      setProductAutoShuffle(settings.productAutoShuffle);
+      try {
+        localStorage.setItem('playnix_product_auto_shuffle', settings.productAutoShuffle ? 'true' : 'false');
+      } catch {}
+    }
+    if (typeof settings.productShuffledAt === 'string') {
+      setProductShuffledAt(settings.productShuffledAt);
+      try {
+        localStorage.setItem('playnix_product_shuffled_at', settings.productShuffledAt);
+      } catch {}
+    }
     return true;
   };
 
@@ -3657,6 +3708,192 @@ export default function App() {
       unsubOffers();
     };
   }, []);
+
+  // Ensure all lightweight summaries are loaded when shuffling or auto-shuffling is active
+  // so every product on the website participates cleanly without pulling heavy photo arrays.
+  useEffect(() => {
+    if (!cloudProductsLoaded) return;
+    if ((productAutoShuffle || productShuffleOrder.length > 0) && hasMoreProducts) {
+      void ensureAllProductSummariesLoaded();
+    }
+  }, [cloudProductsLoaded, productAutoShuffle, productShuffleOrder.length, hasMoreProducts]);
+
+  // Automatic Shuffle: once per website visit when enabled, generate a fresh random arrangement
+  useEffect(() => {
+    if (!productAutoShuffle) {
+      autoShuffleVisitDoneRef.current = false;
+      setSessionAutoShuffleOrder([]);
+      return;
+    }
+    if (!cloudProductsLoaded || products.length === 0) return;
+
+    const allIds = Array.from(new Set(products.map((p) => p.id).filter(Boolean)));
+    if (allIds.length === 0) return;
+
+    // Wait until full summaries finish loading before locking final visit shuffle,
+    // or shuffle immediately if no extra pages remain.
+    if (!hasMoreProducts && !autoShuffleVisitDoneRef.current) {
+      autoShuffleVisitDoneRef.current = true;
+      setSessionAutoShuffleOrder(shuffleProductIds(allIds));
+    } else if (hasMoreProducts && sessionAutoShuffleOrder.length === 0) {
+      setSessionAutoShuffleOrder(shuffleProductIds(allIds));
+    }
+  }, [productAutoShuffle, cloudProductsLoaded, hasMoreProducts, products.length]);
+
+  const activeShuffleIds = useMemo(() => {
+    if (productAutoShuffle) {
+      return sessionAutoShuffleOrder.length > 0 ? sessionAutoShuffleOrder : productShuffleOrder;
+    }
+    return productShuffleOrder;
+  }, [productAutoShuffle, sessionAutoShuffleOrder, productShuffleOrder]);
+
+  const homepageDisplayProducts = useMemo(
+    () => orderProductsByShuffleIds(products, activeShuffleIds),
+    [products, activeShuffleIds]
+  );
+
+  const ensureFullProductsListForShuffle = async (): Promise<Product[]> => {
+    if (hasMoreProducts) {
+      try {
+        const cloudSummaries = await fetchAllProductSummariesFromCloud();
+        if (Array.isArray(cloudSummaries) && cloudSummaries.length > 0) {
+          const merged = mergePreservingFullGalleries(cloudSummaries, productsRef.current, {
+            replaceCatalog: true,
+          });
+          setProducts(merged);
+          saveStoredProducts(merged);
+          setHasMoreProducts(false);
+          setProductsNextCursor(null);
+          allSummariesLoadedRef.current = true;
+          return merged;
+        }
+      } catch {}
+    }
+    return productsRef.current;
+  };
+
+  const persistShuffleSettings = async (updates: {
+    productShuffleOrder?: string[];
+    productAutoShuffle?: boolean;
+    productShuffledAt?: string;
+  }) => {
+    if (updates.productShuffleOrder !== undefined) {
+      setProductShuffleOrder(updates.productShuffleOrder);
+      try {
+        localStorage.setItem('playnix_product_shuffle_order', JSON.stringify(updates.productShuffleOrder));
+      } catch {}
+    }
+    if (updates.productAutoShuffle !== undefined) {
+      setProductAutoShuffle(updates.productAutoShuffle);
+      try {
+        localStorage.setItem('playnix_product_auto_shuffle', updates.productAutoShuffle ? 'true' : 'false');
+      } catch {}
+    }
+    if (updates.productShuffledAt !== undefined) {
+      setProductShuffledAt(updates.productShuffledAt);
+      try {
+        localStorage.setItem('playnix_product_shuffled_at', updates.productShuffledAt);
+      } catch {}
+    }
+
+    await saveSettingsToCloud(updates);
+  };
+
+  const handleShuffleAllProducts = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    setShuffleSaving(true);
+    try {
+      const latestProducts = await ensureFullProductsListForShuffle();
+      const allIds = Array.from(new Set(latestProducts.map((p) => p.id).filter(Boolean)));
+      const nextOrder = shuffleProductIds(allIds);
+      const nowIso = new Date().toISOString();
+      if (productAutoShuffle) {
+        autoShuffleVisitDoneRef.current = true;
+        setSessionAutoShuffleOrder(nextOrder);
+      }
+      await persistShuffleSettings({
+        productShuffleOrder: nextOrder,
+        productShuffledAt: nowIso,
+      });
+    } finally {
+      setShuffleSaving(false);
+    }
+  };
+
+  const handleShuffleAgain = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    setShuffleSaving(true);
+    try {
+      const latestProducts = await ensureFullProductsListForShuffle();
+      const currentOrderedIds = orderProductsByShuffleIds(
+        latestProducts,
+        activeShuffleIds
+      ).map((p) => p.id);
+      const nextOrder = shuffleProductIds(currentOrderedIds, currentOrderedIds);
+      const nowIso = new Date().toISOString();
+      if (productAutoShuffle) {
+        autoShuffleVisitDoneRef.current = true;
+        setSessionAutoShuffleOrder(nextOrder);
+      }
+      await persistShuffleSettings({
+        productShuffleOrder: nextOrder,
+        productShuffledAt: nowIso,
+      });
+    } finally {
+      setShuffleSaving(false);
+    }
+  };
+
+  const handleToggleAutoShuffle = async (enabled: boolean) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    setShuffleSaving(true);
+    try {
+      const latestProducts = await ensureFullProductsListForShuffle();
+      if (enabled) {
+        const allIds = Array.from(new Set(latestProducts.map((p) => p.id).filter(Boolean)));
+        const freshOrder = shuffleProductIds(allIds);
+        autoShuffleVisitDoneRef.current = true;
+        setSessionAutoShuffleOrder(freshOrder);
+        await persistShuffleSettings({
+          productAutoShuffle: true,
+          productShuffleOrder: productShuffleOrder.length > 0 ? productShuffleOrder : freshOrder,
+          productShuffledAt: productShuffledAt || new Date().toISOString(),
+        });
+      } else {
+        autoShuffleVisitDoneRef.current = false;
+        setSessionAutoShuffleOrder([]);
+        await persistShuffleSettings({
+          productAutoShuffle: false,
+        });
+      }
+    } finally {
+      setShuffleSaving(false);
+    }
+  };
+
+  const handleResetShuffleOrder = async () => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    setShuffleSaving(true);
+    try {
+      autoShuffleVisitDoneRef.current = false;
+      setSessionAutoShuffleOrder([]);
+      await persistShuffleSettings({
+        productShuffleOrder: [],
+        productAutoShuffle: false,
+        productShuffledAt: '',
+      });
+    } finally {
+      setShuffleSaving(false);
+    }
+  };
 
   // Only run 1-second live clock timer while offers or campaigns exist (avoids idle re-renders)
   useEffect(() => {
@@ -7474,7 +7711,7 @@ export default function App() {
               ) : (
                 <>
                   <div className="product-grid category-transition-grid" key={`cat-grid-${selectedCategory}`}>
-                    {products
+                    {homepageDisplayProducts
                       .filter(
                         (p) =>
                           p.available !== false &&
@@ -10543,6 +10780,15 @@ export default function App() {
                     el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
                   }, 120);
                 }}
+                homepageProducts={homepageDisplayProducts.filter((p) => p.available !== false)}
+                productAutoShuffle={productAutoShuffle}
+                productShuffleOrder={productShuffleOrder}
+                productShuffledAt={productShuffledAt}
+                shuffleSaving={shuffleSaving}
+                onShuffleAllProducts={handleShuffleAllProducts}
+                onShuffleAgain={handleShuffleAgain}
+                onToggleAutoShuffle={handleToggleAutoShuffle}
+                onResetShuffleOrder={handleResetShuffleOrder}
               />
             )}
 

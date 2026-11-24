@@ -10042,3 +10042,252 @@ a.product-image-button {
   font-weight: 600;
   text-align: center;
 }
+
+/* =========================================================================
+   PLAYNIX AI · PRODUCT SHUFFLER
+   ========================================================================= */
+
+.playnix-shuffler-meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #5b6653;
+  font-variant-numeric: tabular-nums;
+}
+
+.playnix-shuffler-actions-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.playnix-shuffler-actions-row .primary-btn,
+.playnix-shuffler-actions-row .secondary-btn {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.playnix-shuffler-auto-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 11px;
+  background: #fffefa;
+  border: 1px solid #e2e0d4;
+}
+
+.playnix-shuffler-auto-copy strong {
+  display: block;
+  font-family: 'Manrope', sans-serif;
+  font-size: 0.94rem;
+  color: #1f2b1e;
+  margin-bottom: 3px;
+}
+
+.playnix-shuffler-auto-copy p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #616b5b;
+}
+
+.playnix-shuffler-switch-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.playnix-shuffler-switch-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #3f4b3a;
+  min-width: 54px;
+  text-align: right;
+}
+
+.playnix-shuffler-switch {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid #cfd3c2;
+  background: #e3e5da;
+  padding: 0;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+  flex-shrink: 0;
+}
+
+.playnix-shuffler-switch:focus-visible {
+  outline: 2px solid #273824;
+  outline-offset: 2px;
+}
+
+.playnix-shuffler-switch.is-on {
+  background: #273824;
+  border-color: #273824;
+}
+
+.playnix-shuffler-switch:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.playnix-shuffler-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fffefa;
+  box-shadow: 0 1px 3px rgba(24, 34, 21, 0.25);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.playnix-shuffler-switch.is-on .playnix-shuffler-switch-thumb {
+  transform: translateX(22px);
+}
+
+.playnix-shuffler-preview {
+  display: grid;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid #eae8dc;
+}
+
+.playnix-shuffler-preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.playnix-shuffler-preview-head strong {
+  font-family: 'Manrope', sans-serif;
+  font-size: 0.92rem;
+  color: #1f2b1e;
+}
+
+.playnix-shuffler-preview-head span {
+  font-size: 0.76rem;
+  color: #656e5f;
+}
+
+.playnix-shuffler-order-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.playnix-shuffler-order-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: #fffefa;
+  border: 1px solid #e5e3d7;
+  min-width: 0;
+}
+
+.playnix-shuffler-rank {
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: #5b7236;
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+  flex-shrink: 0;
+}
+
+.playnix-shuffler-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f2f1e8;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.playnix-shuffler-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.playnix-shuffler-item-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.playnix-shuffler-item-info strong {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #1f2b1e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playnix-shuffler-item-info span {
+  font-size: 0.72rem;
+  color: #697262;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playnix-shuffler-more-note {
+  margin: 0;
+  font-size: 0.76rem;
+  color: #6b7365;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 960px) {
+  .playnix-shuffler-order-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .playnix-shuffler-auto-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .playnix-shuffler-switch-wrap {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .playnix-shuffler-switch-label {
+    text-align: left;
+  }
+
+  .playnix-shuffler-actions-row .primary-btn,
+  .playnix-shuffler-actions-row .secondary-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .playnix-shuffler-order-list {
+    grid-template-columns: 1fr;
+  }
+}
