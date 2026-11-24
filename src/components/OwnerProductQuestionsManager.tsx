@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import {
   type AiSuggestedReplyResult,
+  type PendingAiRejectionDraft,
   type Product,
   type ProductQuestion,
   type ProductQuestionStatus,
@@ -59,6 +60,7 @@ interface OwnerProductQuestionsManagerProps {
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }>;
+  onRejectAiResponse?: (draft: PendingAiRejectionDraft) => void;
   onOpenAiAssistant?: () => void;
 }
 
@@ -73,6 +75,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   onDeleteQuestion,
   onSuggestAiReply,
   onTeachAiFact,
+  onRejectAiResponse,
   onOpenAiAssistant,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'Pending' | 'Answered'>('all');
@@ -333,11 +336,22 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   };
 
   const handleRejectAiSuggestion = (item: ProductQuestion) => {
+    const rejectedSuggestion = aiSuggestionsByQId[item.id];
     hasManualEditRef.current = false;
     replyDraftRef.current = '';
     setReplyDraft('');
     setAiDecisionByQId((prev) => ({ ...prev, [item.id]: 'rejected' }));
-    setModalSuccess('AI suggestion cleared. Write your own custom answer below.');
+    setModalSuccess('AI suggestion cleared. Tell Playnix AI what was wrong so it learns.');
+    if (onRejectAiResponse && rejectedSuggestion?.suggestedAnswer) {
+      onRejectAiResponse({
+        featureKey: 'product_question_reply',
+        originalRequest: item.question,
+        rejectedResponse: rejectedSuggestion.suggestedAnswer,
+        productId: item.productId,
+        productName: item.productName,
+        dismissLabel: 'Skip Feedback',
+      });
+    }
     window.setTimeout(() => {
       replyTextareaRef.current?.focus();
     }, 30);

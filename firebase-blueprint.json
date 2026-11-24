@@ -371,6 +371,50 @@
         "at": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "category", "action", "actor", "details", "at"]
+    },
+    "AiOwnerLearningRecord": {
+      "title": "AiOwnerLearningRecord",
+      "description": "Private owner-only permanent learning record capturing an AI mistake, rejected output, and owner correction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "featureKey": {
+          "type": "string",
+          "enum": [
+            "product_question_reply",
+            "test_question",
+            "product_price_advisor",
+            "order_verification",
+            "ai_watchdog",
+            "ai_guidance",
+            "website_scanner",
+            "general"
+          ]
+        },
+        "featureName": { "type": "string", "maxLength": 120 },
+        "originalRequest": { "type": "string", "maxLength": 3000 },
+        "rejectedResponse": { "type": "string", "maxLength": 3000 },
+        "ownerCorrection": { "type": "string", "maxLength": 2000 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 60 },
+          "maxItems": 20
+        },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "featureKey",
+        "featureName",
+        "originalRequest",
+        "rejectedResponse",
+        "ownerCorrection",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -445,6 +489,10 @@
     "/watchdogLogs/{logId}": {
       "schema": { "$ref": "#/entities/WatchdogActivityLog" },
       "description": "Chronological activity log of Watchdog detections, scans, and owner alert decisions"
+    },
+    "/aiOwnerLearningRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/AiOwnerLearningRecord" },
+      "description": "Private owner-only permanent learning records from AI response rejections"
     }
   }
 }

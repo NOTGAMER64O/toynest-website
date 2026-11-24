@@ -19,8 +19,10 @@ import {
   ShieldCheck,
   Sparkles,
   Tag,
+  ThumbsDown,
 } from 'lucide-react';
 import {
+  type PendingAiRejectionDraft,
   type WatchdogActivityLog,
   type WatchdogAlert,
   type WatchdogAlertCategory,
@@ -49,6 +51,7 @@ interface OwnerAiWatchdogDashboardProps {
     ownerNote?: string
   ) => Promise<void>;
   onInspectTarget: (alert: WatchdogAlert) => void;
+  onRejectAiAlert?: (draft: PendingAiRejectionDraft) => void;
 }
 
 const CATEGORY_META: Record<
@@ -92,6 +95,7 @@ export const OwnerAiWatchdogDashboard: React.FC<OwnerAiWatchdogDashboardProps> =
   onRunScan,
   onUpdateAlertStatus,
   onInspectTarget,
+  onRejectAiAlert,
 }) => {
   const [categoryFilter, setCategoryFilter] = useState<'all' | WatchdogAlertCategory>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | WatchdogAlertStatus>('Pending');
@@ -164,7 +168,7 @@ export const OwnerAiWatchdogDashboard: React.FC<OwnerAiWatchdogDashboardProps> =
       .slice(0, 60);
   }, [logs, logCategoryFilter]);
 
-  const handleDecision = async (
+  const applyDecisionStatus = async (
     alert: WatchdogAlert,
     nextStatus: WatchdogAlertStatus
   ) => {
@@ -180,6 +184,40 @@ export const OwnerAiWatchdogDashboard: React.FC<OwnerAiWatchdogDashboardProps> =
     } finally {
       setSavingAlertId(null);
     }
+  };
+
+  const openAiAlertRejectionFeedback = (
+    alert: WatchdogAlert,
+    markIgnoredAfter: boolean
+  ) => {
+    if (!onRejectAiAlert) {
+      if (markIgnoredAfter) void applyDecisionStatus(alert, 'Ignored');
+      return;
+    }
+    onRejectAiAlert({
+      featureKey: 'ai_watchdog',
+      originalRequest: `Watchdog scan (${alert.category}) target: ${alert.targetLabel || alert.targetId || alert.targetType || 'Store'}`,
+      rejectedResponse: `[${alert.severity.toUpperCase()}] ${alert.title} — ${alert.explanation} (Suggested: ${alert.recommendedAction})`,
+      productId: alert.targetType === 'product' ? alert.targetId : undefined,
+      productName: alert.targetType === 'product' ? alert.targetLabel : undefined,
+      dismissLabel: markIgnoredAfter ? 'Ignore Without Feedback' : 'Cancel',
+      onComplete: markIgnoredAfter
+        ? async () => {
+            await applyDecisionStatus(alert, 'Ignored');
+          }
+        : undefined,
+    });
+  };
+
+  const handleDecision = async (
+    alert: WatchdogAlert,
+    nextStatus: WatchdogAlertStatus
+  ) => {
+    if (nextStatus === 'Ignored' && alert.detectedBy === 'gemini_ai' && onRejectAiAlert) {
+      openAiAlertRejectionFeedback(alert, true);
+      return;
+    }
+    await applyDecisionStatus(alert, nextStatus);
   };
 
   const renderSeverityIcon = (severity: WatchdogAlert['severity']) => {
@@ -682,8 +720,19 @@ export const OwnerAiWatchdogDashboard: React.FC<OwnerAiWatchdogDashboardProps> =
                             onClick={() => void handleDecision(alert, 'Ignored')}
                             className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-stone-100 px-2.5 py-1.5 text-xs font-semibold text-stone-700 hover:bg-stone-200 disabled:opacity-50 cursor-pointer"
                           >
-                            <EyeOff size={13} />
-                            Ignore
+                            {alert.detectedBy === 'gemini_ai' ? <ThumbsDown size={13} /> : <EyeOff size={13} />}
+                            {alert.detectedBy === 'gemini_ai' ? 'Reject / Ignore AI' : 'Ignore'}
+                          </button>
+                        )}
+                        {alert.status === 'Ignored' && alert.detectedBy === 'gemini_ai' && onRejectAiAlert && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => openAiAlertRejectionFeedback(alert, false)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50 cursor-pointer"
+                          >
+                            <ThumbsDown size={13} />
+                            Teach AI Why Wrong
                           </button>
                         )}
                         {alert.status !== 'Pending' && (

@@ -6,9 +6,15 @@ import {
   RefreshCw,
   Settings,
   Sparkles,
+  ThumbsDown,
   X,
 } from 'lucide-react';
-import { Product } from '../defaultData';
+import {
+  type AiOwnerLearningRecord,
+  type PendingAiRejectionDraft,
+  type Product,
+} from '../defaultData';
+import { buildCompactLearningPayload } from '../utils/aiLearningMemory';
 
 interface OwnerProductPriceAdvisorProps {
   pin: string;
@@ -20,6 +26,8 @@ interface OwnerProductPriceAdvisorProps {
   existingImageUrls?: string[];
   filamentCostPerGram: number | null;
   currentSellingPrice: string;
+  learningRecords?: AiOwnerLearningRecord[];
+  onRejectAiResponse?: (draft: PendingAiRejectionDraft) => void;
   onOpenFilamentSettings: () => void;
   onApplyPrice: (price: number) => void;
   onSetCategory?: (categoryText: string) => void;
@@ -75,6 +83,8 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
   existingImageUrls = [],
   filamentCostPerGram,
   currentSellingPrice,
+  learningRecords = [],
+  onRejectAiResponse,
   onOpenFilamentSettings,
   onApplyPrice,
   onSetCategory,
@@ -187,6 +197,11 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
 
     try {
       const base = await buildPayloadBase();
+      const relevantLearningRecords = buildCompactLearningPayload(learningRecords, {
+        featureKey: 'product_price_advisor',
+        requestText: `${trimmedName} ${category.trim()} ${description.trim()}`,
+        productName: trimmedName,
+      });
       const res = await fetch('/api/owner/ai/product-price-advisor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -194,6 +209,7 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
           ...base,
           mode: 'estimate_final',
           answers: [],
+          relevantLearningRecords,
         }),
       });
       const data = await res.json();
@@ -606,6 +622,32 @@ export const OwnerProductPriceAdvisor: React.FC<OwnerProductPriceAdvisorProps> =
                 >
                   <RefreshCw size={14} /> Re-check Name &amp; Photos
                 </button>
+                {onRejectAiResponse && (
+                  <button
+                    type="button"
+                    className="secondary-btn owner-q-action-btn danger-text"
+                    onClick={() =>
+                      onRejectAiResponse({
+                        featureKey: 'product_price_advisor',
+                        originalRequest: `Product: "${trimmedName}" | Current category: "${category.trim() || 'None'}" | Existing description: "${description.trim() || 'None'}"`,
+                        rejectedResponse: [
+                          `Suggested category: ${suggestedCategory || (categoryNeedsClarification ? 'Needs clarification' : 'None')}`,
+                          secondaryCategories.length > 0
+                            ? `Secondary categories: ${secondaryCategories.join(', ')}`
+                            : '',
+                          categoryReasoning ? `Reasoning: ${categoryReasoning}` : '',
+                          suggestedDesc ? `Suggested description: ${suggestedDesc}` : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' | '),
+                        productName: trimmedName,
+                        dismissLabel: 'Cancel',
+                      })
+                    }
+                  >
+                    <ThumbsDown size={14} /> Reject AI Suggestion
+                  </button>
+                )}
               </div>
             </div>
           )}

@@ -11,9 +11,10 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  ThumbsDown,
   XCircle,
 } from 'lucide-react';
-import { type Order, formatInIST } from '../defaultData';
+import { type Order, type PendingAiRejectionDraft, formatInIST } from '../defaultData';
 
 interface OrderVerificationCardProps {
   order: Order;
@@ -24,6 +25,7 @@ interface OrderVerificationCardProps {
   onRequestClarification: (order: Order, clarificationMessage: string) => Promise<void>;
   onRejectOrder: (order: Order, reason?: string) => Promise<void>;
   onReinspectOrder?: (order: Order) => Promise<void>;
+  onRejectAiAssessment?: (draft: PendingAiRejectionDraft) => void;
   onJumpToOrder?: (order: Order) => void;
 }
 
@@ -36,6 +38,7 @@ export const OrderVerificationCard: React.FC<OrderVerificationCardProps> = ({
   onRequestClarification,
   onRejectOrder,
   onReinspectOrder,
+  onRejectAiAssessment,
   onJumpToOrder,
 }) => {
   const v = order.aiVerification;
@@ -358,18 +361,49 @@ export const OrderVerificationCard: React.FC<OrderVerificationCardProps> = ({
               Inspected {v.inspectedAt ? formatInIST(v.inspectedAt) : 'just now'} ·{' '}
               {v.inspectedBy === 'gemini_ai' ? `Playnix Gemini AI (${v.modelUsed || 'gemini'})` : 'Smart Validation Rules'}
             </span>
-            {onReinspectOrder && (
-              <button
-                type="button"
-                className="secondary-btn"
-                style={{ padding: '4px 9px', fontSize: 11 }}
-                disabled={inspecting || savingDecision}
-                onClick={() => void onReinspectOrder(order)}
-              >
-                <RefreshCw size={11} className={inspecting ? 'refresh-spinning' : ''} />
-                {inspecting ? 'Inspecting…' : 'Re-inspect with AI'}
-              </button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+              {onReinspectOrder && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  style={{ padding: '4px 9px', fontSize: 11 }}
+                  disabled={inspecting || savingDecision}
+                  onClick={() => void onReinspectOrder(order)}
+                >
+                  <RefreshCw size={11} className={inspecting ? 'refresh-spinning' : ''} />
+                  {inspecting ? 'Inspecting…' : 'Re-inspect with AI'}
+                </button>
+              )}
+              {v && onRejectAiAssessment && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  style={{ padding: '4px 9px', fontSize: 11, color: '#991b1b', borderColor: '#fecaca' }}
+                  disabled={inspecting || savingDecision}
+                  title="Reject Playnix AI's verdict and teach it why this assessment was wrong"
+                  onClick={() =>
+                    onRejectAiAssessment({
+                      featureKey: 'order_verification',
+                      originalRequest: [
+                        `Order ${order.orderNumber || order.id} (${order.mode})`,
+                        `Customer: ${order.name || 'Guest'}`,
+                        `Product: ${order.productName} x${order.quantity || 1} (₹${order.price})`,
+                        order.colour ? `Colour: ${order.colour}` : '',
+                        order.note ? `Note: ${order.note}` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' | '),
+                      rejectedResponse: `[${v.riskLevel} RISK · ${v.confidence}%] Action: ${v.recommendedAction} — ${v.summaryReason}`,
+                      productId: order.productId,
+                      productName: order.productName,
+                      dismissLabel: 'Cancel',
+                    })
+                  }
+                >
+                  <ThumbsDown size={11} /> Reject AI Verdict
+                </button>
+              )}
+            </div>
           </div>
 
           {actionError && <p className="error-msg" style={{ margin: 0 }}>{actionError}</p>}

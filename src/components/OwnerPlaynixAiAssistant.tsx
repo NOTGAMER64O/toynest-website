@@ -23,6 +23,7 @@ import {
   SkipForward,
   SlidersHorizontal,
   Sparkles,
+  ThumbsDown,
   Trash2,
 } from 'lucide-react';
 import {
@@ -35,13 +36,22 @@ import {
   type AiTrainingAnswer,
   type AiTrainingStepKey,
   type Order,
+  type PendingAiRejectionDraft,
   type Product,
   PLAYNIX_TRAINING_QUESTIONS,
   formatInIST,
 } from '../defaultData';
 import { OrderVerificationCard } from './OrderVerificationCard';
 
-export type PlaynixAiSubView = 'overview' | 'shuffler' | 'orderGuard' | 'guidance' | 'feed' | 'training' | 'knowledge' | 'tester';
+export type PlaynixAiSubView =
+  | 'overview'
+  | 'shuffler'
+  | 'orderGuard'
+  | 'guidance'
+  | 'feed'
+  | 'training'
+  | 'knowledge'
+  | 'tester';
 
 interface OwnerPlaynixAiAssistantProps {
   aiState: AiAssistantState;
@@ -108,6 +118,7 @@ interface OwnerPlaynixAiAssistantProps {
   onShuffleAgain?: () => Promise<void>;
   onToggleAutoShuffle?: (enabled: boolean) => Promise<void>;
   onResetShuffleOrder?: () => Promise<void>;
+  onRejectAiResponse?: (draft: PendingAiRejectionDraft) => void;
 }
 
 const KNOWLEDGE_CATEGORIES: Array<{ value: AiKnowledgeCategory; label: string }> = [
@@ -167,6 +178,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   onShuffleAgain,
   onToggleAutoShuffle,
   onResetShuffleOrder,
+  onRejectAiResponse,
 }) => {
   const [subView, setSubView] = useState<PlaynixAiSubView>('overview');
   const [orderGuardFilter, setOrderGuardFilter] = useState<'review' | 'clarification' | 'approved' | 'rejected' | 'all'>('review');
@@ -650,7 +662,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     }
   };
 
-  const handleIgnoreGuidanceQuestion = async (questionId: string) => {
+  const applyDismissGuidanceQuestion = async (questionId: string) => {
     setGuidanceErrorMsg('');
     setGuidanceBannerMsg('');
     setGuidanceSavingId(questionId);
@@ -663,6 +675,24 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     } finally {
       setGuidanceSavingId(null);
     }
+  };
+
+  const handleIgnoreGuidanceQuestion = (item: AiGuidanceQuestion) => {
+    if (onRejectAiResponse) {
+      onRejectAiResponse({
+        featureKey: 'ai_guidance',
+        originalRequest: item.context || 'AI Guidance Store Audit',
+        rejectedResponse: item.question,
+        productId: item.productId,
+        productName: item.productName,
+        dismissLabel: 'Ignore Without Feedback',
+        onComplete: async () => {
+          await applyDismissGuidanceQuestion(item.id);
+        },
+      });
+      return;
+    }
+    void applyDismissGuidanceQuestion(item.id);
   };
 
   return (
@@ -979,6 +1009,22 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
               >
                 <Shuffle size={15} /> Product Shuffler
               </button>
+              {aiState.scanSummary && onRejectAiResponse && (
+                <button
+                  type="button"
+                  className="secondary-btn owner-q-action-btn danger-text"
+                  onClick={() =>
+                    onRejectAiResponse({
+                      featureKey: 'website_scanner',
+                      originalRequest: `Website Scanner (${products.length} products, ${knowledgeEntries.length} knowledge entries)`,
+                      rejectedResponse: aiState.scanSummary || '',
+                      dismissLabel: 'Cancel',
+                    })
+                  }
+                >
+                  <ThumbsDown size={14} /> Reject Scan Summary
+                </button>
+              )}
             </div>
           </div>
 
@@ -1321,6 +1367,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                   onRequestClarification={onRequestOrderClarification || (async () => {})}
                   onRejectOrder={onRejectOrder || (async () => {})}
                   onReinspectOrder={onReinspectOrder}
+                  onRejectAiAssessment={onRejectAiResponse}
                   onJumpToOrder={onOpenOrderInDashboard}
                 />
               ))}
@@ -1464,8 +1511,8 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                               type="button"
                               className="secondary-btn"
                               disabled={guidanceSavingId === item.id}
-                              onClick={() => void handleIgnoreGuidanceQuestion(item.id)}
-                              title="Move to Ignored so you can answer this question later"
+                              onClick={() => handleIgnoreGuidanceQuestion(item)}
+                              title="Reject or ignore this AI question and optionally teach AI why"
                             >
                               {guidanceSavingId === item.id ? 'Ignoring...' : 'Ignore'}
                             </button>
@@ -2349,6 +2396,27 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
                 <div className="playnix-ai-sources-line">
                   <HelpCircle size={13} />
                   <span>Sources checked: {testResult.suggestion.usedSources.join(' · ')}</span>
+                </div>
+              )}
+              {onRejectAiResponse && (
+                <div className="playnix-ai-suggestion-actions" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="secondary-btn owner-q-action-btn danger-text"
+                    onClick={() => {
+                      const prodObj = products.find((p) => p.id === testProductId);
+                      onRejectAiResponse({
+                        featureKey: 'test_question',
+                        originalRequest: testQuestionText.trim(),
+                        rejectedResponse: testResult.suggestion?.suggestedAnswer || '',
+                        productId: prodObj?.id || testProductId || undefined,
+                        productName: prodObj?.name || undefined,
+                        dismissLabel: 'Cancel',
+                      });
+                    }}
+                  >
+                    <ThumbsDown size={14} /> Reject Response &amp; Teach AI
+                  </button>
                 </div>
               )}
             </div>

@@ -505,5 +505,86 @@ service cloud.firestore {
         && isValidWatchdogLog(request.resource.data);
       allow update, delete: if false;
     }
+
+    // Playnix AI Owner Learning Memory Records (private to owner PIN workflow & server API checks):
+    function isValidAiOwnerLearningRecord(data) {
+      return data.keys().hasAll([
+          'id',
+          'featureKey',
+          'featureName',
+          'originalRequest',
+          'rejectedResponse',
+          'ownerCorrection',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'featureKey',
+          'featureName',
+          'originalRequest',
+          'rejectedResponse',
+          'ownerCorrection',
+          'productId',
+          'productName',
+          'keywords',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.featureKey in [
+          'product_question_reply',
+          'test_question',
+          'product_price_advisor',
+          'order_verification',
+          'ai_watchdog',
+          'ai_guidance',
+          'website_scanner',
+          'general'
+        ]
+        && data.featureName is string
+        && data.featureName.size() > 0
+        && data.featureName.size() <= 120
+        && data.originalRequest is string
+        && data.originalRequest.size() > 0
+        && data.originalRequest.size() <= 3000
+        && data.rejectedResponse is string
+        && data.rejectedResponse.size() > 0
+        && data.rejectedResponse.size() <= 3000
+        && data.ownerCorrection is string
+        && data.ownerCorrection.size() > 0
+        && data.ownerCorrection.size() <= 2000
+        && (!('productId' in data) || (data.productId is string && data.productId.size() <= 128))
+        && (!('productName' in data) || (data.productName is string && data.productName.size() <= 200))
+        && (!('keywords' in data) || (data.keywords is list && data.keywords.size() <= 20 && (data.keywords.size() == 0 || (data.keywords[0] is string && data.keywords[0].size() <= 60))))
+        && data.createdAt is string
+        && data.createdAt.size() <= 64
+        && data.updatedAt is string
+        && data.updatedAt.size() <= 64;
+    }
+
+    match /aiOwnerLearningRecords/{recordId} {
+      allow read: if true;
+      allow create: if isValidId(recordId)
+        && isValidAiOwnerLearningRecord(request.resource.data)
+        && request.resource.data.id == recordId
+        && request.resource.data.createdAt == request.resource.data.updatedAt;
+      allow update: if isValidId(recordId)
+        && isValidAiOwnerLearningRecord(request.resource.data)
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'featureKey',
+          'featureName',
+          'originalRequest',
+          'rejectedResponse',
+          'ownerCorrection',
+          'productId',
+          'productName',
+          'keywords',
+          'updatedAt'
+        ]);
+      allow delete: if isValidId(recordId);
+    }
   }
 }

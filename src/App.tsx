@@ -283,6 +283,9 @@ import {
   type AiTrainingStepKey,
   type AiSuggestedReplyResult,
   type AiGuidanceQuestion,
+  type AiLearningFeatureKey,
+  type AiOwnerLearningRecord,
+  type PendingAiRejectionDraft,
   type OrderAiVerification,
   type OrderAuditEntry,
   DEFAULT_RESCUE_DEALS,
@@ -424,7 +427,12 @@ import {
   fetchWatchdogLogsFromCloud,
   subscribeToWatchdogLogs,
   saveWatchdogLogToCloud,
+  fetchAiOwnerLearningRecordsFromCloud,
+  subscribeToAiOwnerLearningRecords,
+  createAiOwnerLearningRecordInCloud,
 } from './firebase';
+import { buildCompactLearningPayload } from './utils/aiLearningMemory';
+import { AiRejectionFeedbackModal } from './components/AiRejectionFeedbackModal';
 import { CustomerSearchBar } from './components/CustomerSearchBar';
 import { CustomerProductDetail } from './components/CustomerProductDetail';
 import { OwnerPopularSearchesManager } from './components/OwnerPopularSearchesManager';
@@ -1086,6 +1094,8 @@ export default function App() {
   const [aiGuidanceQuestions, setAiGuidanceQuestions] = useState<AiGuidanceQuestion[]>(() =>
     getStoredAiGuidanceQuestions()
   );
+  const [aiOwnerLearningRecords, setAiOwnerLearningRecords] = useState<AiOwnerLearningRecord[]>([]);
+  const [pendingAiRejection, setPendingAiRejection] = useState<PendingAiRejectionDraft | null>(null);
   const [aiGuidanceLoading, setAiGuidanceLoading] = useState<boolean>(false);
   const [aiScanning, setAiScanning] = useState<boolean>(false);
   const [aiScanFeedback, setAiScanFeedback] = useState<{
@@ -1767,11 +1777,12 @@ export default function App() {
   const loadOwnerAiData = async () => {
     if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
     try {
-      const [cloudState, cloudKnowledge, cloudTraining, cloudGuidance] = await Promise.all([
+      const [cloudState, cloudKnowledge, cloudTraining, cloudGuidance, cloudLearning] = await Promise.all([
         fetchAiAssistantStateFromCloud(),
         fetchAiKnowledgeFromCloud(),
         fetchAiTrainingAnswersFromCloud(),
         fetchAiGuidanceQuestionsFromCloud(),
+        fetchAiOwnerLearningRecordsFromCloud(),
       ]);
       setAiState(cloudState);
       saveStoredAiState(cloudState);
@@ -1781,10 +1792,35 @@ export default function App() {
       saveStoredAiTrainingAnswers(cloudTraining);
       setAiGuidanceQuestions(cloudGuidance);
       saveStoredAiGuidanceQuestions(cloudGuidance);
+      if (Array.isArray(cloudLearning)) {
+        setAiOwnerLearningRecords(cloudLearning);
+      }
     } catch (err) {
       console.warn('Could not load Playnix AI data from Firebase:', err);
     }
     await checkAiServerStatus();
+  };
+
+  const openAiRejectionFeedback = (draft: PendingAiRejectionDraft) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    setPendingAiRejection(draft);
+  };
+
+  const handleCreateAiLearningRecord = async (input: {
+    featureKey: AiLearningFeatureKey;
+    featureName?: string;
+    originalRequest: string;
+    rejectedResponse: string;
+    ownerCorrection: string;
+    productId?: string;
+    productName?: string;
+  }) => {
+    if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
+      throw new Error('Unauthorized owner access');
+    }
+    const created = await createAiOwnerLearningRecordInCloud(input);
+    setAiOwnerLearningRecords((prev) => [created, ...prev.filter((r) => r.id !== created.id)]);
+    setSuccessMessage('Saved owner correction privately for Playnix AI.');
   };
 
   const triggerWebsiteAiScan = async () => {
@@ -1851,6 +1887,10 @@ export default function App() {
         availableColours,
         answeredQuestions,
         existingTrainingAnswers: aiTrainingAnswers,
+        relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+          featureKey: 'website_scanner',
+          requestText: 'website catalog summary highlights missing info scan',
+        }),
       });
 
       const data = res.data || {};
@@ -2161,6 +2201,10 @@ export default function App() {
         knowledgeEntries: aiKnowledge.slice(0, 40),
         trainingAnswers: aiTrainingAnswers,
         existingGuidanceQuestions: aiGuidanceQuestions.slice(0, 40),
+        relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+          featureKey: 'ai_guidance',
+          requestText: pendingQs.map((q) => q.question).join(' '),
+        }),
       });
       const list = Array.isArray(res.data?.questions) ? res.data.questions : [];
       let addedCount = 0;
@@ -2351,6 +2395,12 @@ export default function App() {
       trainingAnswers: aiTrainingAnswers,
       responseStyleMode: aiState.responseStyleMode || 'balanced',
       customInstructions: aiState.customInstructions || '',
+      relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+        featureKey: 'product_question_reply',
+        requestText: questionObj.question,
+        productId: linkedProduct?.id || questionObj.productId,
+        productName: linkedProduct?.name || questionObj.productName,
+      }),
     });
     return res.data;
   };
@@ -2411,6 +2461,13 @@ export default function App() {
         trainingAnswers: aiTrainingAnswers,
         responseStyleMode: aiState.responseStyleMode || 'balanced',
         customInstructions: aiState.customInstructions || '',
+        relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+          featureKey:
+            endpoint === '/api/owner/ai/test-question' ? 'test_question' : 'product_question_reply',
+          requestText: questionText,
+          productId: product?.id || fallbackProductId,
+          productName: product?.name || fallbackProductName,
+        }),
       });
 
       if (typeof res.data?.geminiConfigured === 'boolean') {
@@ -2570,6 +2627,10 @@ export default function App() {
             campaigns: discountCampaigns.filter((c) => !c.deleted).slice(0, 15),
             ruleFindings: rulePending,
             websiteErrors: capturedWebsiteErrors.slice(0, 15),
+            relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+              featureKey: 'ai_watchdog',
+              requestText: rulePending.map((r) => r.title).join(' '),
+            }),
           });
 
           if (res.data?.healthSummary) {
@@ -4124,6 +4185,7 @@ export default function App() {
       let unsubAiGuidance = () => {};
       let unsubWatchdogAlerts = () => {};
       let unsubWatchdogLogs = () => {};
+      let unsubOwnerLearning = () => {};
       if (ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN) {
         setAnalyticsLoading(true);
         unsubAnalyticsEvents = subscribeToAnalyticsEvents((events) => {
@@ -4166,9 +4228,13 @@ export default function App() {
           setWatchdogLogs(list);
           saveStoredWatchdogLogs(list);
         });
+        unsubOwnerLearning = subscribeToAiOwnerLearningRecords((records) => {
+          setAiOwnerLearningRecords(records);
+        });
         void checkAiServerStatus();
       } else {
         setAllCartItems([]);
+        setAiOwnerLearningRecords([]);
       }
 
       return () => {
@@ -4184,9 +4250,11 @@ export default function App() {
         unsubAiGuidance();
         unsubWatchdogAlerts();
         unsubWatchdogLogs();
+        unsubOwnerLearning();
       };
     } else {
       setAllCartItems([]);
+      setAiOwnerLearningRecords([]);
     }
   }, [page, ownerPin]);
 
@@ -6091,6 +6159,7 @@ export default function App() {
 
       try {
         const res = await api.post('/api/orders/inspect', {
+          pin: ownerPin.trim() || DEFAULT_OWNER_PIN,
           order,
           product: linkedProd
             ? {
@@ -6104,6 +6173,12 @@ export default function App() {
           recentOrders: recentPool.slice(0, 12),
           availableColours,
           ruleBaseline: ruleRes.verification,
+          relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+            featureKey: 'order_verification',
+            requestText: `${order.name} ${order.productName} ${order.note || ''}`,
+            productId: order.productId,
+            productName: order.productName,
+          }),
         });
         if (res.data?.verification) {
           nextVerification = res.data.verification;
@@ -9476,6 +9551,8 @@ export default function App() {
                     existingImageUrls={editExistingImages}
                     filamentCostPerGram={filamentCostPerGram}
                     currentSellingPrice={productForm.price}
+                    learningRecords={aiOwnerLearningRecords}
+                    onRejectAiResponse={openAiRejectionFeedback}
                     onOpenFilamentSettings={() => {
                       setOwnerTab('filamentSettings');
                       setFilamentCostFeedback(null);
@@ -10425,6 +10502,7 @@ export default function App() {
                             onRequestClarification={handleRequestOrderClarification}
                             onRejectOrder={handleRejectOrder}
                             onReinspectOrder={handleReinspectOrder}
+                            onRejectAiAssessment={openAiRejectionFeedback}
                           />
 
                           <label className="status-select">
@@ -10724,6 +10802,7 @@ export default function App() {
                 onDeleteQuestion={handleDeleteQuestion}
                 onSuggestAiReply={handleSuggestAiReplyForQuestion}
                 onTeachAiFact={handleTeachAiFromProductQuestion}
+                onRejectAiResponse={openAiRejectionFeedback}
                 onOpenAiAssistant={() => {
                   setOwnerTab('aiAssistant');
                   void loadOwnerAiData();
@@ -10789,6 +10868,7 @@ export default function App() {
                 onShuffleAgain={handleShuffleAgain}
                 onToggleAutoShuffle={handleToggleAutoShuffle}
                 onResetShuffleOrder={handleResetShuffleOrder}
+                onRejectAiResponse={openAiRejectionFeedback}
               />
             )}
 
@@ -10805,6 +10885,7 @@ export default function App() {
                 onRunScan={runWatchdogScan}
                 onUpdateAlertStatus={handleUpdateWatchdogAlertStatus}
                 onInspectTarget={handleInspectWatchdogTarget}
+                onRejectAiAlert={openAiRejectionFeedback}
               />
             )}
 
@@ -12982,6 +13063,15 @@ export default function App() {
           <Check size={16} className="cart-toast-check" />
           <span>{cartToastMessage}</span>
         </div>
+      )}
+
+      {/* PRIVATE OWNER AI REJECTION FEEDBACK POPUP */}
+      {page === 'owner' && ownerPin.trim().toUpperCase() === DEFAULT_OWNER_PIN && (
+        <AiRejectionFeedbackModal
+          draft={pendingAiRejection}
+          onSaveLearningRecord={handleCreateAiLearningRecord}
+          onClose={() => setPendingAiRejection(null)}
+        />
       )}
 
       {/* Footer */}

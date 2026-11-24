@@ -4,6 +4,8 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
+  onAuthStateChanged,
+  type User,
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -30,6 +32,7 @@ import {
   runTransaction,
   writeBatch,
   increment,
+  deleteField,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -53,6 +56,9 @@ import {
   type AiGuidanceQuestion,
   type WatchdogAlert,
   type WatchdogActivityLog,
+  type AiLearningFeatureKey,
+  type AiOwnerLearningRecord,
+  getAiLearningFeatureName,
   DEFAULT_PRODUCTS,
   DEFAULT_RESCUE_DEALS,
   DEFAULT_AI_ASSISTANT_STATE,
@@ -66,6 +72,7 @@ import {
 } from './defaultData';
 import { smartSearchProducts } from './utils/smartSearch';
 import { findProductBySlugOrId } from './utils/productSlug';
+import { extractLearningKeywords } from './utils/aiLearningMemory';
 
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
@@ -1478,17 +1485,15 @@ function formatFirebaseAuthError(err: any, options: { isOwner?: boolean } = {}):
 }
 
 // ----------------- ADMIN AUTHENTICATION -----------------
-export async function signInAdminWithGoogle(): Promise<{ success: boolean; email?: string | null; error?: string }> {
+export async function signInAdminWithGoogle(): Promise<{
+  success: boolean;
+  email?: string | null;
+  uid?: string;
+  error?: string;
+}> {
   try {
     const cred = await signInWithPopup(auth, googleProvider);
-    if (cred.user.email?.toLowerCase() !== 'sanyukta.mehtaa@gmail.com') {
-      await signOut(auth);
-      return {
-        success: false,
-        error: 'Access denied: Only the authorized owner (sanyukta.mehtaa@gmail.com) can access this workspace.',
-      };
-    }
-    return { success: true, email: cred.user.email };
+    return { success: true, email: cred.user.email, uid: cred.user.uid };
   } catch (err: any) {
     return { success: false, error: formatFirebaseAuthError(err, { isOwner: true }) };
   }
@@ -3995,3 +4000,239 @@ export async function saveWatchdogLogToCloud(entry: WatchdogActivityLog): Promis
   }
 }
 
+/* =========================================================================
+   PLAYNIX AI OWNER LEARNING MEMORY (PRIVATE TO AUTHENTICATED OWNER ONLY)
+   ========================================================================= */
+
+const ALLOWED_LEARNING_FEATURE_KEYS = new Set<AiLearningFeatureKey>([
+  'product_question_reply',
+  'test_question',
+  'product_price_advisor',
+  'order_verification',
+  'ai_watchdog',
+  'ai_guidance',
+  'website_scanner',
+  'general',
+]);
+
+function normalizeLearningFeatureKey(rawKey: any): AiLearningFeatureKey {
+  const clean = String(rawKey || '').trim() as AiLearningFeatureKey;
+  return ALLOWED_LEARNING_FEATURE_KEYS.has(clean) ? clean : 'general';
+}
+
+function sanitizeLearningIdForFirestore(id: string): string {
+  const cleaned = String(id || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 128);
+  return cleaned || `learn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function normalizeAiOwnerLearningRecord(data: any, docId: string): AiOwnerLearningRecord {
+  const nowIso = new Date().toISOString();
+  const featureKey = normalizeLearningFeatureKey(data?.featureKey);
+  return {
+    id: sanitizeLearningIdForFirestore(data?.id || docId),
+    featureKey,
+    featureName:
+      String(data?.featureName || '').trim().slice(0, 120) || getAiLearningFeatureName(featureKey),
+    originalRequest: String(data?.originalRequest || '').trim().slice(0, 3000),
+    rejectedResponse: String(data?.rejectedResponse || '').trim().slice(0, 3000),
+    ownerCorrection: String(data?.ownerCorrection || '').trim().slice(0, 2000),
+    productId: data?.productId ? String(data.productId).trim().slice(0, 128) : undefined,
+    productName: data?.productName ? String(data.productName).trim().slice(0, 200) : undefined,
+    keywords: Array.isArray(data?.keywords)
+      ? data.keywords
+          .map((k: any) => String(k || '').trim().slice(0, 60))
+          .filter(Boolean)
+          .slice(0, 20)
+      : [],
+    createdAt: String(data?.createdAt || nowIso).slice(0, 64),
+    updatedAt: String(data?.updatedAt || nowIso).slice(0, 64),
+  };
+}
+
+export async function fetchAiOwnerLearningRecordsFromCloud(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AiOwnerLearningRecord[]> {
+  const path = 'aiOwnerLearningRecords';
+  try {
+    const ref = collection(db, 'aiOwnerLearningRecords');
+    const snapshot = await withFirestoreTimeout(
+      options.forceRefresh ? getDocsFromServer(ref) : getDocs(ref),
+      9000,
+      'fetchAiOwnerLearningRecordsFromCloud'
+    );
+    const list: AiOwnerLearningRecord[] = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      if (data && data.ownerCorrection) {
+        list.push(normalizeAiOwnerLearningRecord(data, d.id));
+      }
+    });
+    return list.sort(
+      (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+    );
+  } catch (error) {
+    if (isOfflineOrTransientError(error)) {
+      console.warn('AI learning records fetch skipped while offline.');
+      return [];
+    }
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export function subscribeToAiOwnerLearningRecords(
+  callback: (records: AiOwnerLearningRecord[]) => void
+): () => void {
+  const path = 'aiOwnerLearningRecords';
+  try {
+    return onSnapshot(
+      collection(db, 'aiOwnerLearningRecords'),
+      (snapshot) => {
+        const list: AiOwnerLearningRecord[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          if (data && data.ownerCorrection) {
+            list.push(normalizeAiOwnerLearningRecord(data, d.id));
+          }
+        });
+        list.sort(
+          (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+        );
+        callback(list);
+      },
+      (error) => {
+        if (!isOfflineOrTransientError(error)) {
+          handleFirestoreError(error, OperationType.LIST, path);
+        }
+      }
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function createAiOwnerLearningRecordInCloud(input: {
+  id?: string;
+  featureKey: AiLearningFeatureKey;
+  featureName?: string;
+  originalRequest: string;
+  rejectedResponse: string;
+  ownerCorrection: string;
+  productId?: string;
+  productName?: string;
+}): Promise<AiOwnerLearningRecord> {
+  const nowIso = new Date().toISOString();
+  const safeId = sanitizeLearningIdForFirestore(
+    input.id || `learn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+  );
+  const featureKey = normalizeLearningFeatureKey(input.featureKey);
+  const featureName =
+    String(input.featureName || '').trim().slice(0, 120) || getAiLearningFeatureName(featureKey);
+  const cleanOriginalRequest = String(input.originalRequest || '').trim().slice(0, 3000) || '(No request text captured)';
+  const cleanRejectedResponse = String(input.rejectedResponse || '').trim().slice(0, 3000) || '(Rejected AI output)';
+  const cleanOwnerCorrection = String(input.ownerCorrection || '').trim().slice(0, 2000);
+  if (!cleanOwnerCorrection) {
+    throw new Error('Please describe what was wrong with the AI response before saving.');
+  }
+
+  const cleanProductId = input.productId ? String(input.productId).trim().slice(0, 128) : undefined;
+  const cleanProductName = input.productName ? String(input.productName).trim().slice(0, 200) : undefined;
+  const keywords = extractLearningKeywords(cleanOriginalRequest, cleanOwnerCorrection, cleanProductName);
+
+  const record: AiOwnerLearningRecord = {
+    id: safeId,
+    featureKey,
+    featureName,
+    originalRequest: cleanOriginalRequest,
+    rejectedResponse: cleanRejectedResponse,
+    ownerCorrection: cleanOwnerCorrection,
+    ...(cleanProductId ? { productId: cleanProductId } : {}),
+    ...(cleanProductName ? { productName: cleanProductName } : {}),
+    keywords,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const path = `aiOwnerLearningRecords/${safeId}`;
+  try {
+    await setDoc(doc(db, 'aiOwnerLearningRecords', safeId), sanitizeForFirestore(record));
+    return record;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+    throw error;
+  }
+}
+
+export async function updateAiOwnerLearningRecordInCloud(input: {
+  id: string;
+  featureKey: AiLearningFeatureKey;
+  featureName?: string;
+  originalRequest: string;
+  rejectedResponse: string;
+  ownerCorrection: string;
+  productId?: string;
+  productName?: string;
+  createdAt: string;
+}): Promise<AiOwnerLearningRecord> {
+  const safeId = sanitizeLearningIdForFirestore(input.id);
+  const nowIso = new Date().toISOString();
+  const featureKey = normalizeLearningFeatureKey(input.featureKey);
+  const featureName =
+    String(input.featureName || '').trim().slice(0, 120) || getAiLearningFeatureName(featureKey);
+  const cleanOriginalRequest = String(input.originalRequest || '').trim().slice(0, 3000) || '(No request text captured)';
+  const cleanRejectedResponse = String(input.rejectedResponse || '').trim().slice(0, 3000) || '(Rejected AI output)';
+  const cleanOwnerCorrection = String(input.ownerCorrection || '').trim().slice(0, 2000);
+  if (!cleanOwnerCorrection) {
+    throw new Error('Owner correction cannot be empty.');
+  }
+
+  const cleanProductId = input.productId ? String(input.productId).trim().slice(0, 128) : '';
+  const cleanProductName = input.productName ? String(input.productName).trim().slice(0, 200) : '';
+  const keywords = extractLearningKeywords(cleanOriginalRequest, cleanOwnerCorrection, cleanProductName);
+
+  const path = `aiOwnerLearningRecords/${safeId}`;
+  try {
+    await updateDoc(doc(db, 'aiOwnerLearningRecords', safeId), {
+      featureKey,
+      featureName,
+      originalRequest: cleanOriginalRequest,
+      rejectedResponse: cleanRejectedResponse,
+      ownerCorrection: cleanOwnerCorrection,
+      productId: cleanProductId ? cleanProductId : deleteField(),
+      productName: cleanProductName ? cleanProductName : deleteField(),
+      keywords,
+      updatedAt: nowIso,
+    });
+
+    return {
+      id: safeId,
+      featureKey,
+      featureName,
+      originalRequest: cleanOriginalRequest,
+      rejectedResponse: cleanRejectedResponse,
+      ownerCorrection: cleanOwnerCorrection,
+      ...(cleanProductId ? { productId: cleanProductId } : {}),
+      ...(cleanProductName ? { productName: cleanProductName } : {}),
+      keywords,
+      createdAt: input.createdAt,
+      updatedAt: nowIso,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+    throw error;
+  }
+}
+
+export async function deleteAiOwnerLearningRecordFromCloud(recordId: string): Promise<void> {
+  const safeId = sanitizeLearningIdForFirestore(recordId);
+  const path = `aiOwnerLearningRecords/${safeId}`;
+  try {
+    await deleteDoc(doc(db, 'aiOwnerLearningRecords', safeId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+    throw error;
+  }
+}

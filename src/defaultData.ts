@@ -1494,3 +1494,71 @@ export function saveStoredWatchdogLogs(logs: WatchdogActivityLog[]): void {
   } catch {}
 }
 
+/* =========================================================================
+   PLAYNIX AI OWNER LEARNING MEMORY SYSTEM (PRIVATE TO OWNER SESSION)
+   ========================================================================= */
+
+export type AiLearningFeatureKey =
+  | 'product_question_reply'
+  | 'test_question'
+  | 'product_price_advisor'
+  | 'order_verification'
+  | 'ai_watchdog'
+  | 'ai_guidance'
+  | 'website_scanner'
+  | 'general';
+
+export const AI_LEARNING_FEATURE_OPTIONS: Array<{
+  key: AiLearningFeatureKey;
+  label: string;
+}> = [
+  { key: 'product_question_reply', label: 'Product Question Reply AI' },
+  { key: 'test_question', label: 'Test Question Sandbox' },
+  { key: 'product_price_advisor', label: 'Product Category & Description AI' },
+  { key: 'order_verification', label: 'Order Verification AI' },
+  { key: 'ai_watchdog', label: 'AI Watchdog' },
+  { key: 'ai_guidance', label: 'AI Guidance Questions' },
+  { key: 'website_scanner', label: 'Website Scanner' },
+  { key: 'general', label: 'All Playnix AI Features' },
+];
+
+export function getAiLearningFeatureName(featureKey: AiLearningFeatureKey): string {
+  const found = AI_LEARNING_FEATURE_OPTIONS.find((item) => item.key === featureKey);
+  return found ? found.label : 'Playnix AI';
+}
+
+export const AI_REJECTION_QUICK_REASONS: string[] = [
+  'Wrong fact or product specification',
+  'Wrong category or classification',
+  'Guessed or unverified detail',
+  'Wrong tone, phrasing, or too long',
+  'Misread customer context or intent',
+  'False alarm (valid order or listing)',
+];
+
+export interface AiOwnerLearningRecord {
+  id: string;
+  featureKey: AiLearningFeatureKey;
+  featureName: string;
+  originalRequest: string;
+  rejectedResponse: string;
+  ownerCorrection: string;
+  productId?: string;
+  productName?: string;
+  keywords?: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PendingAiRejectionDraft {
+  featureKey: AiLearningFeatureKey;
+  featureName?: string;
+  originalRequest: string;
+  rejectedResponse: string;
+  productId?: string;
+  productName?: string;
+  dismissLabel?: string;
+  onComplete?: (savedRecord: boolean) => void | Promise<void>;
+}
+
+
