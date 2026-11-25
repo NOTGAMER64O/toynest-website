@@ -2188,7 +2188,16 @@ export default function App() {
           productName: q.productName,
           question: q.question,
         }));
+
+      // Preserve chronological conversation history across consecutive Ask AI requests
+      const orderedHistory = [...aiGuidanceQuestions].sort(
+        (a, b) =>
+          new Date(a.createdAt || a.updatedAt || 0).getTime() -
+          new Date(b.createdAt || b.updatedAt || 0).getTime()
+      );
+
       const res = await ownerPost('/api/owner/ai/ask-guidance', {
+        conversationId: 'playnix_owner_ask_ai',
         products: products.map((p) => ({
           id: p.id,
           name: p.name,
@@ -2198,9 +2207,22 @@ export default function App() {
           description: p.description,
         })),
         pendingQuestions: pendingQs,
-        knowledgeEntries: aiKnowledge.slice(0, 40),
+        knowledgeEntries: aiKnowledge.slice(0, 100),
         trainingAnswers: aiTrainingAnswers,
-        existingGuidanceQuestions: aiGuidanceQuestions.slice(0, 40),
+        existingGuidanceQuestions: orderedHistory,
+        conversationHistory: orderedHistory.map((g) => ({
+          id: g.id,
+          question: g.question,
+          answer: g.answer,
+          status: g.status,
+          category: g.category,
+          productId: g.productId,
+          productName: g.productName,
+          context: g.context,
+          createdAt: g.createdAt,
+          answeredAt: g.answeredAt,
+          updatedAt: g.updatedAt,
+        })),
         relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
           featureKey: 'ai_guidance',
           requestText: pendingQs.map((q) => q.question).join(' '),
@@ -2267,6 +2289,18 @@ export default function App() {
       saveStoredAiGuidanceQuestions(next);
       return next;
     });
+
+    // Keep backend Ask AI conversation history in sync immediately for consecutive requests
+    void ownerPost('/api/owner/ai/ask-guidance/reply', {
+      conversationId: 'playnix_owner_ask_ai',
+      questionId: updatedItem.id,
+      question: updatedItem.question,
+      answer: updatedItem.answer,
+      status: 'answered',
+      productId: updatedItem.productId,
+      productName: updatedItem.productName,
+      category: updatedItem.category,
+    }).catch(() => {});
   };
 
   const handleDismissAiGuidanceQuestion = async (questionId: string) => {
@@ -2284,6 +2318,16 @@ export default function App() {
       saveStoredAiGuidanceQuestions(next);
       return next;
     });
+
+    void ownerPost('/api/owner/ai/ask-guidance/reply', {
+      conversationId: 'playnix_owner_ask_ai',
+      questionId: updatedItem.id,
+      question: updatedItem.question,
+      status: 'dismissed',
+      productId: updatedItem.productId,
+      productName: updatedItem.productName,
+      category: updatedItem.category,
+    }).catch(() => {});
   };
 
   const handleDeleteAiGuidanceQuestion = async (questionId: string) => {
@@ -2343,6 +2387,17 @@ export default function App() {
       return next;
     });
 
+    void ownerPost('/api/owner/ai/ask-guidance/reply', {
+      conversationId: 'playnix_owner_ask_ai',
+      questionId: guideDoc.id,
+      question: guideDoc.question,
+      answer: guideDoc.answer,
+      status: 'answered',
+      productId: guideDoc.productId,
+      productName: guideDoc.productName,
+      category: guideDoc.category,
+    }).catch(() => {});
+
     // Re-run suggestion immediately using the newly taught verified knowledge entry
     const enrichedKnowledge: AiKnowledgeEntry[] = [
       {
@@ -2369,7 +2424,12 @@ export default function App() {
         activeOfferLabel = discount.discountLabel || discount.campaignName;
       }
     }
+    const updatedHistory = [
+      ...aiGuidanceQuestions.filter((g) => g.id !== guideId),
+      guideDoc,
+    ];
     const res = await ownerPost('/api/owner/ai/suggest-answer', {
+      conversationId: 'playnix_owner_ask_ai',
       product: linkedProduct
         ? {
             id: linkedProduct.id,
@@ -2393,6 +2453,7 @@ export default function App() {
       question: questionObj.question,
       knowledgeEntries: enrichedKnowledge,
       trainingAnswers: aiTrainingAnswers,
+      existingGuidanceQuestions: updatedHistory,
       responseStyleMode: aiState.responseStyleMode || 'balanced',
       customInstructions: aiState.customInstructions || '',
       relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
@@ -2450,6 +2511,7 @@ export default function App() {
 
     try {
       const res = await ownerPost(endpoint, {
+        conversationId: 'playnix_owner_ask_ai',
         product: lightweightProduct,
         productId: product?.id || fallbackProductId,
         productName: product?.name || fallbackProductName,
@@ -2459,6 +2521,7 @@ export default function App() {
         question: questionText,
         knowledgeEntries: aiKnowledge,
         trainingAnswers: aiTrainingAnswers,
+        existingGuidanceQuestions: aiGuidanceQuestions,
         responseStyleMode: aiState.responseStyleMode || 'balanced',
         customInstructions: aiState.customInstructions || '',
         relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {

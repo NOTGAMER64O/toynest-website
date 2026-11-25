@@ -2237,6 +2237,612 @@ app.post('/api/owner/ai/scan', async (req, res) => {
   }
 });
 
+export interface AskAiHistoryTurn {
+  id: string;
+  question: string;
+  answer?: string;
+  status: 'open' | 'answered' | 'dismissed';
+  category?: string;
+  productId?: string;
+  productName?: string;
+  customerQuestionId?: string;
+  context?: string;
+  createdAt?: string;
+  answeredAt?: string;
+  updatedAt?: string;
+}
+
+export const serverAskAiHistoryStore = new Map<string, AskAiHistoryTurn[]>();
+
+export const ASK_AI_ASPECT_DEFINITIONS: Array<{
+  key: string;
+  label: string;
+  questionKeywords: string[];
+  answerKeywords: string[];
+}> = [
+  {
+    key: 'dimensions',
+    label: 'approximate size and dimensions',
+    questionKeywords: ['size', 'dimension', 'dimensions', 'length', 'width', 'height', 'scale', 'weight', 'cm', 'mm', 'inch', 'inches', 'measure', 'measurements'],
+    answerKeywords: ['size', 'dimension', 'dimensions', 'length', 'width', 'height', 'scale', 'weight', 'cm', 'mm', 'inch', 'inches', 'gram', 'grams', 'gm', 'kg', 'small', 'medium', 'large', 'compact', 'mini', 'tall', 'wide', 'long'],
+  },
+  {
+    key: 'material',
+    label: 'material',
+    questionKeywords: ['material', 'materials', 'made of', 'made from', 'plastic', 'metal', 'diecast', 'resin', 'wood', 'fabric', 'build quality'],
+    answerKeywords: ['material', 'plastic', 'pla', 'abs', 'petg', 'resin', 'metal', 'diecast', 'die-cast', 'alloy', 'steel', 'aluminum', 'aluminium', 'wood', 'wooden', 'acrylic', 'silicone', 'rubber', 'fabric', 'foam', 'paper', 'cardboard', 'vinyl', 'pvc', '3d print', '3d-printed', 'printed'],
+  },
+  {
+    key: 'features',
+    label: 'key features and specifications',
+    questionKeywords: ['feature', 'features', 'spec', 'specs', 'specification', 'specifications', 'details', 'moving parts', 'wheels', 'doors', 'includes', 'included', 'package'],
+    answerKeywords: ['feature', 'features', 'wheel', 'wheels', 'rolling', 'roll', 'door', 'doors', 'open', 'opening', 'pullback', 'pull-back', 'articulated', 'movable', 'lights', 'light', 'sound', 'spoiler', 'stand', 'base', 'box', 'packaging', 'set', 'pieces', 'parts', 'finish', 'matte', 'glossy', 'detail', 'detailed'],
+  },
+  {
+    key: 'age',
+    label: 'recommended age group and safety notes',
+    questionKeywords: ['age', 'years', 'kids', 'child', 'children', 'safety', 'suitable for', 'collector'],
+    answerKeywords: ['age', 'years', 'yr', 'yrs', 'kid', 'kids', 'child', 'children', 'toddler', 'adult', 'collector', 'collectors', 'choking', 'safe', 'safety', '3+', '4+', '5+', '6+', '8+', '12+', '14+', '18+'],
+  },
+  {
+    key: 'battery',
+    label: 'battery or power requirements',
+    questionKeywords: ['battery', 'batteries', 'rechargeable', 'usb', 'power', 'charging', 'electric'],
+    answerKeywords: ['battery', 'batteries', 'no battery', 'no batteries', 'non-electric', 'manual', 'aa', 'aaa', 'rechargeable', 'usb', 'type-c', 'mah', 'included', 'not required'],
+  },
+  {
+    key: 'delivery',
+    label: 'delivery timeline and shipping terms',
+    questionKeywords: ['delivery', 'shipping', 'dispatch', 'courier', 'tracking', 'ship', 'days to arrive'],
+    answerKeywords: ['delivery', 'deliver', 'shipping', 'ship', 'dispatch', 'dispatched', 'days', 'day', 'hours', 'courier', 'delhivery', 'bluedart', 'dtdc', 'india post', 'tracking', 'cod', 'cash on delivery', 'prepaid', 'fee', 'free shipping'],
+  },
+  {
+    key: 'returns',
+    label: 'return, replacement, or refund policy',
+    questionKeywords: ['return', 'returns', 'refund', 'refunds', 'exchange', 'replacement', 'damaged'],
+    answerKeywords: ['return', 'returns', 'no return', 'non-returnable', 'refund', 'exchange', 'replace', 'replacement', 'damage', 'damaged', 'unboxing', 'video', 'days'],
+  },
+  {
+    key: 'care',
+    label: 'care and handling instructions',
+    questionKeywords: ['care', 'clean', 'wash', 'fragile', 'heat', 'storage', 'waterproof'],
+    answerKeywords: ['care', 'clean', 'wipe', 'dry', 'cloth', 'wash', 'fragile', 'heat', 'sunlight', 'waterproof', 'water-resistant', 'indoor', 'display'],
+  },
+  {
+    key: 'warranty',
+    label: 'warranty or guarantee details',
+    questionKeywords: ['warranty', 'guarantee'],
+    answerKeywords: ['warranty', 'no warranty', 'guarantee', 'replacement'],
+  },
+  {
+    key: 'color',
+    label: 'available colors and variants',
+    questionKeywords: ['color', 'colour', 'colors', 'colours', 'variant', 'variants', 'shade'],
+    answerKeywords: ['color', 'colour', 'colors', 'colours', 'white', 'black', 'red', 'blue', 'green', 'yellow', 'silver', 'grey', 'gray', 'orange', 'pink', 'purple', 'gold', 'matte', 'variant'],
+  },
+];
+
+const TOKEN_SYNONYMS: Record<string, string> = {
+  dimensions: 'size',
+  dimension: 'size',
+  measurements: 'size',
+  measurement: 'size',
+  lengths: 'size',
+  length: 'size',
+  width: 'size',
+  height: 'size',
+  specs: 'features',
+  specification: 'features',
+  specifications: 'features',
+  feature: 'features',
+  materials: 'material',
+  colours: 'color',
+  colour: 'color',
+  colors: 'color',
+  shipping: 'delivery',
+  dispatch: 'delivery',
+  refund: 'returns',
+  refunds: 'returns',
+  return: 'returns',
+  replacement: 'returns',
+  batteries: 'battery',
+};
+
+const STOP_WORDS = new Set([
+  'what', 'are', 'is', 'the', 'and', 'of', 'for', 'a', 'an', 'to', 'in', 'on', 'with',
+  'can', 'you', 'please', 'tell', 'me', 'us', 'about', 'this', 'that', 'these', 'those',
+  'do', 'does', 'it', 'have', 'any', 'could', 'share', 'confirm', 'exact', 'approximate',
+  'your', 'our', 'or', 'if', 'whether', 'there', 'how', 'many', 'much', 'when', 'which',
+  'key', 'details', 'info', 'information', 'product', 'item', 'thanks', 'sharing', 'also',
+]);
+
+export function normalizeQuestionTokens(text: string): Set<string> {
+  const words = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((w) => TOKEN_SYNONYMS[w] || w)
+    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+  return new Set(words);
+}
+
+export function computeTokenJaccard(aText: string, bText: string): number {
+  const a = normalizeQuestionTokens(aText);
+  const b = normalizeQuestionTokens(bText);
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+export function extractQuestionAspects(text: string): string[] {
+  const withoutAck = String(text || '').replace(/^thanks for sharing[^!]*!\s*/i, '');
+  const lower = withoutAck.toLowerCase();
+  const padded = ` ${lower.replace(/[^a-z0-9+\-:\s]/g, ' ')} `;
+  const found: string[] = [];
+  for (const def of ASK_AI_ASPECT_DEFINITIONS) {
+    const matched = def.questionKeywords.some((kw) => {
+      const k = kw.toLowerCase();
+      return padded.includes(` ${k} `);
+    });
+    if (matched) found.push(def.key);
+  }
+  return found;
+}
+
+function answerCoversAspect(aspectKey: string, answerText: string): boolean {
+  const lower = String(answerText || '').toLowerCase();
+  if (!lower.trim()) return false;
+  if (aspectKey === 'dimensions') {
+    if (/\b\d+(\.\d+)?\s*(x|by|\*)\s*\d+/i.test(lower)) return true;
+    if (/\b\d+(\.\d+)?\s*(cm|mm|m|in|inch|inches|ft|feet|g|gm|grams|kg)\b/i.test(lower)) return true;
+    if (/\b1\s*:\s*\d{1,3}\b/i.test(lower)) return true;
+  }
+  if (aspectKey === 'age') {
+    if (/\b\d{1,2}\s*\+\s*(yrs?|years?)?\b/i.test(lower)) return true;
+  }
+  if (aspectKey === 'delivery') {
+    if (/\b\d+\s*(-\s*\d+)?\s*(business\s*)?(days?|hrs?|hours?)\b/i.test(lower)) return true;
+  }
+  if (aspectKey === 'returns') {
+    if (/\b(no return|non[- ]returnable|unboxing video)\b/i.test(lower)) return true;
+  }
+  const def = ASK_AI_ASPECT_DEFINITIONS.find((d) => d.key === aspectKey);
+  if (!def) return false;
+  const padded = ` ${lower.replace(/[^a-z0-9+\-:\s]/g, ' ')} `;
+  return def.answerKeywords.some((kw) => padded.includes(` ${kw.toLowerCase()} `));
+}
+
+export function normalizeAskAiTurn(raw: any): AskAiHistoryTurn | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const question = String(raw.question || '').trim().slice(0, 500);
+  if (!question) return null;
+  const answer = raw.answer !== undefined && raw.answer !== null ? String(raw.answer).trim().slice(0, 4000) : '';
+  let status: 'open' | 'answered' | 'dismissed' =
+    raw.status === 'answered' || raw.status === 'dismissed' || raw.status === 'open'
+      ? raw.status
+      : answer
+      ? 'answered'
+      : 'open';
+  if (answer && status === 'open') status = 'answered';
+
+  const id = String(raw.id || `hist_${sanitizeKnowledgeId('q', question).slice(0, 64)}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 128);
+
+  return {
+    id,
+    question,
+    ...(answer ? { answer } : {}),
+    status,
+    ...(raw.category ? { category: String(raw.category).trim().slice(0, 60) } : {}),
+    ...(raw.productId ? { productId: String(raw.productId).trim().slice(0, 128) } : {}),
+    ...(raw.productName ? { productName: String(raw.productName).trim().slice(0, 200) } : {}),
+    ...(raw.customerQuestionId ? { customerQuestionId: String(raw.customerQuestionId).trim().slice(0, 128) } : {}),
+    ...(raw.context ? { context: String(raw.context).trim().slice(0, 600) } : {}),
+    createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
+    ...(raw.answeredAt ? { answeredAt: String(raw.answeredAt) } : {}),
+    updatedAt: raw.updatedAt ? String(raw.updatedAt) : raw.answeredAt ? String(raw.answeredAt) : new Date().toISOString(),
+  };
+}
+
+function statusPriority(status: AskAiHistoryTurn['status']): number {
+  if (status === 'answered') return 3;
+  if (status === 'dismissed') return 2;
+  return 1;
+}
+
+export function mergeAskAiConversationHistory(
+  conversationId: string,
+  existingQuestionsRaw?: any[],
+  conversationHistoryRaw?: any[]
+): AskAiHistoryTurn[] {
+  const convKey = String(conversationId || 'playnix_default_owner_ask_ai').trim().slice(0, 128) || 'playnix_default_owner_ask_ai';
+  const existingStored = serverAskAiHistoryStore.get(convKey) || [];
+
+  const mergedMap = new Map<string, AskAiHistoryTurn>();
+  const normKeyMap = new Map<string, string>();
+
+  const upsertTurn = (raw: any) => {
+    const turn = normalizeAskAiTurn(raw);
+    if (!turn) return;
+    const normSig = `${turn.productId || ''}::${turn.question.toLowerCase()}`;
+    const matchedId = mergedMap.has(turn.id) ? turn.id : normKeyMap.get(normSig);
+    if (!matchedId) {
+      mergedMap.set(turn.id, turn);
+      normKeyMap.set(normSig, turn.id);
+      return;
+    }
+    const prev = mergedMap.get(matchedId)!;
+    const incomingBetterStatus =
+      statusPriority(turn.status) > statusPriority(prev.status) ||
+      (statusPriority(turn.status) === statusPriority(prev.status) &&
+        new Date(turn.updatedAt || 0).getTime() >= new Date(prev.updatedAt || 0).getTime());
+
+    mergedMap.set(matchedId, {
+      ...prev,
+      ...turn,
+      id: prev.id,
+      status: incomingBetterStatus ? turn.status : prev.status,
+      answer: turn.answer || prev.answer,
+      answeredAt: turn.answeredAt || prev.answeredAt,
+      createdAt:
+        prev.createdAt && turn.createdAt
+          ? new Date(prev.createdAt).getTime() <= new Date(turn.createdAt).getTime()
+            ? prev.createdAt
+            : turn.createdAt
+          : prev.createdAt || turn.createdAt,
+      updatedAt:
+        new Date(turn.updatedAt || 0).getTime() >= new Date(prev.updatedAt || 0).getTime()
+          ? turn.updatedAt
+          : prev.updatedAt,
+    });
+  };
+
+  for (const item of existingStored) upsertTurn(item);
+  if (Array.isArray(existingQuestionsRaw)) {
+    for (const item of existingQuestionsRaw) upsertTurn(item);
+  }
+  if (Array.isArray(conversationHistoryRaw)) {
+    for (const item of conversationHistoryRaw) upsertTurn(item);
+  }
+
+  const ordered = Array.from(mergedMap.values())
+    .sort(
+      (a, b) =>
+        new Date(a.createdAt || a.updatedAt || 0).getTime() -
+        new Date(b.createdAt || b.updatedAt || 0).getTime()
+    )
+    .slice(-200);
+
+  serverAskAiHistoryStore.set(convKey, ordered);
+  return ordered;
+}
+
+export function analyzeTurnAspectCoverage(
+  turn: AskAiHistoryTurn,
+  knowledgeEntries: any[] = [],
+  products: any[] = [],
+  siblingHistory: AskAiHistoryTurn[] = []
+): {
+  askedAspects: string[];
+  coveredAspects: string[];
+  missingAspects: string[];
+  isPartial: boolean;
+} {
+  const askedAspects = extractQuestionAspects(turn.question);
+  if (turn.status !== 'answered' || !turn.answer) {
+    return { askedAspects, coveredAspects: [], missingAspects: askedAspects, isPartial: false };
+  }
+
+  const ownerKnowledgeText = knowledgeEntries
+    .filter(
+      (k) =>
+        k &&
+        k.source === 'owner' &&
+        k.content &&
+        (!turn.productId || !k.productId || k.productId === turn.productId)
+    )
+    .map((k) => String(k.content))
+    .join(' ');
+  const siblingAnswersText = siblingHistory
+    .filter(
+      (s) =>
+        s &&
+        s.id !== turn.id &&
+        s.status === 'answered' &&
+        s.answer &&
+        ((turn.productId && s.productId === turn.productId) ||
+          (!turn.productId && !s.productId && (!turn.category || s.category === turn.category)))
+    )
+    .map((s) => String(s.answer))
+    .join(' ');
+  const productDesc = turn.productId
+    ? String(products.find((p) => p?.id === turn.productId)?.description || '')
+    : '';
+  const combinedEvidence = `${turn.answer} ${siblingAnswersText} ${ownerKnowledgeText} ${productDesc}`.trim();
+
+  if (askedAspects.length === 0) {
+    return { askedAspects: [], coveredAspects: [], missingAspects: [], isPartial: false };
+  }
+
+  const coveredAspects = askedAspects.filter((a) => answerCoversAspect(a, combinedEvidence));
+  const missingAspects = askedAspects.filter((a) => !coveredAspects.includes(a));
+
+  // Treat an answer as incomplete only when multiple distinct aspects were requested
+  // and the answer covered at least one while omitting one or more remaining aspects.
+  const isPartial = askedAspects.length >= 2 && coveredAspects.length >= 1 && missingAspects.length >= 1;
+  return {
+    askedAspects,
+    coveredAspects: isPartial ? coveredAspects : askedAspects,
+    missingAspects: isPartial ? missingAspects : [],
+    isPartial,
+  };
+}
+
+export function buildNarrowedFollowUpQuestion(
+  missingAspects: string[],
+  coveredAspects: string[],
+  productName?: string,
+  originalCategory?: string
+): string {
+  const labels = missingAspects.map(
+    (key) => ASK_AI_ASPECT_DEFINITIONS.find((d) => d.key === key)?.label || key
+  );
+  const formattedMissing =
+    labels.length === 1
+      ? labels[0]
+      : labels.length === 2
+      ? `${labels[0]} and ${labels[1]}`
+      : `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
+
+  const ackPrefix =
+    coveredAspects.length > 0
+      ? `Thanks for sharing the ${coveredAspects
+          .map((c) => ASK_AI_ASPECT_DEFINITIONS.find((d) => d.key === c)?.label || c)
+          .join('/')}! `
+      : '';
+
+  if (productName) {
+    return `${ackPrefix}Could you also share only the ${formattedMissing} for "${productName}"?`.slice(0, 480);
+  }
+  const catLabel = originalCategory ? ` (${originalCategory})` : '';
+  return `${ackPrefix}Could you also confirm the ${formattedMissing}${catLabel}?`.slice(0, 480);
+}
+
+export function evaluateCandidateQuestionAgainstHistory(
+  candidate: {
+    question: string;
+    category?: string;
+    productId?: string;
+    productName?: string;
+    customerQuestionId?: string;
+  },
+  mergedHistory: AskAiHistoryTurn[],
+  knowledgeEntries: any[] = [],
+  trainingAnswers: any[] = [],
+  products: any[] = []
+): {
+  accepted: boolean;
+  question?: string;
+  reason?: string;
+  narrowedFromOriginal?: boolean;
+} {
+  const qClean = String(candidate.question || '').trim().slice(0, 480);
+  if (!qClean) return { accepted: false, reason: 'empty' };
+  const qNorm = qClean.toLowerCase();
+
+  // 1. Never repeat same customerQuestionId if already tracked (open, answered, or dismissed)
+  if (candidate.customerQuestionId) {
+    const sameCq = mergedHistory.find(
+      (h) => h.customerQuestionId && h.customerQuestionId === candidate.customerQuestionId
+    );
+    if (sameCq) {
+      return { accepted: false, reason: 'customer_question_already_tracked' };
+    }
+  }
+
+  const candidateAspects = extractQuestionAspects(qClean);
+  const candidateCat = String(candidate.category || '').trim().toLowerCase();
+
+  // Helper to remove product name tokens when comparing two questions on the same product
+  const stripProductName = (text: string, pName?: string) => {
+    if (!pName) return text;
+    const escaped = pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return text.replace(new RegExp(escaped, 'gi'), ' ');
+  };
+
+  // 2. Reject exact text match or high-similarity paraphrase against open/dismissed turns (and non-aspect answered turns)
+  for (const h of mergedHistory) {
+    if (h.question.trim().toLowerCase() === qNorm) {
+      return { accepted: false, reason: 'exact_duplicate_in_history' };
+    }
+    const sameScope =
+      (!candidate.productId && !h.productId) ||
+      (candidate.productId && h.productId && candidate.productId === h.productId);
+    const cleanedCandidate = stripProductName(qClean, candidate.productName || h.productName);
+    const cleanedHistory = stripProductName(h.question, h.productName || candidate.productName);
+    const jaccard = computeTokenJaccard(cleanedCandidate, cleanedHistory);
+
+    if (h.status !== 'answered' || candidateAspects.length === 0) {
+      if ((sameScope && jaccard >= 0.45) || jaccard >= 0.65) {
+        return { accepted: false, reason: 'paraphrase_duplicate_in_history' };
+      }
+    }
+  }
+
+  // 3. Reject if same product/topic already has an open or dismissed question covering same aspects
+  for (const h of mergedHistory) {
+    if (h.status === 'answered') continue;
+    const sameProduct = Boolean(candidate.productId && h.productId === candidate.productId);
+    const sameGlobalTopic =
+      !candidate.productId &&
+      !h.productId &&
+      Boolean(candidateCat && String(h.category || '').trim().toLowerCase() === candidateCat);
+
+    if (sameProduct || sameGlobalTopic) {
+      const hAspects = extractQuestionAspects(h.question);
+      if (candidateAspects.length === 0 || hAspects.length === 0) {
+        return { accepted: false, reason: 'already_open_or_dismissed' };
+      }
+      const overlap = candidateAspects.some((a) => hAspects.includes(a));
+      if (overlap) {
+        return { accepted: false, reason: 'overlapping_aspect_open_or_dismissed' };
+      }
+    }
+  }
+
+  // 4. Reject if a non-product general policy training topic was already answered cleanly
+  if (!candidate.productId && candidateCat) {
+    const answeredTrainingKeys = new Set(
+      trainingAnswers
+        .filter((t) => t?.status === 'answered' && String(t?.answer || '').trim())
+        .map((t) => String(t.stepKey || '').toLowerCase())
+    );
+    if (
+      (candidateCat === 'delivery' && answeredTrainingKeys.has('delivery_rules')) ||
+      (candidateCat === 'returns' && answeredTrainingKeys.has('return_policy'))
+    ) {
+      return { accepted: false, reason: 'already_in_training_answers' };
+    }
+  }
+
+  // 5. Gather all aspects already answered in conversation history OR owner knowledge for this product/topic
+  const coveredAspects = new Set<string>();
+  const answeredEvidenceParts: string[] = [];
+
+  for (const h of mergedHistory) {
+    if (h.status !== 'answered' || !h.answer) continue;
+    const sameProduct = Boolean(candidate.productId && h.productId === candidate.productId);
+    const sameGlobalCat =
+      !candidate.productId &&
+      !h.productId &&
+      (!candidateCat || String(h.category || '').trim().toLowerCase() === candidateCat);
+    if (!sameProduct && !sameGlobalCat) continue;
+
+    answeredEvidenceParts.push(h.answer);
+    const analysis = analyzeTurnAspectCoverage(h, knowledgeEntries, products);
+    for (const a of analysis.coveredAspects) {
+      coveredAspects.add(a);
+    }
+  }
+
+  // Also inspect verified owner knowledge / product description for same product
+  if (candidate.productId) {
+    const prod = products.find((p) => p?.id === candidate.productId);
+    if (prod?.description) answeredEvidenceParts.push(String(prod.description));
+    for (const k of knowledgeEntries) {
+      if (k?.productId === candidate.productId && k?.content && k?.source !== 'website') {
+        answeredEvidenceParts.push(String(k.content));
+      }
+    }
+  }
+  const combinedEvidence = answeredEvidenceParts.join(' ');
+  for (const aspect of candidateAspects) {
+    if (answerCoversAspect(aspect, combinedEvidence)) {
+      coveredAspects.add(aspect);
+    }
+  }
+
+  // If candidate asks aspects and ALL are already answered -> do NOT repeat!
+  if (candidateAspects.length > 0) {
+    const remainingAspects = candidateAspects.filter((a) => !coveredAspects.has(a));
+    if (remainingAspects.length === 0) {
+      return { accepted: false, reason: 'all_aspects_already_answered' };
+    }
+    // Check if an open/dismissed turn already covers the remaining missing aspects
+    for (const h of mergedHistory) {
+      if (h.status === 'answered') continue;
+      const sameScope =
+        (candidate.productId && h.productId === candidate.productId) ||
+        (!candidate.productId && !h.productId && h.category === candidate.category);
+      if (!sameScope) continue;
+      const hAspects = extractQuestionAspects(h.question);
+      if (remainingAspects.every((ra) => hAspects.includes(ra))) {
+        return { accepted: false, reason: 'remaining_aspects_already_pending_or_dismissed' };
+      }
+    }
+
+    // Partial overlap: some requested aspects were already answered! Narrow strictly to remaining aspects.
+    if (remainingAspects.length < candidateAspects.length) {
+      const narrowed = buildNarrowedFollowUpQuestion(
+        remainingAspects,
+        candidateAspects.filter((a) => coveredAspects.has(a)),
+        candidate.productName,
+        candidate.category
+      );
+      return {
+        accepted: true,
+        question: narrowed,
+        narrowedFromOriginal: true,
+      };
+    }
+  } else if (answeredEvidenceParts.length > 0 && candidate.productId) {
+    // Non-aspect duplicate check: if product already received substantive owner answer on this exact category
+    const hasSameCatAnswered = mergedHistory.some(
+      (h) =>
+        h.status === 'answered' &&
+        h.productId === candidate.productId &&
+        (!candidateCat || String(h.category || '').toLowerCase() === candidateCat)
+    );
+    if (hasSameCatAnswered) {
+      return { accepted: false, reason: 'category_already_answered_for_product' };
+    }
+  }
+
+  return { accepted: true, question: qClean };
+}
+
+app.post('/api/owner/ai/ask-guidance/reply', async (req, res) => {
+  const { pin } = req.body || {};
+  if (!verifyPin(pin)) {
+    return res.status(401).json({ error: 'Invalid owner PIN' });
+  }
+
+  const body = req.body || {};
+  const convId = String(body.conversationId || 'playnix_owner_ask_ai').trim().slice(0, 128) || 'playnix_owner_ask_ai';
+  const questionId = String(body.questionId || body.id || '').trim();
+  const question = String(body.question || '').trim().slice(0, 500);
+  const answer = body.answer !== undefined ? String(body.answer || '').trim().slice(0, 4000) : '';
+  const status: 'open' | 'answered' | 'dismissed' =
+    body.status === 'dismissed' ? 'dismissed' : body.status === 'answered' || answer ? 'answered' : 'open';
+
+  if (!questionId && !question) {
+    return res.status(400).json({ error: 'questionId or question is required' });
+  }
+
+  const current = serverAskAiHistoryStore.get(convId) || [];
+  const existingMatch = current.find(
+    (h) =>
+      (questionId && h.id === questionId) ||
+      (question && h.question.trim().toLowerCase() === question.toLowerCase())
+  );
+
+  const merged = mergeAskAiConversationHistory(convId, [
+    {
+      ...(existingMatch || {}),
+      id: questionId || existingMatch?.id || `guide_reply_${Date.now().toString(36)}`,
+      question: question || existingMatch?.question || `Question ${questionId}`,
+      ...(answer ? { answer } : {}),
+      status,
+      ...(body.productId ? { productId: String(body.productId) } : {}),
+      ...(body.productName ? { productName: String(body.productName) } : {}),
+      ...(body.category ? { category: String(body.category) } : {}),
+      updatedAt: new Date().toISOString(),
+      ...(status === 'answered' ? { answeredAt: new Date().toISOString() } : {}),
+    },
+  ]);
+
+  return res.json({
+    success: true,
+    conversationId: convId,
+    historyCount: merged.length,
+  });
+});
+
 async function handleAiSuggestQuestion(reqBody: any) {
   const ai = getGeminiClient();
   if (!ai) {
@@ -2342,6 +2948,19 @@ async function handleAiSuggestQuestion(reqBody: any) {
       : 'BALANCED FORMAT: Reply in 2 to 3 concise, friendly sentences with clear facts.';
 
   const learningBlock = buildOwnerLearningInstructionsBlock(reqBody?.relevantLearningRecords);
+  const priorGuidanceTurns = mergeAskAiConversationHistory(
+    String(reqBody?.conversationId || 'playnix_default_owner_ask_ai'),
+    reqBody?.existingGuidanceQuestions,
+    reqBody?.conversationHistory || reqBody?.messages
+  );
+  const relevantGuidanceSummary = priorGuidanceTurns
+    .filter((t) => !targetProductId || !t.productId || t.productId === targetProductId)
+    .slice(-15)
+    .map((t) => ({
+      question: t.question,
+      status: t.status,
+      ...(t.answer ? { ownerAnswer: t.answer.slice(0, 300) } : {}),
+    }));
 
   const prompt = [
     'Draft a suggested answer for the Playnix Shop owner to review manually before replying to a customer question.',
@@ -2349,6 +2968,9 @@ async function handleAiSuggestQuestion(reqBody: any) {
     `EXACT_TARGET_PRODUCT: ${JSON.stringify(targetProductContext)}`,
     `VERIFIED_SHOP_AND_PRODUCT_KNOWLEDGE: ${JSON.stringify(compactKnowledge)}`,
     `OWNER_TRAINING_POLICIES_AND_TONE: ${JSON.stringify(relevantTraining)}`,
+    ...(relevantGuidanceSummary.length > 0
+      ? [`PREVIOUSLY_ASKED_OR_ANSWERED_QUESTIONS_HISTORY: ${JSON.stringify(relevantGuidanceSummary)}`]
+      : []),
     `OWNER_RESPONSE_STYLE_RULE: ${styleDirective}`,
     ...(ownerCustomInstructions
       ? [`OWNER_CUSTOM_INSTRUCTIONS_AND_RULES: ${ownerCustomInstructions}`]
@@ -2372,7 +2994,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
     '6. If required information is missing from the verified data:',
     '   - Set groundingStatus to "missing_info" (or "partial" if part of the question can be answered safely from verified data).',
     '   - Set missingInfoNote to a clear, helpful message for the OWNER naming the exact missing detail(s) (e.g., "Verified material/dimensions are not listed for this product yet.").',
-    '   - Set ownerClarificationQuestion to ONE direct, plain question asking the OWNER for the missing fact AI needs (e.g., "What material, dimensions, and age suitability should customers know for Supra MK4?"). When groundingStatus is "verified", set ownerClarificationQuestion to "".',
+    '   - Set ownerClarificationQuestion to ONE direct, plain question asking the OWNER ONLY for the still-missing fact AI needs — check PREVIOUSLY_ASKED_OR_ANSWERED_QUESTIONS_HISTORY first and NEVER repeat a question already asked or answered (if an earlier answer was incomplete, ask ONLY for the missing detail). When groundingStatus is "verified" or the same question is already open/dismissed, set ownerClarificationQuestion to "".',
     '   - In suggestedAnswer, NEVER make up or guess the missing fact; either share ONLY the verified portion and clearly note the remaining question for the owner to confirm, OR follow the owner training unknown_fallback & communication_style preference to draft an honest holding response (or state clearly what needs owner input).',
     `7. Follow OWNER_RESPONSE_STYLE_RULE (${styleDirective})${
       ownerCustomInstructions
@@ -2460,6 +3082,26 @@ async function handleAiSuggestQuestion(reqBody: any) {
     throw new Error('Playnix AI returned an unexpected response structure.');
   }
 
+  const rawClarification = String(parsed.ownerClarificationQuestion || '').trim().slice(0, 480);
+  let filteredClarification = '';
+  if (rawClarification) {
+    const clarificationEval = evaluateCandidateQuestionAgainstHistory(
+      {
+        question: rawClarification,
+        category: 'product_spec',
+        productId: targetProductId || undefined,
+        productName: targetProductName || undefined,
+      },
+      priorGuidanceTurns,
+      allKnowledge,
+      trainingAnswers,
+      targetProduct ? [targetProduct] : []
+    );
+    if (clarificationEval.accepted && clarificationEval.question) {
+      filteredClarification = clarificationEval.question;
+    }
+  }
+
   return {
     success: true,
     geminiConfigured: true,
@@ -2478,7 +3120,7 @@ async function handleAiSuggestQuestion(reqBody: any) {
           ? parsed.confidence
           : 'medium',
       missingInfoNote: String(parsed.missingInfoNote || '').trim().slice(0, 600),
-      ownerClarificationQuestion: String(parsed.ownerClarificationQuestion || '').trim().slice(0, 480),
+      ownerClarificationQuestion: filteredClarification,
       usedSources: Array.isArray(parsed.usedSources)
         ? parsed.usedSources.map((s: any) => String(s || '').trim()).filter(Boolean).slice(0, 12)
         : [],
@@ -3232,6 +3874,8 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
 
   try {
     const body = req.body || {};
+    const conversationId =
+      String(body.conversationId || 'playnix_owner_ask_ai').trim().slice(0, 128) || 'playnix_owner_ask_ai';
     const products: any[] = Array.isArray(body.products) ? body.products : [];
     const pendingQuestions: any[] = Array.isArray(body.pendingQuestions) ? body.pendingQuestions : [];
     const knowledgeEntries: any[] = Array.isArray(body.knowledgeEntries) ? body.knowledgeEntries : [];
@@ -3239,14 +3883,17 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
     const existingQuestions: any[] = Array.isArray(body.existingGuidanceQuestions)
       ? body.existingGuidanceQuestions
       : [];
+    const rawConversationHistory: any[] = Array.isArray(body.conversationHistory)
+      ? body.conversationHistory
+      : Array.isArray(body.messages)
+      ? body.messages
+      : [];
 
-    const existingNormalized = new Set(
-      existingQuestions.map((g: any) => String(g?.question || '').trim().toLowerCase())
-    );
-    const existingProductSpecGapIds = new Set(
-      existingQuestions
-        .filter((g: any) => g?.productId && g?.status !== 'dismissed')
-        .map((g: any) => `${String(g.productId)}::${String(g.category || '')}`)
+    // Stateful chronological merge: never resets history across consecutive requests
+    const mergedHistory = mergeAskAiConversationHistory(
+      conversationId,
+      existingQuestions,
+      rawConversationHistory
     );
 
     const allowedCats = new Set([
@@ -3274,7 +3921,9 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
       customerQuestionId?: string;
     }> = [];
 
-    const pushUniqueQuestion = (item: {
+    const workingHistory: AskAiHistoryTurn[] = [...mergedHistory];
+
+    const tryQueueQuestion = (item: {
       id: string;
       question: string;
       context: string;
@@ -3283,19 +3932,52 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
       productId?: string;
       productName?: string;
       customerQuestionId?: string;
-    }) => {
-      const qClean = item.question.trim().slice(0, 480);
-      if (!qClean) return;
-      const norm = qClean.toLowerCase();
-      if (existingNormalized.has(norm)) return;
-      if (generated.some((g) => g.question.toLowerCase() === norm)) return;
-      existingNormalized.add(norm);
-      generated.push({
+    }): boolean => {
+      const evalResult = evaluateCandidateQuestionAgainstHistory(
+        {
+          question: item.question,
+          category: item.category,
+          productId: item.productId,
+          productName: item.productName,
+          customerQuestionId: item.customerQuestionId,
+        },
+        workingHistory,
+        knowledgeEntries,
+        trainingAnswers,
+        products
+      );
+
+      if (!evalResult.accepted || !evalResult.question) {
+        return false;
+      }
+
+      const finalQuestion = evalResult.question.trim().slice(0, 480);
+      if (generated.some((g) => g.question.toLowerCase() === finalQuestion.toLowerCase())) {
+        return false;
+      }
+
+      const queuedItem = {
         ...item,
-        question: qClean,
+        question: finalQuestion,
         context: item.context.trim().slice(0, 550),
         category: allowedCats.has(item.category) ? item.category : 'product_spec',
+      };
+      generated.push(queuedItem);
+
+      const newTurn = normalizeAskAiTurn({
+        id: queuedItem.id,
+        question: queuedItem.question,
+        status: 'open',
+        category: queuedItem.category,
+        productId: queuedItem.productId,
+        productName: queuedItem.productName,
+        customerQuestionId: queuedItem.customerQuestionId,
+        context: queuedItem.context,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
+      if (newTurn) workingHistory.push(newTurn);
+      return true;
     };
 
     const ownerKnowledgeTextByProduct = new Map<string, string>();
@@ -3308,29 +3990,62 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
       }
     }
 
-    // 1. Deterministic audit for live products missing descriptions/specs
-    for (const p of products) {
-      if (p?.available === false) continue;
-      const pid = String(p?.id || '').trim();
-      const pname = String(p?.name || '').trim();
-      const desc = String(p?.description || '').trim();
-      if (!pid || !pname) continue;
-      const hasOwnerNotes = Boolean(ownerKnowledgeTextByProduct.get(pid)?.trim());
-      if (!desc && !hasOwnerNotes && !existingProductSpecGapIds.has(`${pid}::product_spec`)) {
-        pushUniqueQuestion({
-          id: `guide_prod_${sanitizeKnowledgeId('p', pid).slice(0, 90)}`,
-          question: `What are the size, material, and key features of "${pname}"?`,
-          context: `This live product currently has no description or owner notes, so AI needs your help to answer customer questions about it.`,
-          category: 'product_spec',
-          source: 'scan',
-          productId: pid,
-          productName: pname,
-        });
-      }
+    // 1. Check answered turns with incomplete info -> generate narrowed follow-up asking ONLY for missing aspects
+    for (const turn of mergedHistory) {
+      if (turn.status !== 'answered' || !turn.answer) continue;
+      const coverage = analyzeTurnAspectCoverage(turn, knowledgeEntries, products, mergedHistory);
+      if (!coverage.isPartial || coverage.missingAspects.length === 0) continue;
+
+      const followUpQuestion = buildNarrowedFollowUpQuestion(
+        coverage.missingAspects,
+        coverage.coveredAspects,
+        turn.productName,
+        turn.category
+      );
+      const followUpId = `guide_followup_${sanitizeKnowledgeId('f', turn.id).slice(0, 70)}_${coverage.missingAspects.join('_')}`
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 128);
+
+      tryQueueQuestion({
+        id: followUpId,
+        question: followUpQuestion,
+        context: `Follow-up after your previous reply ("${turn.answer.slice(0, 140)}"): AI still needs only the missing detail(s) and won't re-ask what you already provided.`,
+        category: turn.category || 'product_spec',
+        source: turn.productId ? 'scan' : 'ai_audit',
+        productId: turn.productId,
+        productName: turn.productName,
+      });
       if (generated.length >= 4) break;
     }
 
-    // 2. Gemini-powered deep audit across pending customer questions, products & training policies
+    // 2. Deterministic audit for live products missing descriptions/specs (respecting ALL prior history statuses: open, answered, dismissed)
+    if (generated.length < 4) {
+      for (const p of products) {
+        if (p?.available === false) continue;
+        const pid = String(p?.id || '').trim();
+        const pname = String(p?.name || '').trim();
+        const desc = String(p?.description || '').trim();
+        if (!pid || !pname) continue;
+        const hasOwnerNotes = Boolean(ownerKnowledgeTextByProduct.get(pid)?.trim());
+        const alreadyAskedOrAnsweredForProduct = workingHistory.some(
+          (h) => h.productId === pid && (h.category === 'product_spec' || !h.category)
+        );
+        if (!desc && !hasOwnerNotes && !alreadyAskedOrAnsweredForProduct) {
+          tryQueueQuestion({
+            id: `guide_prod_${sanitizeKnowledgeId('p', pid).slice(0, 90)}`,
+            question: `What are the size, material, and key features of "${pname}"?`,
+            context: `This live product currently has no description or owner notes, so AI needs your help to answer customer questions about it.`,
+            category: 'product_spec',
+            source: 'scan',
+            productId: pid,
+            productName: pname,
+          });
+        }
+        if (generated.length >= 4) break;
+      }
+    }
+
+    // 3. Gemini-powered multi-turn deep audit across conversation history, products & pending customer questions
     const ai = getGeminiClient();
     let usedGemini = false;
     if (ai) {
@@ -3346,46 +4061,119 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
           description: String(p.description || '').trim().slice(0, 180),
         }));
 
-    const compactPending = pendingQuestions.slice(0, 10).map((q) => ({
-      id: String(q.id || ''),
-      productId: String(q.productId || ''),
-      productName: String(q.productName || ''),
-      customerQuestion: String(q.question || '').slice(0, 220),
-    }));
+      const compactPending = pendingQuestions.slice(0, 10).map((q) => ({
+        id: String(q.id || ''),
+        productId: String(q.productId || ''),
+        productName: String(q.productName || ''),
+        customerQuestion: String(q.question || '').slice(0, 220),
+      }));
 
-      const compactKnowledge = knowledgeEntries.slice(0, 25).map((k) => ({
+      const compactKnowledge = knowledgeEntries.slice(0, 40).map((k) => ({
         title: String(k.title || ''),
         category: String(k.category || ''),
         productId: k.productId ? String(k.productId) : undefined,
-        content: String(k.content || '').slice(0, 200),
+        content: String(k.content || '').slice(0, 220),
       }));
 
       const answeredTopics = trainingAnswers
         .filter((t) => t?.status === 'answered' && t?.answer?.trim())
-        .map((t) => String(t.stepKey));
+        .map((t) => ({ topic: String(t.stepKey), answer: String(t.answer).slice(0, 180) }));
 
       const guidanceLearningBlock = buildOwnerLearningInstructionsBlock(body.relevantLearningRecords);
 
-      const auditPrompt = [
-        'You are Playnix AI Assistant asking the Playnix Shop owner for help or clarification where your verified knowledge is incomplete.',
-        'Review the live products, unanswered customer questions, existing knowledge entries, and already-asked guidance questions.',
-        'Generate up to 5 crisp, practical questions that AI genuinely needs the owner to answer so AI can reply accurately to customers in the future.',
-        'Rules:',
-        '- Do NOT repeat questions already present in EXISTING_GUIDANCE_QUESTIONS or already answered in EXISTING_KNOWLEDGE.',
-        '- Prioritize unanswered customer questions that lack product/policy facts, popular products with unclear size/material/battery/age specs, or missing store handling rules.',
-        '- Keep every question short, direct, and easy for the shop owner to answer in 1-2 lines.',
+      // Build structured multi-turn conversation history for Gemini
+      const olderHistory = workingHistory.length > 35 ? workingHistory.slice(0, workingHistory.length - 35) : [];
+      const recentHistory = workingHistory.slice(-35);
+
+      const historySummaryForPrompt = workingHistory.map((h) => {
+        const cov = analyzeTurnAspectCoverage(h, knowledgeEntries, products);
+        return {
+          id: h.id,
+          question: h.question,
+          status: h.status,
+          productId: h.productId || null,
+          category: h.category || null,
+          ...(h.answer ? { ownerAnswer: h.answer.slice(0, 240) } : {}),
+          ...(cov.coveredAspects.length > 0 ? { coveredAspects: cov.coveredAspects } : {}),
+          ...(cov.isPartial && cov.missingAspects.length > 0 ? { stillMissingAspects: cov.missingAspects } : {}),
+        };
+      });
+
+      const multiTurnContents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+      if (olderHistory.length > 0) {
+        multiTurnContents.push({
+          role: 'user',
+          parts: [
+            {
+              text: `Earlier conversation history summary (${olderHistory.length} prior turns, do NOT repeat any of these questions): ${JSON.stringify(
+                olderHistory.map((h) => ({ q: h.question, status: h.status, answer: h.answer?.slice(0, 140) || '' }))
+              )}`,
+            },
+          ],
+        });
+        multiTurnContents.push({
+          role: 'model',
+          parts: [
+            {
+              text: 'Understood. I will remember every previously asked question and never repeat answered, open, or dismissed topics.',
+            },
+          ],
+        });
+      }
+
+      for (const turn of recentHistory) {
+        multiTurnContents.push({
+          role: 'model',
+          parts: [
+            {
+              text: JSON.stringify({
+                askedQuestion: turn.question,
+                category: turn.category || 'product_spec',
+                productId: turn.productId || '',
+                productName: turn.productName || '',
+              }),
+            },
+          ],
+        });
+        const ownerReplyText =
+          turn.status === 'answered' && turn.answer
+            ? `Owner answered: ${turn.answer}`
+            : turn.status === 'dismissed'
+            ? 'Owner dismissed this question. Do NOT ask about it again.'
+            : '(Awaiting owner reply — still open in queue. Do NOT repeat or rephrase this question.)';
+        multiTurnContents.push({
+          role: 'user',
+          parts: [{ text: ownerReplyText }],
+        });
+      }
+
+      const currentAuditPrompt = [
+        'Continue the Playnix AI Ask AI conversation with the shop owner.',
+        'Review the live products, unanswered customer questions, existing knowledge entries, and the full CONVERSATION_MEMORY_ANALYSIS below.',
+        'Generate up to 4 genuinely NEW, high-value clarification questions that AI still needs — OR return {"questions": []} if nothing new is needed.',
+        'STRICT CONVERSATION MEMORY RULES:',
+        '1. Check EVERY entry in CONVERSATION_MEMORY_ANALYSIS and the multi-turn history above BEFORE proposing any question.',
+        '2. NEVER repeat or rephrase a question that is already answered, open, or dismissed.',
+        '3. If the owner previously gave a partial answer (listed in stillMissingAspects), ask ONLY for the still-missing aspect(s) in a natural follow-up — never re-ask the covered parts.',
+        '4. Do NOT ask for anything already present in LIVE_PRODUCTS, EXISTING_KNOWLEDGE, or ANSWERED_TRAINING_TOPICS.',
+        '5. Keep each question concise, natural, and focused on 1 clear gap.',
         ...(guidanceLearningBlock ? ['', guidanceLearningBlock] : []),
         '',
         `LIVE_PRODUCTS: ${JSON.stringify(compactProducts)}`,
         `PENDING_CUSTOMER_QUESTIONS: ${JSON.stringify(compactPending)}`,
         `EXISTING_KNOWLEDGE: ${JSON.stringify(compactKnowledge)}`,
         `ANSWERED_TRAINING_TOPICS: ${JSON.stringify(answeredTopics)}`,
-        `EXISTING_GUIDANCE_QUESTIONS: ${JSON.stringify(Array.from(existingNormalized).slice(0, 25))}`,
+        `CONVERSATION_MEMORY_ANALYSIS: ${JSON.stringify(historySummaryForPrompt)}`,
       ].join('\n');
+
+      multiTurnContents.push({
+        role: 'user',
+        parts: [{ text: currentAuditPrompt }],
+      });
 
       const cfgSchema: any = {
         systemInstruction:
-          'Generate practical clarification questions from Playnix AI to the Playnix Shop owner when verified data has gaps.',
+          'You are Playnix AI conducting an ongoing, memory-aware clarification conversation with the Playnix Shop owner. Never ask repeated or redundant questions; narrow follow-ups strictly to missing details.',
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -3433,7 +4221,7 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
         }
         return ai.models.generateContent({
           model: modelName,
-          contents: auditPrompt,
+          contents: multiTurnContents,
           config: c,
         });
       };
@@ -3445,7 +4233,7 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
         try {
           resp = await runAuditOnce(primaryModel);
         } catch (err: any) {
-          const m = String(err?.message || '').toLowerCase();
+          const m = String(err?.message || err || '').toLowerCase();
           if (
             primaryModel === PLAYNIX_GEMINI_MODEL &&
             (err?.status === 503 || err?.name === 'TimeoutError' || err?.name === 'AbortError' || m.includes('503') || m.includes('high demand'))
@@ -3467,7 +4255,7 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
             const cqid = q?.customerQuestionId
               ? String(q.customerQuestionId).trim().slice(0, 128)
               : undefined;
-            pushUniqueQuestion({
+            tryQueueQuestion({
               id: `guide_ai_${Date.now().toString(36)}_${idx}`,
               question: qText,
               context: String(q?.context || 'AI noticed a helpful detail missing from verified store data.').trim(),
@@ -3484,10 +4272,18 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
       }
     }
 
+    // Persist any newly generated open questions immediately in backend session history
+    // so consecutive API requests remember them even without client re-submission
+    if (generated.length > 0) {
+      mergeAskAiConversationHistory(conversationId, generated);
+    }
+
     res.json({
       success: true,
       geminiConfigured: ai !== null,
       usedGemini,
+      conversationId,
+      historyCount: (serverAskAiHistoryStore.get(conversationId) || []).length,
       questions: generated.slice(0, 8),
     });
   } catch (err: any) {
