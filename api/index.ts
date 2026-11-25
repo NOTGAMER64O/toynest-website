@@ -1794,6 +1794,155 @@ app.post('/api/owner/colours/delete', (req, res) => {
 // ============================================================================
 
 const PLAYNIX_GEMINI_MODEL = 'gemini-4-hydrogen';
+const PLAYNIX_GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+let hydrogenOverloadCooldownUntil = 0;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function extractCleanGeminiError(err: any): {
+  statusCode: number;
+  message: string;
+  isTransient: boolean;
+  isTimeout: boolean;
+} {
+  const rawMessage = String(err?.message || err || '').trim();
+  let parsedCode: number | undefined = typeof err?.status === 'number' ? err.status : undefined;
+  let parsedStatus = String(err?.statusText || '').toUpperCase();
+  let parsedMessage = rawMessage;
+
+  if (rawMessage.startsWith('{') || rawMessage.includes('"error"')) {
+    try {
+      const jsonStart = rawMessage.indexOf('{');
+      const obj = JSON.parse(rawMessage.slice(jsonStart));
+      const inner = obj?.error || obj;
+      if (typeof inner?.code === 'number') parsedCode = inner.code;
+      if (inner?.status) parsedStatus = String(inner.status).toUpperCase();
+      if (typeof inner?.message === 'string' && inner.message.trim()) {
+        parsedMessage = inner.message.trim();
+      }
+    } catch {
+      // Keep original text if not valid JSON
+    }
+  }
+
+  const lower = `${parsedMessage} ${parsedStatus}`.toLowerCase();
+  const isTimeout =
+    err?.name === 'AbortError' ||
+    err?.name === 'TimeoutError' ||
+    /aborted|timed out|timeout/.test(lower);
+  const isOverloaded =
+    parsedCode === 503 ||
+    parsedStatus === 'UNAVAILABLE' ||
+    /high demand|overloaded|unavailable|spikes in demand|service unavailable|try again later/.test(lower);
+  const isRateLimit =
+    parsedCode === 429 ||
+    parsedStatus === 'RESOURCE_EXHAUSTED' ||
+    /resource_exhausted|rate limit|quota/.test(lower);
+  const isNetworkTransient = /econnreset|enotfound|etimedout|fetch failed|socket hang up/.test(lower);
+
+  if (isTimeout) {
+    return {
+      statusCode: 504,
+      message: 'Playnix AI took too long to respond right now. Please tap Retry in a moment.',
+      isTransient: true,
+      isTimeout: true,
+    };
+  }
+  if (isOverloaded) {
+    return {
+      statusCode: 503,
+      message:
+        'Playnix AI is temporarily experiencing high demand. Please wait a few seconds and tap Retry — or type your answer manually below.',
+      isTransient: true,
+      isTimeout: false,
+    };
+  }
+  if (isRateLimit) {
+    return {
+      statusCode: 429,
+      message:
+        'Playnix AI hit a brief request limit. Please wait a few seconds and try again.',
+      isTransient: true,
+      isTimeout: false,
+    };
+  }
+  if (isNetworkTransient) {
+    return {
+      statusCode: 503,
+      message:
+        'Temporary connection hiccup reaching Playnix AI. Please try again in a moment.',
+      isTransient: true,
+      isTimeout: false,
+    };
+  }
+  if (parsedCode === 403 || parsedStatus === 'PERMISSION_DENIED' || /api key|permission_denied/.test(lower)) {
+    return {
+      statusCode: 403,
+      message: 'Playnix AI API key permission error. Please check GEMINI_API_KEY in Settings > Secrets.',
+      isTransient: false,
+      isTimeout: false,
+    };
+  }
+
+  return {
+    statusCode: parsedCode && parsedCode >= 400 && parsedCode < 600 ? parsedCode : 500,
+    message:
+      parsedMessage && !parsedMessage.startsWith('{')
+        ? parsedMessage.slice(0, 260)
+        : 'Could not generate AI suggestion right now. You can try again or write a manual reply below.',
+    isTransient: false,
+    isTimeout: false,
+  };
+}
+
+async function runGeminiWithRetryAndFallback(
+  ai: GoogleGenAI,
+  buildRequest: (modelName: string, timeoutMs: number) => any,
+  maxAttempts = 4
+): Promise<{ response: any; modelUsed: string }> {
+  const startWithFallback = Date.now() < hydrogenOverloadCooldownUntil;
+  const candidateSequence = startWithFallback
+    ? [
+        PLAYNIX_GEMINI_FALLBACK_MODEL,
+        PLAYNIX_GEMINI_FALLBACK_MODEL,
+        PLAYNIX_GEMINI_MODEL,
+        PLAYNIX_GEMINI_FALLBACK_MODEL,
+      ]
+    : [
+        PLAYNIX_GEMINI_MODEL,
+        PLAYNIX_GEMINI_FALLBACK_MODEL,
+        PLAYNIX_GEMINI_FALLBACK_MODEL,
+        PLAYNIX_GEMINI_MODEL,
+      ];
+
+  const modelsToTry = candidateSequence.slice(0, Math.max(1, maxAttempts));
+  let lastError: any = null;
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
+    const timeoutMs = i === 0 ? 9000 : 10000;
+    try {
+      const response = await ai.models.generateContent(buildRequest(modelName, timeoutMs));
+      return { response, modelUsed: modelName };
+    } catch (err: any) {
+      lastError = err;
+      const info = extractCleanGeminiError(err);
+      if (modelName === PLAYNIX_GEMINI_MODEL && info.isTransient) {
+        hydrogenOverloadCooldownUntil = Date.now() + 90_000;
+      }
+      if (!info.isTransient || i === modelsToTry.length - 1) {
+        throw err;
+      }
+      const jitterMs = Math.floor(Math.random() * 200);
+      const backoffMs = Math.min(2200, 500 * Math.pow(2, i) + jitterMs);
+      await sleepMs(backoffMs);
+    }
+  }
+
+  throw lastError || new Error('Playnix AI request failed.');
+}
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
@@ -2162,10 +2311,8 @@ app.post('/api/owner/ai/scan', async (req, res) => {
           `DETERMINISTIC_AUDIT_GAPS: ${JSON.stringify(deterministic.missingInfoItems)}`,
         ].join('\n');
 
-        const response = await ai.models.generateContent({
-          model: PLAYNIX_GEMINI_MODEL,
-          contents: prompt,
-          config: {
+        const { response } = await runGeminiWithRetryAndFallback(ai, (modelName, timeoutMs) => {
+          const cfg: any = {
             systemInstruction:
               'You are Playnix AI Knowledge Analyst. Summarize verified website catalog and shop settings factually without fabricating any unverified fact.',
             responseMimeType: 'application/json',
@@ -2184,7 +2331,16 @@ app.post('/api/owner/ai/scan', async (req, res) => {
               },
               required: ['scanSummary', 'learnedHighlights', 'missingInfoItems'],
             },
-          },
+            abortSignal: AbortSignal.timeout(timeoutMs),
+          };
+          if (modelName === PLAYNIX_GEMINI_MODEL) {
+            cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+          }
+          return {
+            model: modelName,
+            contents: prompt,
+            config: cfg,
+          };
         });
 
         const parsed = response.text ? JSON.parse(response.text) : null;
@@ -3037,45 +3193,24 @@ async function handleAiSuggestQuestion(reqBody: any) {
     },
   };
 
-  let activeSuggestModel =
-    Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-  const runSuggestOnce = async (modelName: string) => {
-    const cfg: any = {
-      ...suggestConfig,
-      abortSignal: AbortSignal.timeout(10000),
-    };
-    if (modelName === PLAYNIX_GEMINI_MODEL) {
-      cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-    }
-    return ai.models.generateContent({
-      model: modelName,
-      contents: prompt,
-      config: cfg,
-    });
-  };
-
-  let response: any;
-  try {
-    response = await runSuggestOnce(activeSuggestModel);
-  } catch (err: any) {
-    const msg = String(err?.message || err || '').toLowerCase();
-    if (
-      activeSuggestModel === PLAYNIX_GEMINI_MODEL &&
-      (err?.status === 503 ||
-        err?.name === 'TimeoutError' ||
-        err?.name === 'AbortError' ||
-        msg.includes('503') ||
-        msg.includes('high demand') ||
-        msg.includes('unavailable') ||
-        msg.includes('aborted'))
-    ) {
-      hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-      activeSuggestModel = 'gemini-3.1-flash-lite';
-      response = await runSuggestOnce(activeSuggestModel);
-    } else {
-      throw err;
-    }
-  }
+  const { response, modelUsed: activeSuggestModel } = await runGeminiWithRetryAndFallback(
+    ai,
+    (modelName, timeoutMs) => {
+      const cfg: any = {
+        ...suggestConfig,
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      };
+      if (modelName === PLAYNIX_GEMINI_MODEL) {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return {
+        model: modelName,
+        contents: prompt,
+        config: cfg,
+      };
+    },
+    4
+  );
 
   const parsed = response.text ? JSON.parse(response.text) : null;
   if (!parsed || typeof parsed.suggestedAnswer !== 'string') {
@@ -3140,24 +3275,13 @@ app.post('/api/owner/ai/suggest-answer', async (req, res) => {
     const result = await handleAiSuggestQuestion(req.body || {});
     res.json(result);
   } catch (err: any) {
-    const rawMsg = String(err?.message || err || '');
-    const isAbort =
-      err?.name === 'AbortError' || err?.name === 'TimeoutError' || /aborted|timed out/i.test(rawMsg);
-    if (isAbort) {
-      console.info('AI suggest-answer timed out.');
-      return res.status(504).json({
-        success: false,
-        geminiConfigured: getGeminiClient() !== null,
-        error: 'Playnix AI took too long to respond right now. Please try again.',
-      });
-    }
-    console.error('Error in /api/owner/ai/suggest-answer:', err);
-    res.status(500).json({
+    const clean = extractCleanGeminiError(err);
+    console.error('Error in /api/owner/ai/suggest-answer:', clean.statusCode, clean.message);
+    res.status(clean.statusCode).json({
       success: false,
+      retryable: clean.isTransient,
       geminiConfigured: getGeminiClient() !== null,
-      error:
-        err?.message ||
-        'Could not generate AI suggestion right now. You can still write a manual answer.',
+      error: clean.message,
     });
   }
 });
@@ -3172,22 +3296,13 @@ app.post('/api/owner/ai/test-question', async (req, res) => {
     const result = await handleAiSuggestQuestion(req.body || {});
     res.json(result);
   } catch (err: any) {
-    const rawMsg = String(err?.message || err || '');
-    const isAbort =
-      err?.name === 'AbortError' || err?.name === 'TimeoutError' || /aborted|timed out/i.test(rawMsg);
-    if (isAbort) {
-      console.info('AI test-question timed out.');
-      return res.status(504).json({
-        success: false,
-        geminiConfigured: getGeminiClient() !== null,
-        error: 'Playnix AI took too long to respond right now. Please try again.',
-      });
-    }
-    console.error('Error in /api/owner/ai/test-question:', err);
-    res.status(500).json({
+    const clean = extractCleanGeminiError(err);
+    console.error('Error in /api/owner/ai/test-question:', clean.statusCode, clean.message);
+    res.status(clean.statusCode).json({
       success: false,
+      retryable: clean.isTransient,
       geminiConfigured: getGeminiClient() !== null,
-      error: err?.message || 'Could not test AI question right now.',
+      error: clean.message,
     });
   }
 });
@@ -3215,8 +3330,6 @@ function extractJsonObjectFromText(rawText: string): any | null {
     return null;
   }
 }
-
-let hydrogenOverloadCooldownUntil = 0;
 
 app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
   const { pin } = req.body || {};

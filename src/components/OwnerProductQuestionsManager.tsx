@@ -286,7 +286,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
           !autoDraftedIdsRef.current.has(q.id) &&
           !inFlightIdsRef.current.has(q.id)
       )
-      .slice(0, 3);
+      .slice(0, 2);
 
     if (pendingUnanswered.length === 0) return;
     let cancelled = false;
@@ -296,9 +296,13 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     }
 
     void (async () => {
-      for (const q of pendingUnanswered) {
+      for (let i = 0; i < pendingUnanswered.length; i++) {
         if (cancelled) break;
-        await handleGenerateAiSuggestion(q, true, true);
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, 700));
+          if (cancelled) break;
+        }
+        await handleGenerateAiSuggestion(pendingUnanswered[i], true, true);
       }
     })();
 
@@ -763,15 +767,33 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                   </p>
                 )}
 
-                {aiError && (
-                  <div className="playnix-ai-alert warning" style={{ marginTop: 8 }}>
-                    <AlertTriangle size={16} />
-                    <div>
-                      <strong>Suggestion Unavailable</strong>
-                      <p>{aiError}</p>
+                {aiError && (() => {
+                  let displayAiError = aiError;
+                  if (aiError.trim().startsWith('{') || aiError.includes('"UNAVAILABLE"') || aiError.includes('"code":503')) {
+                    displayAiError =
+                      'Playnix AI is temporarily experiencing high demand. Please wait a few seconds and tap Retry — or type your answer manually below.';
+                  }
+                  return (
+                    <div className="playnix-ai-alert warning mt-2">
+                      <AlertTriangle size={16} />
+                      <div className="flex-1">
+                        <strong>Suggestion Unavailable</strong>
+                        <p>{displayAiError}</p>
+                        <button
+                          type="button"
+                          className="secondary-btn mt-1.5 px-2.5 py-1 text-xs"
+                          disabled={aiLoading}
+                          onClick={() => {
+                            hasManualEditRef.current = false;
+                            void handleGenerateAiSuggestion(selectedQuestion, true, false);
+                          }}
+                        >
+                          {aiLoading ? 'Retrying...' : 'Retry AI Suggestion'}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {(() => {
                   const sug = aiSuggestionsByQId[selectedQuestion.id];
