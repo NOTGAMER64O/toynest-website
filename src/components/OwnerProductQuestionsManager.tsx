@@ -47,6 +47,8 @@ interface OwnerProductQuestionsManagerProps {
   ) => Promise<{
     success: boolean;
     geminiConfigured?: boolean;
+    errorCategory?: 'network' | 'quota' | 'auth' | 'server_temporary';
+    retryable?: boolean;
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }>;
@@ -88,6 +90,9 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const [modalSuccess, setModalSuccess] = useState<string>('');
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string>('');
+  const [aiErrorCategory, setAiErrorCategory] = useState<
+    'network' | 'quota' | 'auth' | 'server_temporary' | null
+  >(null);
   const [teachDraft, setTeachDraft] = useState<string>('');
   const [teachingAi, setTeachingAi] = useState<boolean>(false);
   const [aiSuggestionsByQId, setAiSuggestionsByQId] = useState<
@@ -100,7 +105,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const selectedQuestionIdRef = useRef<string | null>(null);
   const replyDraftRef = useRef<string>('');
   const hasManualEditRef = useRef<boolean>(false);
-  const autoDraftedIdsRef = useRef<Set<string>>(new Set());
+  const requestSeqRef = useRef<number>(0);
   const inFlightIdsRef = useRef<Set<string>>(new Set());
   const questionsRef = useRef<ProductQuestion[]>(questions);
 
@@ -176,6 +181,48 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     return guestLabel;
   };
 
+  const classifyUiAiError = (
+    rawMessage?: string,
+    explicitCategory?: 'network' | 'quota' | 'auth' | 'server_temporary'
+  ): {
+    category: 'network' | 'quota' | 'auth' | 'server_temporary';
+    message: string;
+  } => {
+    if (explicitCategory && rawMessage && !rawMessage.trim().startsWith('{')) {
+      return { category: explicitCategory, message: rawMessage };
+    }
+    const lower = String(rawMessage || '').toLowerCase();
+    if (
+      explicitCategory === 'network' ||
+      (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+      /network|internet|failed to fetch|offline|connection/.test(lower)
+    ) {
+      return { category: 'network', message: 'Network issue: Check your internet connection.' };
+    }
+    if (
+      explicitCategory === 'auth' ||
+      /authentication|api key|401|403|permission|configuration/.test(lower)
+    ) {
+      return {
+        category: 'auth',
+        message: 'API authentication error: AI configuration needs attention.',
+      };
+    }
+    if (
+      explicitCategory === 'quota' ||
+      /quota|429|usage limit|resource_exhausted|rate limit/.test(lower)
+    ) {
+      return {
+        category: 'quota',
+        message: 'API quota exceeded: AI usage limit reached. Try again later.',
+      };
+    }
+    return {
+      category: 'server_temporary',
+      message: 'AI is temporarily unavailable. Retry shortly.',
+    };
+  };
+
   const handleGenerateAiSuggestion = async (
     item: ProductQuestion,
     autoFillIfEmpty = true,
@@ -184,23 +231,30 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     if (!onSuggestAiReply) return;
     if (inFlightIdsRef.current.has(item.id)) return;
     inFlightIdsRef.current.add(item.id);
+    const reqToken = ++requestSeqRef.current;
     const liveProd = productLookup.get(item.productId) || null;
     const showActiveSpinner = !isBackgroundPrefetch || selectedQuestionIdRef.current === item.id;
     if (showActiveSpinner) {
       setAiError('');
+      setAiErrorCategory(null);
       setModalSuccess('');
       setAiLoading(true);
     }
     try {
       const res = await onSuggestAiReply(item, liveProd);
+      if (selectedQuestionIdRef.current === item.id && reqToken !== requestSeqRef.current) {
+        return;
+      }
       if (!res.success || !res.suggestion) {
         if (!isBackgroundPrefetch || selectedQuestionIdRef.current === item.id) {
-          setAiError(
-            res.error || 'Could not generate a suggested reply. You can still write a custom answer manually.'
-          );
+          const parsedErr = classifyUiAiError(res.error, res.errorCategory);
+          setAiErrorCategory(parsedErr.category);
+          setAiError(parsedErr.message);
         }
         return;
       }
+      setAiError('');
+      setAiErrorCategory(null);
       setAiSuggestionsByQId((prev) => ({ ...prev, [item.id]: res.suggestion! }));
 
       const shouldAutoFill = autoFillIfEmpty && !(item.answer || '').trim();
@@ -226,7 +280,9 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
       }
     } catch (err: any) {
       if (!isBackgroundPrefetch || selectedQuestionIdRef.current === item.id) {
-        setAiError(err?.message || 'Playnix AI suggestion failed. You can still reply manually.');
+        const parsedErr = classifyUiAiError(err?.message);
+        setAiErrorCategory(parsedErr.category);
+        setAiError(parsedErr.message);
       }
     } finally {
       inFlightIdsRef.current.delete(item.id);
@@ -243,6 +299,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     setModalError('');
     setModalSuccess('');
     setAiError('');
+    setAiErrorCategory(null);
     setTeachDraft('');
     setConfirmDeleteId(null);
 
@@ -273,44 +330,6 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
       void handleGenerateAiSuggestion(item, true, false);
     }
   };
-
-  // Automatically pre-fill AI suggested answers for pending customer questions in background
-  useEffect(() => {
-    if (!aiEnabled || !onSuggestAiReply) return;
-    const pendingUnanswered = questions
-      .filter(
-        (q) =>
-          q.status === 'Pending' &&
-          !(q.answer || '').trim() &&
-          !aiSuggestionsByQId[q.id] &&
-          !autoDraftedIdsRef.current.has(q.id) &&
-          !inFlightIdsRef.current.has(q.id)
-      )
-      .slice(0, 2);
-
-    if (pendingUnanswered.length === 0) return;
-    let cancelled = false;
-
-    for (const q of pendingUnanswered) {
-      autoDraftedIdsRef.current.add(q.id);
-    }
-
-    void (async () => {
-      for (let i = 0; i < pendingUnanswered.length; i++) {
-        if (cancelled) break;
-        if (i > 0) {
-          await new Promise((r) => setTimeout(r, 700));
-          if (cancelled) break;
-        }
-        await handleGenerateAiSuggestion(pendingUnanswered[i], true, true);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [questions, aiEnabled]);
 
   const handleApproveAiSuggestion = (item: ProductQuestion) => {
     const sug = aiSuggestionsByQId[item.id];
@@ -768,17 +787,21 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                 )}
 
                 {aiError && (() => {
-                  let displayAiError = aiError;
-                  if (aiError.trim().startsWith('{') || aiError.includes('"UNAVAILABLE"') || aiError.includes('"code":503')) {
-                    displayAiError =
-                      'Playnix AI is temporarily experiencing high demand. Please wait a few seconds and tap Retry — or type your answer manually below.';
-                  }
+                  const resolved = classifyUiAiError(aiError, aiErrorCategory || undefined);
+                  const bannerTitle =
+                    resolved.category === 'network'
+                      ? 'Network Issue'
+                      : resolved.category === 'quota'
+                      ? 'API Quota Exceeded'
+                      : resolved.category === 'auth'
+                      ? 'API Authentication Error'
+                      : 'Temporary Server Issue';
                   return (
                     <div className="playnix-ai-alert warning mt-2">
                       <AlertTriangle size={16} />
                       <div className="flex-1">
-                        <strong>Suggestion Unavailable</strong>
-                        <p>{displayAiError}</p>
+                        <strong>{bannerTitle}</strong>
+                        <p>{resolved.message}</p>
                         <button
                           type="button"
                           className="secondary-btn mt-1.5 px-2.5 py-1 text-xs"
@@ -788,7 +811,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                             void handleGenerateAiSuggestion(selectedQuestion, true, false);
                           }}
                         >
-                          {aiLoading ? 'Retrying...' : 'Retry AI Suggestion'}
+                          {aiLoading ? 'Retrying...' : 'Retry'}
                         </button>
                       </div>
                     </div>

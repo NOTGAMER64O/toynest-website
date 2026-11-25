@@ -209,12 +209,19 @@ const api = {
       throw err;
     }
   },
-  async post(url: string, body: any) {
+  async post(url: string, body: any, options?: { timeoutMs?: number }) {
+    const timeoutMs = options?.timeoutMs ?? 25000;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer =
+      controller && timeoutMs > 0
+        ? window.setTimeout(() => controller.abort(), timeoutMs)
+        : null;
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        ...(controller ? { signal: controller.signal } : {}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -222,7 +229,10 @@ const api = {
         if (res.status >= 500 || (res.status !== 401 && res.status !== 400)) {
           recordWebsiteError('api', `${errMsg} on POST ${url}`, url);
         }
-        throw new Error(errMsg);
+        const httpErr: any = new Error(errMsg);
+        httpErr.status = res.status;
+        httpErr.data = err;
+        throw httpErr;
       }
       const data = await res.json();
       return { data };
@@ -231,6 +241,8 @@ const api = {
         recordWebsiteError('api', err?.message || `Network failure on POST ${url}`, url);
       }
       throw err;
+    } finally {
+      if (timer !== null) window.clearTimeout(timer);
     }
   },
   async delete(url: string) {
@@ -2476,11 +2488,29 @@ export default function App() {
   ): Promise<{
     success: boolean;
     geminiConfigured?: boolean;
+    errorCategory?: 'network' | 'quota' | 'auth' | 'server_temporary';
+    retryable?: boolean;
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }> => {
     if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) {
-      throw new Error('Unauthorized owner access');
+      return {
+        success: false,
+        geminiConfigured: aiGeminiStatus.geminiConfigured,
+        errorCategory: 'auth',
+        retryable: false,
+        error: 'API authentication error: AI configuration needs attention.',
+      };
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return {
+        success: false,
+        geminiConfigured: aiGeminiStatus.geminiConfigured,
+        errorCategory: 'network',
+        retryable: true,
+        error: 'Network issue: Check your internet connection.',
+      };
     }
 
     let effectivePrice: number | undefined = product?.price;
@@ -2510,28 +2540,32 @@ export default function App() {
       : null;
 
     try {
-      const res = await ownerPost(endpoint, {
-        conversationId: 'playnix_owner_ask_ai',
-        product: lightweightProduct,
-        productId: product?.id || fallbackProductId,
-        productName: product?.name || fallbackProductName,
-        effectivePrice,
-        activeOfferLabel,
-        availableColours,
-        question: questionText,
-        knowledgeEntries: aiKnowledge,
-        trainingAnswers: aiTrainingAnswers,
-        existingGuidanceQuestions: aiGuidanceQuestions,
-        responseStyleMode: aiState.responseStyleMode || 'balanced',
-        customInstructions: aiState.customInstructions || '',
-        relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
-          featureKey:
-            endpoint === '/api/owner/ai/test-question' ? 'test_question' : 'product_question_reply',
-          requestText: questionText,
+      const res = await ownerPost(
+        endpoint,
+        {
+          conversationId: 'playnix_owner_ask_ai',
+          product: lightweightProduct,
           productId: product?.id || fallbackProductId,
           productName: product?.name || fallbackProductName,
-        }),
-      });
+          effectivePrice,
+          activeOfferLabel,
+          availableColours,
+          question: questionText,
+          knowledgeEntries: aiKnowledge,
+          trainingAnswers: aiTrainingAnswers,
+          existingGuidanceQuestions: aiGuidanceQuestions,
+          responseStyleMode: aiState.responseStyleMode || 'balanced',
+          customInstructions: aiState.customInstructions || '',
+          relevantLearningRecords: buildCompactLearningPayload(aiOwnerLearningRecords, {
+            featureKey:
+              endpoint === '/api/owner/ai/test-question' ? 'test_question' : 'product_question_reply',
+            requestText: questionText,
+            productId: product?.id || fallbackProductId,
+            productName: product?.name || fallbackProductName,
+          }),
+        },
+        { timeoutMs: 24000 }
+      );
 
       if (typeof res.data?.geminiConfigured === 'boolean') {
         setAiGeminiStatus((prev) => ({
@@ -2570,13 +2604,45 @@ export default function App() {
 
       return res.data;
     } catch (err: any) {
+      const msgLower = String(err?.message || '').toLowerCase();
+      const status = typeof err?.status === 'number' ? err.status : undefined;
+      if (
+        (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+        err?.name === 'TypeError' ||
+        /failed to fetch|networkerror|load failed|internet disconnected/.test(msgLower)
+      ) {
+        return {
+          success: false,
+          geminiConfigured: aiGeminiStatus.geminiConfigured,
+          errorCategory: 'network',
+          retryable: true,
+          error: 'Network issue: Check your internet connection.',
+        };
+      }
+      if (status === 401 || status === 403 || /invalid owner pin|authentication|api key/.test(msgLower)) {
+        return {
+          success: false,
+          geminiConfigured: false,
+          errorCategory: 'auth',
+          retryable: false,
+          error: 'API authentication error: AI configuration needs attention.',
+        };
+      }
+      if (status === 429 || /quota|resource_exhausted|rate limit/.test(msgLower)) {
+        return {
+          success: false,
+          geminiConfigured: aiGeminiStatus.geminiConfigured,
+          errorCategory: 'quota',
+          retryable: false,
+          error: 'API quota exceeded: AI usage limit reached. Try again later.',
+        };
+      }
       return {
         success: false,
         geminiConfigured: aiGeminiStatus.geminiConfigured,
-        error:
-          err?.response?.data?.error ||
-          err?.message ||
-          'Playnix AI request failed. You can still write a custom reply manually.',
+        errorCategory: 'server_temporary',
+        retryable: true,
+        error: 'AI is temporarily unavailable. Retry shortly.',
       };
     }
   };
@@ -4728,7 +4794,7 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const ownerPost = async (url: string, body: any) => {
+  const ownerPost = async (url: string, body: any, options?: { timeoutMs?: number }) => {
     let pinToSend = ownerPin;
     if (!pinToSend) {
       try {
@@ -4737,7 +4803,7 @@ export default function App() {
         pinToSend = DEFAULT_OWNER_PIN;
       }
     }
-    return api.post(url, { ...body, pin: pinToSend });
+    return api.post(url, { ...body, pin: pinToSend }, options);
   };
 
   const refreshShop = async () => {
