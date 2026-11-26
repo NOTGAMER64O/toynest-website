@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import {
   type AiSuggestedReplyResult,
+  type AiSystemStatusSnapshot,
   type PendingAiRejectionDraft,
   type Product,
   type ProductQuestion,
@@ -30,6 +31,7 @@ interface OwnerProductQuestionsManagerProps {
   products: Product[];
   loading?: boolean;
   aiEnabled?: boolean;
+  aiSystemStatus?: AiSystemStatusSnapshot;
   onRefresh: () => void | Promise<void>;
   onSaveAnswer: (
     questionId: string,
@@ -49,6 +51,7 @@ interface OwnerProductQuestionsManagerProps {
     geminiConfigured?: boolean;
     errorCategory?: 'network' | 'quota' | 'auth' | 'server_temporary';
     retryable?: boolean;
+    diagnosticSummary?: string;
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }>;
@@ -71,6 +74,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   products,
   loading = false,
   aiEnabled = false,
+  aiSystemStatus,
   onRefresh,
   onSaveAnswer,
   onMarkStatus,
@@ -93,6 +97,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
   const [aiErrorCategory, setAiErrorCategory] = useState<
     'network' | 'quota' | 'auth' | 'server_temporary' | null
   >(null);
+  const [aiDiagnosticSummary, setAiDiagnosticSummary] = useState<string>('');
   const [teachDraft, setTeachDraft] = useState<string>('');
   const [teachingAi, setTeachingAi] = useState<boolean>(false);
   const [aiSuggestionsByQId, setAiSuggestionsByQId] = useState<
@@ -237,6 +242,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     if (showActiveSpinner) {
       setAiError('');
       setAiErrorCategory(null);
+      setAiDiagnosticSummary('');
       setModalSuccess('');
       setAiLoading(true);
     }
@@ -250,11 +256,13 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
           const parsedErr = classifyUiAiError(res.error, res.errorCategory);
           setAiErrorCategory(parsedErr.category);
           setAiError(parsedErr.message);
+          setAiDiagnosticSummary(String(res.diagnosticSummary || '').trim());
         }
         return;
       }
       setAiError('');
       setAiErrorCategory(null);
+      setAiDiagnosticSummary('');
       setAiSuggestionsByQId((prev) => ({ ...prev, [item.id]: res.suggestion! }));
 
       const shouldAutoFill = autoFillIfEmpty && !(item.answer || '').trim();
@@ -283,6 +291,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
         const parsedErr = classifyUiAiError(err?.message);
         setAiErrorCategory(parsedErr.category);
         setAiError(parsedErr.message);
+        setAiDiagnosticSummary('');
       }
     } finally {
       inFlightIdsRef.current.delete(item.id);
@@ -300,6 +309,7 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
     setModalSuccess('');
     setAiError('');
     setAiErrorCategory(null);
+    setAiDiagnosticSummary('');
     setTeachDraft('');
     setConfirmDeleteId(null);
 
@@ -786,6 +796,19 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                   </p>
                 )}
 
+                {aiEnabled && aiSystemStatus && !aiError && (
+                  <p className="playnix-ai-q-muted" style={{ marginTop: 6 }}>
+                    Model status:{' '}
+                    <strong>
+                      {aiSystemStatus.activeModel || aiSystemStatus.primaryModel}
+                    </strong>{' '}
+                    ·{' '}
+                    {aiSystemStatus.suggestionsAvailable
+                      ? aiSystemStatus.availabilityReason
+                      : `${aiSystemStatus.availabilityReason} You can type your answer manually below.`}
+                  </p>
+                )}
+
                 {aiError && (() => {
                   const resolved = classifyUiAiError(aiError, aiErrorCategory || undefined);
                   const bannerTitle =
@@ -802,6 +825,9 @@ export const OwnerProductQuestionsManager: React.FC<OwnerProductQuestionsManager
                       <div className="flex-1">
                         <strong>{bannerTitle}</strong>
                         <p>{resolved.message}</p>
+                        {aiDiagnosticSummary && (
+                          <p className="mt-1 text-xs opacity-80">{aiDiagnosticSummary}</p>
+                        )}
                         <button
                           type="button"
                           className="secondary-btn mt-1.5 px-2.5 py-1 text-xs"

@@ -31,8 +31,10 @@ import {
   type AiGuidanceQuestion,
   type AiKnowledgeCategory,
   type AiKnowledgeEntry,
+  type AiModelHealthSnapshot,
   type AiResponseStyleMode,
   type AiSuggestedReplyResult,
+  type AiSystemStatusSnapshot,
   type AiTrainingAnswer,
   type AiTrainingStepKey,
   type Order,
@@ -63,7 +65,15 @@ interface OwnerPlaynixAiAssistantProps {
   availableColours: string[];
   pendingQuestionsCount: number;
   scanning: boolean;
-  geminiStatus: { checked: boolean; geminiConfigured: boolean; model?: string; backendError?: string };
+  geminiStatus: {
+    checked: boolean;
+    geminiConfigured: boolean;
+    model?: string;
+    backendError?: string;
+    refreshing?: boolean;
+    systemStatus?: AiSystemStatusSnapshot;
+  };
+  onRefreshGeminiStatus?: () => Promise<void>;
   scanFeedback?: { message: string; isError?: boolean } | null;
   onTriggerScan: () => Promise<void>;
   onToggleEnabled: (nextEnabled: boolean) => Promise<void>;
@@ -97,6 +107,7 @@ interface OwnerPlaynixAiAssistantProps {
   ) => Promise<{
     success: boolean;
     geminiConfigured?: boolean;
+    diagnosticSummary?: string;
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }>;
@@ -146,6 +157,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   pendingQuestionsCount,
   scanning,
   geminiStatus,
+  onRefreshGeminiStatus,
   scanFeedback,
   onTriggerScan,
   onToggleEnabled,
@@ -287,6 +299,7 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
   const [testRunning, setTestRunning] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{
     error?: string;
+    diagnosticSummary?: string;
     suggestion?: AiSuggestedReplyResult;
   } | null>(null);
 
@@ -546,7 +559,10 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
     try {
       const res = await onTestAiQuestion(targetProd, testQuestionText.trim());
       if (!res.success) {
-        setTestResult({ error: res.error || 'Could not run test.' });
+        setTestResult({
+          error: res.error || 'Could not run test.',
+          diagnosticSummary: res.diagnosticSummary,
+        });
       } else {
         setTestResult({ suggestion: res.suggestion });
       }
@@ -851,6 +867,184 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
           </small>
         </div>
       </div>
+
+      {/* AI System Status Panel — Primary / Fallback / Cooldown / Quota Diagnostics */}
+      {(() => {
+        const sys = geminiStatus.systemStatus;
+        const primaryModelName = sys?.primaryModel || 'gemini-4-hydrogen';
+        const fallbackModelName = sys?.fallbackModel || 'gemini-3.1-flash-lite';
+        const models: AiModelHealthSnapshot[] = sys?.models || [];
+        const primarySnap = models.find((m) => m.role === 'primary');
+        const fallbackSnap = models.find((m) => m.role === 'fallback');
+
+        const formatCooldown = (secs?: number) => {
+          if (!secs || secs <= 0) return 'None';
+          const hrs = Math.floor(secs / 3600);
+          const mins = Math.floor((secs % 3600) / 60);
+          const remSecs = secs % 60;
+          if (hrs > 0) return `${hrs}h ${mins}m remaining`;
+          if (mins > 0) return `${mins}m ${remSecs}s remaining`;
+          return `${remSecs}s remaining`;
+        };
+
+        const renderAvailabilityChip = (snap?: AiModelHealthSnapshot) => {
+          if (!geminiStatus.checked) {
+            return <span className="playnix-ai-status-chip is-neutral">Checking...</span>;
+          }
+          if (!snap) {
+            return geminiStatus.geminiConfigured ? (
+              <span className="playnix-ai-status-chip is-neutral">Ready</span>
+            ) : (
+              <span className="playnix-ai-status-chip is-off">Not Configured</span>
+            );
+          }
+          if (snap.availability === 'available' && snap.availableNow) {
+            return <span className="playnix-ai-status-chip is-on">Available</span>;
+          }
+          if (snap.availability === 'quota_exhausted') {
+            return <span className="playnix-ai-status-chip is-warn">Daily Quota Exhausted</span>;
+          }
+          if (snap.availability === 'cooldown') {
+            return <span className="playnix-ai-status-chip is-warn">Cooldown Active</span>;
+          }
+          if (snap.availability === 'auth_error') {
+            return <span className="playnix-ai-status-chip is-off">Auth Error</span>;
+          }
+          return <span className="playnix-ai-status-chip is-off">Unavailable</span>;
+        };
+
+        const activeCooldowns = models.filter((m) => m.cooldownRemainingSeconds > 0);
+        const cooldownSummaryText =
+          activeCooldowns.length === 0
+            ? 'No active cooldowns'
+            : activeCooldowns
+                .map((m) => `${m.model}: ${formatCooldown(m.cooldownRemainingSeconds)}`)
+                .join(' · ');
+
+        const suggestionsAvailable = Boolean(
+          aiState.enabled &&
+            geminiStatus.geminiConfigured &&
+            (sys ? sys.suggestionsAvailable : !geminiStatus.backendError)
+        );
+
+        const suggestionsVerdictText = !aiState.enabled
+          ? 'Paused by Owner'
+          : !geminiStatus.checked
+          ? 'Checking...'
+          : geminiStatus.backendError
+          ? 'Backend Unreachable'
+          : !geminiStatus.geminiConfigured
+          ? 'Unavailable (API Key Missing)'
+          : suggestionsAvailable
+          ? `Available (Active: ${sys?.activeModel || primaryModelName})`
+          : 'Unavailable Right Now';
+
+        return (
+          <div className="playnix-ai-card playnix-ai-system-card" aria-label="AI System Status">
+            <div className="playnix-ai-card-head">
+              <div>
+                <span className="eyebrow" style={{ marginBottom: 0 }}>
+                  MODEL HEALTH &amp; QUOTA MONITOR
+                </span>
+                <h3>AI System Status</h3>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span
+                  className={`playnix-ai-status-chip ${
+                    !geminiStatus.checked
+                      ? 'is-neutral'
+                      : suggestionsAvailable
+                      ? 'is-on'
+                      : 'is-warn'
+                  }`}
+                >
+                  Suggestions: {suggestionsVerdictText}
+                </span>
+                {onRefreshGeminiStatus && (
+                  <button
+                    type="button"
+                    className="secondary-btn owner-q-action-btn"
+                    disabled={Boolean(geminiStatus.refreshing)}
+                    onClick={() => void onRefreshGeminiStatus()}
+                    title="Verify supported models and cooldowns without consuming generation quota"
+                  >
+                    <RefreshCw
+                      size={14}
+                      className={geminiStatus.refreshing ? 'refresh-spinning' : ''}
+                    />
+                    {geminiStatus.refreshing ? 'Verifying...' : 'Refresh Status'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="playnix-ai-system-grid">
+              <div className="playnix-ai-system-item">
+                <div className="playnix-ai-system-item-top">
+                  <span className="kpi-label">Current Primary Model</span>
+                  {renderAvailabilityChip(primarySnap)}
+                </div>
+                <strong>{primaryModelName}</strong>
+                <small>
+                  {primarySnap?.supportedOnKey === true
+                    ? 'Verified on API key · Free tier'
+                    : primarySnap?.supportedOnKey === false
+                    ? 'Not supported on current API key'
+                    : 'Free tier primary model'}
+                  {primarySnap && primarySnap.cooldownRemainingSeconds > 0
+                    ? ` · ${formatCooldown(primarySnap.cooldownRemainingSeconds)}`
+                    : ''}
+                </small>
+              </div>
+
+              <div className="playnix-ai-system-item">
+                <div className="playnix-ai-system-item-top">
+                  <span className="kpi-label">Current Fallback Model</span>
+                  {renderAvailabilityChip(fallbackSnap)}
+                </div>
+                <strong>{fallbackModelName}</strong>
+                <small>
+                  {fallbackSnap?.supportedOnKey === true
+                    ? 'Verified on API key · Auto-fallback'
+                    : fallbackSnap?.supportedOnKey === false
+                    ? 'Not supported on current API key'
+                    : 'Auto-fallback when primary is limited'}
+                  {fallbackSnap && fallbackSnap.cooldownRemainingSeconds > 0
+                    ? ` · ${formatCooldown(fallbackSnap.cooldownRemainingSeconds)}`
+                    : ''}
+                </small>
+              </div>
+
+              <div className="playnix-ai-system-item">
+                <span className="kpi-label">Cooldown Status</span>
+                <strong>{activeCooldowns.length > 0 ? 'Active Cooldown' : 'Clear'}</strong>
+                <small>{cooldownSummaryText}</small>
+              </div>
+
+              <div className="playnix-ai-system-item">
+                <span className="kpi-label">AI Suggestions Availability</span>
+                <strong>{suggestionsAvailable ? 'Available' : 'Unavailable'}</strong>
+                <small>
+                  {sys?.availabilityReason ||
+                    (suggestionsAvailable
+                      ? 'Manual Approval Only enabled for Product Questions.'
+                      : 'Check configuration or retry after cooldown.')}
+                </small>
+              </div>
+            </div>
+
+            <div className="playnix-ai-system-footer">
+              <div>
+                <strong>Last error:</strong>{' '}
+                <span>{sys?.lastError || geminiStatus.backendError || 'None'}</span>
+              </div>
+              {sys?.checkedAt && (
+                <small className="opacity-75">Last checked: {formatInIST(sys.checkedAt)}</small>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Sub-navigation Tabs */}
       <div className="offers-filter-tabs" role="tablist" aria-label="Playnix AI sections">
@@ -2351,8 +2545,11 @@ export const OwnerPlaynixAiAssistant: React.FC<OwnerPlaynixAiAssistantProps> = (
             <div className="playnix-ai-alert warning" style={{ marginTop: 14 }}>
               <AlertTriangle size={18} />
               <div>
-                <strong>Could not run Gemini test</strong>
+                <strong>Could not run AI test</strong>
                 <p>{testResult.error}</p>
+                {testResult.diagnosticSummary && (
+                  <p className="mt-1 text-xs opacity-80">{testResult.diagnosticSummary}</p>
+                )}
               </div>
             </div>
           )}

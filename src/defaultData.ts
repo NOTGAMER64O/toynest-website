@@ -1192,6 +1192,43 @@ export interface AiSuggestedReplyResult {
   generatedAt: string;
 }
 
+export type AiModelAvailabilityState =
+  | 'available'
+  | 'cooldown'
+  | 'quota_exhausted'
+  | 'auth_error'
+  | 'unavailable';
+
+export interface AiModelHealthSnapshot {
+  model: string;
+  role: 'primary' | 'fallback';
+  tier: 'free';
+  supportedOnKey: boolean | null;
+  availability: AiModelAvailabilityState;
+  availableNow: boolean;
+  cooldownUntil?: string | null;
+  cooldownRemainingSeconds: number;
+  lastError?: string | null;
+  lastHttpStatus?: number | null;
+  lastErrorCategory?: 'network' | 'quota' | 'auth' | 'server_temporary' | null;
+  lastSuccessAt?: string | null;
+  lastCheckedAt?: string | null;
+}
+
+export interface AiSystemStatusSnapshot {
+  geminiConfigured: boolean;
+  primaryModel: string;
+  fallbackModel: string;
+  activeModel: string | null;
+  suggestionsAvailable: boolean;
+  allModelsUnavailable: boolean;
+  availabilityReason: string;
+  lastError?: string | null;
+  modelsVerifiedAt?: string | null;
+  checkedAt: string;
+  models: AiModelHealthSnapshot[];
+}
+
 export type AiGuidanceQuestionStatus = 'open' | 'answered' | 'dismissed';
 export type AiGuidanceQuestionSource = 'scan' | 'customer_question' | 'ai_audit';
 

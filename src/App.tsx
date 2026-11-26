@@ -342,6 +342,7 @@ import {
   type WatchdogAlert,
   type WatchdogAlertStatus,
   type WatchdogActivityLog,
+  type AiSystemStatusSnapshot,
   getStoredWatchdogAlerts,
   saveStoredWatchdogAlerts,
   getStoredWatchdogLogs,
@@ -1119,6 +1120,8 @@ export default function App() {
     geminiConfigured: boolean;
     model?: string;
     backendError?: string;
+    refreshing?: boolean;
+    systemStatus?: AiSystemStatusSnapshot;
   }>({ checked: false, geminiConfigured: false });
   const aiInitialScanTriggeredRef = useRef<boolean>(false);
   const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>(() =>
@@ -1766,20 +1769,24 @@ export default function App() {
   };
 
   // ----------------- PLAYNIX AI ASSISTANT HANDLERS (OWNER ONLY) -----------------
-  const checkAiServerStatus = async () => {
+  const checkAiServerStatus = async (verifyModels = false) => {
     if (ownerPin.trim().toUpperCase() !== DEFAULT_OWNER_PIN) return;
+    setAiGeminiStatus((prev) => ({ ...prev, refreshing: true }));
     try {
-      const res = await ownerPost('/api/owner/ai/status', {});
+      const res = await ownerPost('/api/owner/ai/status', { verifyModels });
       setAiGeminiStatus({
         checked: true,
         geminiConfigured: Boolean(res.data?.geminiConfigured),
         model: res.data?.model,
         backendError: undefined,
+        refreshing: false,
+        systemStatus: res.data?.systemStatus,
       });
     } catch (err: any) {
       setAiGeminiStatus((prev) => ({
         ...prev,
         checked: true,
+        refreshing: false,
         backendError:
           err?.message || 'Could not reach Playnix AI server backend (/api/owner/ai/status).',
       }));
@@ -1906,6 +1913,15 @@ export default function App() {
       });
 
       const data = res.data || {};
+      if (data.systemStatus) {
+        setAiGeminiStatus((prev) => ({
+          ...prev,
+          checked: true,
+          geminiConfigured: Boolean(data.geminiConfigured),
+          model: data.systemStatus.activeModel || data.systemStatus.primaryModel,
+          systemStatus: data.systemStatus,
+        }));
+      }
       const websiteEntries: AiKnowledgeEntry[] = Array.isArray(data.websiteEntries)
         ? data.websiteEntries
         : [];
@@ -2490,6 +2506,7 @@ export default function App() {
     geminiConfigured?: boolean;
     errorCategory?: 'network' | 'quota' | 'auth' | 'server_temporary';
     retryable?: boolean;
+    diagnosticSummary?: string;
     error?: string;
     suggestion?: AiSuggestedReplyResult;
   }> => {
@@ -2567,11 +2584,16 @@ export default function App() {
         { timeoutMs: 24000 }
       );
 
-      if (typeof res.data?.geminiConfigured === 'boolean') {
+      if (typeof res.data?.geminiConfigured === 'boolean' || res.data?.systemStatus) {
         setAiGeminiStatus((prev) => ({
           ...prev,
           checked: true,
-          geminiConfigured: Boolean(res.data.geminiConfigured),
+          geminiConfigured:
+            typeof res.data?.geminiConfigured === 'boolean'
+              ? Boolean(res.data.geminiConfigured)
+              : prev.geminiConfigured,
+          model: res.data?.systemStatus?.activeModel || res.data?.systemStatus?.primaryModel || prev.model,
+          systemStatus: res.data?.systemStatus || prev.systemStatus,
         }));
       }
 
@@ -4419,7 +4441,7 @@ export default function App() {
     childPublished,
   ]);
 
-  // Run full Gemini + Rules Watchdog audit when Watchdog dashboard opens (max once per 90s automatically)
+  // Run deterministic Watchdog audit when Watchdog dashboard opens without burning free-tier Gemini quota automatically
   useEffect(() => {
     if (
       page === 'owner' &&
@@ -4428,7 +4450,7 @@ export default function App() {
       !watchdogScanning &&
       Date.now() - watchdogLastGeminiScanRef.current > 90_000
     ) {
-      void runWatchdogScan(true);
+      void runWatchdogScan(false);
     }
   }, [page, ownerPin, ownerTab]);
 
@@ -10925,6 +10947,7 @@ export default function App() {
                 products={products}
                 loading={questionsLoading}
                 aiEnabled={aiState.enabled}
+                aiSystemStatus={aiGeminiStatus.systemStatus}
                 onRefresh={loadOwnerProductQuestions}
                 onSaveAnswer={handleSaveQuestionAnswer}
                 onMarkStatus={handleMarkQuestionStatus}
@@ -10953,6 +10976,7 @@ export default function App() {
                 pendingQuestionsCount={pendingQuestionsCount}
                 scanning={aiScanning}
                 geminiStatus={aiGeminiStatus}
+                onRefreshGeminiStatus={() => checkAiServerStatus(true)}
                 scanFeedback={aiScanFeedback}
                 onTriggerScan={triggerWebsiteAiScan}
                 onToggleEnabled={handleToggleAiEnabled}

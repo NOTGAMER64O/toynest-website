@@ -1793,9 +1793,76 @@ app.post('/api/owner/colours/delete', (req, res) => {
 // PLAYNIX AI ASSISTANT — SERVER-SIDE GEMINI ROUTES (PIN-PROTECTED OWNER ONLY)
 // ============================================================================
 
-const PLAYNIX_GEMINI_MODEL = 'gemini-4-hydrogen';
-const PLAYNIX_GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-let hydrogenOverloadCooldownUntil = 0;
+export const PLAYNIX_GEMINI_MODEL = 'gemini-4-hydrogen';
+export const PLAYNIX_GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+
+export type PlaynixModelRole = 'primary' | 'fallback';
+export type PlaynixModelAvailability =
+  | 'available'
+  | 'cooldown'
+  | 'quota_exhausted'
+  | 'auth_error'
+  | 'unavailable';
+
+export interface PlaynixModelConfig {
+  model: string;
+  role: PlaynixModelRole;
+  tier: 'free';
+}
+
+export const PLAYNIX_MODEL_REGISTRY: PlaynixModelConfig[] = [
+  { model: PLAYNIX_GEMINI_MODEL, role: 'primary', tier: 'free' },
+  { model: PLAYNIX_GEMINI_FALLBACK_MODEL, role: 'fallback', tier: 'free' },
+];
+
+export interface PlaynixModelHealthRecord {
+  model: string;
+  role: PlaynixModelRole;
+  tier: 'free';
+  supportedOnKey: boolean | null;
+  availability: PlaynixModelAvailability;
+  cooldownUntilMs: number;
+  cooldownReason: string;
+  lastError: string | null;
+  lastHttpStatus: number | null;
+  lastErrorCategory: GeminiErrorCategory | null;
+  lastSuccessAtMs: number | null;
+  lastCheckedAtMs: number | null;
+}
+
+const MODEL_VERIFICATION_TTL_MS = 10 * 60_000;
+let lastModelsVerifiedAtMs: number | null = null;
+let lastSystemErrorSummary: string | null = null;
+
+function createInitialModelRecord(cfg: PlaynixModelConfig): PlaynixModelHealthRecord {
+  return {
+    model: cfg.model,
+    role: cfg.role,
+    tier: cfg.tier,
+    supportedOnKey: null,
+    availability: 'available',
+    cooldownUntilMs: 0,
+    cooldownReason: '',
+    lastError: null,
+    lastHttpStatus: null,
+    lastErrorCategory: null,
+    lastSuccessAtMs: null,
+    lastCheckedAtMs: null,
+  };
+}
+
+const modelHealthRegistry = new Map<string, PlaynixModelHealthRecord>(
+  PLAYNIX_MODEL_REGISTRY.map((cfg) => [cfg.model, createInitialModelRecord(cfg)])
+);
+
+export function resetPlaynixModelHealthForTest(): void {
+  lastModelsVerifiedAtMs = null;
+  lastSystemErrorSummary = null;
+  modelHealthRegistry.clear();
+  for (const cfg of PLAYNIX_MODEL_REGISTRY) {
+    modelHealthRegistry.set(cfg.model, createInitialModelRecord(cfg));
+  }
+}
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1803,14 +1870,100 @@ function sleepMs(ms: number): Promise<void> {
 
 export type GeminiErrorCategory = 'network' | 'quota' | 'auth' | 'server_temporary';
 
+export function redactSensitiveText(input: string): string {
+  return String(input || '')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_KEY]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+    .replace(/key=[A-Za-z0-9_-]+/gi, 'key=[REDACTED]')
+    .trim();
+}
+
+function readHeaderCaseInsensitive(headers: any, headerName: string): string | null {
+  if (!headers) return null;
+  const target = headerName.toLowerCase();
+  if (typeof headers.get === 'function') {
+    const val = headers.get(headerName) ?? headers.get(target);
+    return val !== undefined && val !== null ? String(val) : null;
+  }
+  if (typeof headers === 'object') {
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() === target && v !== undefined && v !== null) {
+        return Array.isArray(v) ? String(v[0] ?? '') : String(v);
+      }
+    }
+  }
+  return null;
+}
+
+export function parseProviderRetryDelayMs(
+  err: any,
+  nowMs = Date.now()
+): { delayMs: number | null; source: 'retry-after-header' | 'body-retry-delay' | null } {
+  // 1. Inspect HTTP Retry-After header (seconds or HTTP-date)
+  const retryAfterRaw =
+    readHeaderCaseInsensitive(err?.response?.headers, 'retry-after') ||
+    readHeaderCaseInsensitive(err?.headers, 'retry-after');
+
+  if (retryAfterRaw && retryAfterRaw.trim()) {
+    const trimmed = retryAfterRaw.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const secs = Number(trimmed);
+      if (Number.isFinite(secs) && secs >= 0) {
+        return {
+          delayMs: Math.max(1000, Math.round(secs * 1000)),
+          source: 'retry-after-header',
+        };
+      }
+    } else {
+      const parsedDateMs = Date.parse(trimmed);
+      if (Number.isFinite(parsedDateMs) && parsedDateMs > nowMs) {
+        return {
+          delayMs: Math.max(1000, parsedDateMs - nowMs),
+          source: 'retry-after-header',
+        };
+      }
+    }
+  }
+
+  // 2. Inspect provider error message / JSON retryDelay guidance
+  const rawMessage = redactSensitiveText(
+    `${String(err?.message || '')} ${typeof err?.body === 'string' ? err.body : ''}`
+  );
+  const hmsMatch = rawMessage.match(
+    /please retry in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(\d+(?:\.\d+)?)s/i
+  );
+  if (hmsMatch) {
+    const hours = Number(hmsMatch[1] || 0);
+    const mins = Number(hmsMatch[2] || 0);
+    const secs = Number(hmsMatch[3] || 0);
+    const totalMs = Math.round((hours * 3600 + mins * 60 + secs) * 1000);
+    if (Number.isFinite(totalMs) && totalMs > 0) {
+      return { delayMs: totalMs, source: 'body-retry-delay' };
+    }
+  }
+
+  const retryDelayJsonMatch = rawMessage.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i);
+  if (retryDelayJsonMatch) {
+    const secs = Number(retryDelayJsonMatch[1]);
+    if (Number.isFinite(secs) && secs > 0) {
+      return { delayMs: Math.round(secs * 1000), source: 'body-retry-delay' };
+    }
+  }
+
+  return { delayMs: null, source: null };
+}
+
 export function extractCleanGeminiError(err: any): {
   statusCode: number;
   errorCategory: GeminiErrorCategory;
   message: string;
   isTransient: boolean;
   isTimeout: boolean;
+  isDailyQuota: boolean;
+  upstreamReason: string;
+  diagnosticDetail: string;
 } {
-  const rawMessage = String(err?.message || err || '').trim();
+  const rawMessage = redactSensitiveText(String(err?.message || err || ''));
   let parsedCode: number | undefined = typeof err?.status === 'number' ? err.status : undefined;
   let parsedStatus = String(err?.statusText || '').toUpperCase();
   let parsedMessage = rawMessage;
@@ -1823,7 +1976,7 @@ export function extractCleanGeminiError(err: any): {
       if (typeof inner?.code === 'number') parsedCode = inner.code;
       if (inner?.status) parsedStatus = String(inner.status).toUpperCase();
       if (typeof inner?.message === 'string' && inner.message.trim()) {
-        parsedMessage = inner.message.trim();
+        parsedMessage = redactSensitiveText(inner.message);
       }
     } catch {
       // Keep original text if not valid JSON
@@ -1831,6 +1984,19 @@ export function extractCleanGeminiError(err: any): {
   }
 
   const lower = `${parsedMessage} ${parsedStatus}`.toLowerCase();
+  const safeReason =
+    parsedStatus ||
+    (err?.code ? String(err.code).toUpperCase() : '') ||
+    (err?.name ? String(err.name) : '') ||
+    'UNKNOWN';
+  const safeDetail = parsedMessage.slice(0, 600);
+
+  const isConfigOrModelError =
+    parsedCode === 400 ||
+    parsedCode === 404 ||
+    parsedStatus === 'INVALID_ARGUMENT' ||
+    parsedStatus === 'NOT_FOUND' ||
+    /invalid_argument|not_found|model.*not found|unsupported/.test(lower);
   const isNetwork =
     err?.code === 'ECONNRESET' ||
     err?.code === 'ENOTFOUND' ||
@@ -1851,6 +2017,9 @@ export function extractCleanGeminiError(err: any): {
     parsedCode === 429 ||
     parsedStatus === 'RESOURCE_EXHAUSTED' ||
     /resource_exhausted|quota|rate limit|rate_limit|billing/.test(lower);
+  const isDailyQuota =
+    isQuota &&
+    /per\s*day|perday|free_tier_requests|limit:\s*20|limit:\s*0|daily/i.test(safeDetail);
   const isTimeout =
     err?.name === 'AbortError' ||
     err?.name === 'TimeoutError' ||
@@ -1863,7 +2032,7 @@ export function extractCleanGeminiError(err: any): {
     parsedCode === 503 ||
     parsedStatus === 'UNAVAILABLE' ||
     parsedStatus === 'INTERNAL' ||
-    /high demand|overloaded|unavailable|spikes in demand|service unavailable|internal error|try again later/.test(
+    /high demand|overloaded|unavailable|spikes in demand|service unavailable|internal error|try again later|unexpected response structure/.test(
       lower
     );
 
@@ -1874,15 +2043,21 @@ export function extractCleanGeminiError(err: any): {
       message: 'Network issue: Check your internet connection.',
       isTransient: true,
       isTimeout: false,
+      isDailyQuota: false,
+      upstreamReason: safeReason,
+      diagnosticDetail: safeDetail,
     };
   }
-  if (isAuth) {
+  if (isAuth || isConfigOrModelError) {
     return {
-      statusCode: parsedCode === 403 ? 403 : 401,
+      statusCode: parsedCode && parsedCode >= 400 && parsedCode < 500 ? parsedCode : 401,
       errorCategory: 'auth',
       message: 'API authentication error: AI configuration needs attention.',
       isTransient: false,
       isTimeout: false,
+      isDailyQuota: false,
+      upstreamReason: safeReason,
+      diagnosticDetail: safeDetail,
     };
   }
   if (isQuota) {
@@ -1892,6 +2067,9 @@ export function extractCleanGeminiError(err: any): {
       message: 'API quota exceeded: AI usage limit reached. Try again later.',
       isTransient: false,
       isTimeout: false,
+      isDailyQuota,
+      upstreamReason: safeReason,
+      diagnosticDetail: safeDetail,
     };
   }
   if (isTimeout || isServerTemp) {
@@ -1901,6 +2079,9 @@ export function extractCleanGeminiError(err: any): {
       message: 'AI is temporarily unavailable. Retry shortly.',
       isTransient: true,
       isTimeout,
+      isDailyQuota: false,
+      upstreamReason: isTimeout ? 'TIMEOUT' : safeReason,
+      diagnosticDetail: safeDetail,
     };
   }
 
@@ -1910,6 +2091,354 @@ export function extractCleanGeminiError(err: any): {
     message: 'AI is temporarily unavailable. Retry shortly.',
     isTransient: false,
     isTimeout: false,
+    isDailyQuota: false,
+    upstreamReason: safeReason,
+    diagnosticDetail: safeDetail,
+  };
+}
+
+export function refreshModelHealthState(nowMs = Date.now()): void {
+  for (const record of modelHealthRegistry.values()) {
+    if (
+      (record.availability === 'cooldown' ||
+        record.availability === 'quota_exhausted' ||
+        record.availability === 'auth_error') &&
+      record.cooldownUntilMs > 0 &&
+      nowMs >= record.cooldownUntilMs
+    ) {
+      record.availability = record.supportedOnKey === false ? 'unavailable' : 'available';
+      record.cooldownUntilMs = 0;
+      record.cooldownReason = '';
+      console.info(`[PlaynixAI] stage=cooldown_reset model=${record.model} availability=${record.availability}`);
+    }
+  }
+}
+
+export function recordModelSuccess(modelName: string, nowMs = Date.now()): void {
+  const record = modelHealthRegistry.get(modelName);
+  if (!record) return;
+  record.availability = 'available';
+  if (record.supportedOnKey === null) record.supportedOnKey = true;
+  record.cooldownUntilMs = 0;
+  record.cooldownReason = '';
+  record.lastError = null;
+  record.lastHttpStatus = 200;
+  record.lastErrorCategory = null;
+  record.lastSuccessAtMs = nowMs;
+  record.lastCheckedAtMs = nowMs;
+  lastSystemErrorSummary = null;
+}
+
+export function recordModelFailure(modelName: string, err: any, nowMs = Date.now()): void {
+  const record = modelHealthRegistry.get(modelName);
+  const clean = extractCleanGeminiError(err);
+  const retryInfo = parseProviderRetryDelayMs(err, nowMs);
+  const conciseError = `${modelName}: ${clean.statusCode} ${clean.upstreamReason}${
+    clean.diagnosticDetail ? ` — ${clean.diagnosticDetail.slice(0, 180)}` : ''
+  }`;
+  lastSystemErrorSummary = conciseError;
+
+  if (!record) return;
+
+  record.lastHttpStatus = clean.statusCode;
+  record.lastErrorCategory = clean.errorCategory;
+  record.lastError = `${clean.statusCode} ${clean.upstreamReason}: ${clean.diagnosticDetail.slice(0, 220)}`;
+  record.lastCheckedAtMs = nowMs;
+
+  if (clean.errorCategory === 'auth') {
+    const isUnsupported =
+      clean.statusCode === 404 ||
+      /not_found|model.*not found|unsupported/i.test(clean.diagnosticDetail);
+    if (isUnsupported) {
+      record.supportedOnKey = false;
+      record.availability = 'unavailable';
+      record.cooldownUntilMs = nowMs + 30 * 60_000;
+      record.cooldownReason = 'Model unsupported or unavailable for active API key.';
+    } else {
+      record.availability = 'auth_error';
+      record.cooldownUntilMs = nowMs + 5 * 60_000;
+      record.cooldownReason = 'API authentication or configuration error.';
+    }
+    return;
+  }
+
+  if (clean.errorCategory === 'quota') {
+    const retryMs = retryInfo.delayMs;
+    const isDaily = clean.isDailyQuota || (retryMs !== null && retryMs >= 15 * 60_000);
+    if (isDaily) {
+      // Cap at 24h; if provider supplied exact retry window (e.g. 15h15m), respect it strictly
+      const cooldownMs = Math.min(24 * 3600_000, Math.max(60_000, retryMs ?? 30 * 60_000));
+      record.availability = 'quota_exhausted';
+      record.cooldownUntilMs = nowMs + cooldownMs;
+      record.cooldownReason = `Free-tier daily quota exhausted (Retry-After honored).`;
+    } else {
+      const cooldownMs = Math.min(10 * 60_000, Math.max(15_000, retryMs ?? 65_000));
+      record.availability = 'cooldown';
+      record.cooldownUntilMs = nowMs + cooldownMs;
+      record.cooldownReason = retryInfo.source
+        ? `Rate limited (429), honoring provider retry window.`
+        : `Rate limited (429), cooling down before retry.`;
+    }
+    return;
+  }
+
+  // Transient server error (500/502/503/504) or network hiccup
+  const transientCooldownMs = Math.min(
+    10 * 60_000,
+    Math.max(15_000, retryInfo.delayMs ?? 60_000)
+  );
+  record.availability = 'cooldown';
+  record.cooldownUntilMs = nowMs + transientCooldownMs;
+  record.cooldownReason = clean.isTimeout
+    ? 'Request timed out; temporary cooldown active.'
+    : 'Upstream server overloaded (503/5xx); temporary cooldown active.';
+}
+
+export async function verifyConfiguredGeminiModels(
+  ai: GoogleGenAI | null,
+  forceRefresh = false,
+  nowMs = Date.now()
+): Promise<boolean> {
+  if (!ai || typeof ai.models?.list !== 'function') {
+    return false;
+  }
+  if (
+    !forceRefresh &&
+    lastModelsVerifiedAtMs !== null &&
+    nowMs - lastModelsVerifiedAtMs < MODEL_VERIFICATION_TTL_MS
+  ) {
+    return true;
+  }
+
+  try {
+    const pager = await ai.models.list({ config: { pageSize: 100 } });
+    const discoveredModels = new Map<string, string[] | undefined>();
+    const recordModelItem = (m: any) => {
+      const rawName = String(m?.name || '').trim();
+      if (!rawName) return;
+      const shortName = rawName.replace(/^models\//i, '');
+      const actions = Array.isArray(m?.supportedActions) ? m.supportedActions : undefined;
+      discoveredModels.set(shortName, actions);
+    };
+
+    if (pager && typeof (pager as any)[Symbol.asyncIterator] === 'function') {
+      for await (const item of pager as any) {
+        recordModelItem(item);
+        if (discoveredModels.size >= 300) break;
+      }
+    } else if (Array.isArray((pager as any)?.page)) {
+      for (const item of (pager as any).page) {
+        recordModelItem(item);
+      }
+    }
+
+    if (discoveredModels.size > 0) {
+      for (const record of modelHealthRegistry.values()) {
+        const actions = discoveredModels.get(record.model);
+        const supportsGenerate =
+          discoveredModels.has(record.model) &&
+          (!actions || actions.includes('generateContent'));
+        record.supportedOnKey = supportsGenerate;
+        record.lastCheckedAtMs = nowMs;
+        if (!supportsGenerate) {
+          record.availability = 'unavailable';
+          record.cooldownReason = 'Model not listed as available for this API key.';
+          record.lastError =
+            record.lastError || `${record.model}: Not supported or unavailable on active API key.`;
+        } else if (record.availability === 'unavailable' || record.availability === 'auth_error') {
+          record.availability = 'available';
+          record.cooldownUntilMs = 0;
+          record.cooldownReason = '';
+        }
+      }
+    }
+    lastModelsVerifiedAtMs = nowMs;
+    console.info(
+      `[PlaynixAI] stage=models_verified discoveredCount=${discoveredModels.size} primarySupported=${modelHealthRegistry.get(PLAYNIX_GEMINI_MODEL)?.supportedOnKey} fallbackSupported=${modelHealthRegistry.get(PLAYNIX_GEMINI_FALLBACK_MODEL)?.supportedOnKey}`
+    );
+    return true;
+  } catch (err: any) {
+    const clean = extractCleanGeminiError(err);
+    console.info(
+      `[PlaynixAI] stage=models_verify_failed category=${clean.errorCategory} httpStatus=${clean.statusCode} reason=${clean.upstreamReason}`
+    );
+    if (clean.errorCategory === 'auth') {
+      lastSystemErrorSummary = `API key error (${clean.statusCode} ${clean.upstreamReason}): ${clean.diagnosticDetail.slice(0, 160)}`;
+      for (const record of modelHealthRegistry.values()) {
+        record.supportedOnKey = false;
+        record.availability = 'auth_error';
+        record.lastHttpStatus = clean.statusCode;
+        record.lastErrorCategory = 'auth';
+        record.lastError = lastSystemErrorSummary;
+        record.lastCheckedAtMs = nowMs;
+      }
+    }
+    return false;
+  }
+}
+
+export function getAvailableModelsInPriorityOrder(nowMs = Date.now()): PlaynixModelConfig[] {
+  refreshModelHealthState(nowMs);
+  return PLAYNIX_MODEL_REGISTRY.filter((cfg) => {
+    const rec = modelHealthRegistry.get(cfg.model);
+    if (!rec) return false;
+    return rec.availability === 'available' && rec.supportedOnKey !== false;
+  });
+}
+
+export function getAiSystemStatusPayload(nowMs = Date.now()) {
+  refreshModelHealthState(nowMs);
+  const geminiConfigured = getGeminiClient() !== null;
+  const models = PLAYNIX_MODEL_REGISTRY.map((cfg) => {
+    const rec = modelHealthRegistry.get(cfg.model) || createInitialModelRecord(cfg);
+    const remainingSec =
+      rec.cooldownUntilMs > nowMs ? Math.ceil((rec.cooldownUntilMs - nowMs) / 1000) : 0;
+    const availableNow =
+      geminiConfigured && rec.availability === 'available' && rec.supportedOnKey !== false;
+    return {
+      model: rec.model,
+      role: rec.role,
+      tier: rec.tier,
+      supportedOnKey: rec.supportedOnKey,
+      availability: geminiConfigured ? rec.availability : ('auth_error' as PlaynixModelAvailability),
+      availableNow,
+      cooldownUntil: rec.cooldownUntilMs > nowMs ? new Date(rec.cooldownUntilMs).toISOString() : null,
+      cooldownRemainingSeconds: remainingSec,
+      lastError: rec.lastError,
+      lastHttpStatus: rec.lastHttpStatus,
+      lastErrorCategory: rec.lastErrorCategory,
+      lastSuccessAt: rec.lastSuccessAtMs ? new Date(rec.lastSuccessAtMs).toISOString() : null,
+      lastCheckedAt: rec.lastCheckedAtMs ? new Date(rec.lastCheckedAtMs).toISOString() : null,
+    };
+  });
+
+  const activeAvailable = models.find((m) => m.availableNow) || null;
+  const suggestionsAvailable = geminiConfigured && activeAvailable !== null;
+  const allModelsUnavailable = !geminiConfigured || activeAvailable === null;
+
+  let availabilityReason = 'AI suggestions are ready.';
+  if (!geminiConfigured) {
+    availabilityReason = 'GEMINI_API_KEY is not configured on the server.';
+  } else if (activeAvailable) {
+    availabilityReason =
+      activeAvailable.role === 'fallback'
+        ? `Using verified fallback (${activeAvailable.model}) while primary is cooling down.`
+        : `Primary model (${activeAvailable.model}) is available.`;
+  } else {
+    const primarySnap = models.find((m) => m.role === 'primary');
+    const fallbackSnap = models.find((m) => m.role === 'fallback');
+    if (primarySnap?.availability === 'auth_error' || fallbackSnap?.availability === 'auth_error') {
+      availabilityReason = 'API authentication error: AI configuration needs attention.';
+    } else if (primarySnap?.availability === 'quota_exhausted') {
+      availabilityReason =
+        fallbackSnap && fallbackSnap.cooldownRemainingSeconds > 0
+          ? `Primary daily quota exhausted and fallback temporarily unavailable (${fallbackSnap.cooldownRemainingSeconds}s cooldown).`
+          : 'API quota exceeded: AI usage limit reached. Try again later.';
+    } else {
+      availabilityReason = 'All configured models are temporarily cooling down. Retry shortly.';
+    }
+  }
+
+  return {
+    geminiConfigured,
+    primaryModel: PLAYNIX_GEMINI_MODEL,
+    fallbackModel: PLAYNIX_GEMINI_FALLBACK_MODEL,
+    activeModel: activeAvailable?.model || null,
+    suggestionsAvailable,
+    allModelsUnavailable,
+    availabilityReason,
+    lastError: lastSystemErrorSummary || models.find((m) => m.lastError)?.lastError || null,
+    modelsVerifiedAt: lastModelsVerifiedAtMs ? new Date(lastModelsVerifiedAtMs).toISOString() : null,
+    checkedAt: new Date(nowMs).toISOString(),
+    models,
+  };
+}
+
+export function buildAiDiagnosticSummary(
+  attempts: Array<{ model: string; status: number; category: string; reason?: string }>,
+  primaryQuotaActive = false
+): string {
+  const parts: string[] = [];
+  const primaryRec = modelHealthRegistry.get(PLAYNIX_GEMINI_MODEL);
+  if (
+    (primaryQuotaActive || primaryRec?.availability === 'quota_exhausted') &&
+    !attempts.some((a) => a.model === PLAYNIX_GEMINI_MODEL)
+  ) {
+    parts.push(`${PLAYNIX_GEMINI_MODEL}: 429 Quota Exhausted (Skipped)`);
+  }
+  const seenModelStatus = new Set<string>();
+  for (const a of attempts) {
+    const key = `${a.model}:${a.status}`;
+    if (seenModelStatus.has(key)) continue;
+    seenModelStatus.add(key);
+    const label =
+      a.category === 'quota'
+        ? `${a.status} Quota Exceeded`
+        : a.category === 'auth'
+        ? `${a.status} Auth/Config Error`
+        : a.category === 'network'
+        ? 'Network Error'
+        : `${a.status} ${a.reason || 'Unavailable'}`;
+    parts.push(`${a.model}: ${label}`);
+  }
+  return parts.join(' · ');
+}
+
+export function resolveFinalAiFailure(err: any): {
+  errorCategory: GeminiErrorCategory;
+  statusCode: number;
+  upstreamReason: string;
+  message: string;
+  retryable: boolean;
+  attempts: Array<{ model: string; status: number; category: string; durationMs: number; reason?: string; detail?: string }>;
+  diagnosticSummary: string;
+} {
+  const clean = extractCleanGeminiError(err);
+  const attempts: Array<{ model: string; status: number; category: string; durationMs: number; reason?: string; detail?: string }> =
+    Array.isArray(err?.__playnixAttempts) ? err.__playnixAttempts : [];
+  const primaryRec = modelHealthRegistry.get(PLAYNIX_GEMINI_MODEL);
+  const primaryQuotaActive =
+    primaryRec?.availability === 'quota_exhausted' && Date.now() < primaryRec.cooldownUntilMs;
+  const hadQuotaAttempt = attempts.some((a) => a.category === 'quota') || primaryQuotaActive;
+  const diagnosticSummary =
+    buildAiDiagnosticSummary(attempts, primaryQuotaActive) ||
+    err?.__playnixDiagnosticSummary ||
+    '';
+
+  if (clean.errorCategory === 'auth' || clean.errorCategory === 'network') {
+    return {
+      errorCategory: clean.errorCategory,
+      statusCode: clean.statusCode,
+      upstreamReason: clean.upstreamReason,
+      message: clean.message,
+      retryable: clean.errorCategory === 'network',
+      attempts,
+      diagnosticSummary,
+    };
+  }
+
+  // If primary free-tier quota is exhausted and fallback is unavailable (503/cooldown) or also 429,
+  // report quota cleanly instead of masking a quota limit behind "Temporary Server Issue".
+  if (clean.errorCategory === 'quota' || hadQuotaAttempt) {
+    return {
+      errorCategory: 'quota',
+      statusCode: clean.errorCategory === 'quota' ? 429 : clean.statusCode,
+      upstreamReason: clean.errorCategory === 'quota' ? clean.upstreamReason : `PRIMARY_429_FALLBACK_${clean.statusCode}`,
+      message: 'API quota exceeded: AI usage limit reached. Try again later.',
+      retryable: clean.errorCategory !== 'quota',
+      attempts,
+      diagnosticSummary,
+    };
+  }
+
+  return {
+    errorCategory: clean.errorCategory,
+    statusCode: clean.statusCode,
+    upstreamReason: clean.upstreamReason,
+    message: clean.message,
+    retryable: true,
+    attempts,
+    diagnosticSummary,
   };
 }
 
@@ -1920,72 +2449,213 @@ export async function runGeminiWithRetryAndFallback(
   options?: {
     sleepFn?: (ms: number) => Promise<void>;
     maxTotalMs?: number;
+    requestId?: string;
+    routeName?: string;
   }
-): Promise<{ response: any; modelUsed: string }> {
-  const boundedAttempts = Math.min(4, Math.max(1, maxAttempts));
+): Promise<{
+  response: any;
+  modelUsed: string;
+  attempts: Array<{ model: string; status: number; category: string; durationMs: number; reason?: string; detail?: string }>;
+}> {
+  const boundedAttempts = Math.min(3, Math.max(1, maxAttempts));
   const sleep = options?.sleepFn || sleepMs;
   const maxTotalMs = options?.maxTotalMs ?? 21000;
+  const requestId = options?.requestId || `ai_${Date.now().toString(36)}`;
+  const routeName = options?.routeName || 'gemini';
   const startedAt = Date.now();
-  const startWithFallback = Date.now() < hydrogenOverloadCooldownUntil;
-  const candidateSequence = startWithFallback
-    ? [
-        PLAYNIX_GEMINI_FALLBACK_MODEL,
-        PLAYNIX_GEMINI_MODEL,
-        PLAYNIX_GEMINI_FALLBACK_MODEL,
-        PLAYNIX_GEMINI_FALLBACK_MODEL,
-      ]
-    : [
-        PLAYNIX_GEMINI_MODEL,
-        PLAYNIX_GEMINI_FALLBACK_MODEL,
-        PLAYNIX_GEMINI_FALLBACK_MODEL,
-        PLAYNIX_GEMINI_MODEL,
-      ];
 
-  const modelsToTry = candidateSequence.slice(0, boundedAttempts);
+  refreshModelHealthState(startedAt);
+  await verifyConfiguredGeminiModels(ai, false, startedAt);
+
+  const availableConfigs = getAvailableModelsInPriorityOrder(startedAt);
+  const attempts: Array<{ model: string; status: number; category: string; durationMs: number; reason?: string; detail?: string }> = [];
+
+  // Short-circuit cleanly when ALL approved models are in cooldown / quota exhausted / unavailable
+  if (availableConfigs.length === 0) {
+    const statusSnap = getAiSystemStatusPayload(startedAt);
+    const primarySnap = statusSnap.models.find((m) => m.role === 'primary');
+    const fallbackSnap = statusSnap.models.find((m) => m.role === 'fallback');
+    for (const snap of statusSnap.models) {
+      attempts.push({
+        model: snap.model,
+        status:
+          snap.lastHttpStatus ||
+          (snap.availability === 'quota_exhausted'
+            ? 429
+            : snap.availability === 'auth_error'
+            ? 401
+            : 503),
+        category:
+          snap.availability === 'quota_exhausted'
+            ? 'quota'
+            : snap.availability === 'auth_error' || snap.availability === 'unavailable'
+            ? 'auth'
+            : 'server_temporary',
+        durationMs: 0,
+        reason:
+          snap.cooldownRemainingSeconds > 0
+            ? `Cooldown (${snap.cooldownRemainingSeconds}s left)`
+            : snap.availability.toUpperCase(),
+      });
+    }
+    const blockingCode =
+      primarySnap?.availability === 'auth_error' || fallbackSnap?.availability === 'auth_error'
+        ? 401
+        : primarySnap?.availability === 'quota_exhausted' ||
+          fallbackSnap?.availability === 'quota_exhausted'
+        ? 429
+        : 503;
+    const blockingErr: any = new Error(statusSnap.availabilityReason);
+    blockingErr.status = blockingCode;
+    blockingErr.statusText =
+      blockingCode === 429
+        ? 'RESOURCE_EXHAUSTED'
+        : blockingCode === 401
+        ? 'UNAUTHENTICATED'
+        : 'UNAVAILABLE';
+    blockingErr.__playnixAllModelsUnavailable = true;
+    blockingErr.__playnixAttempts = attempts;
+    blockingErr.__playnixDiagnosticSummary = buildAiDiagnosticSummary(
+      attempts,
+      primarySnap?.availability === 'quota_exhausted'
+    );
+    console.info(
+      `[PlaynixAI] stage=short_circuit requestId=${requestId} route=${routeName} status=${blockingCode} reason="${statusSnap.availabilityReason}"`
+    );
+    throw blockingErr;
+  }
+
+  // Queue each currently available model at most once upfront; only allow 1 transient retry on fallback if needed
+  const executionQueue: string[] = availableConfigs.map((c) => c.model);
+  if (executionQueue.length === 1 && boundedAttempts > 1) {
+    executionQueue.push(executionQueue[0]);
+  } else if (executionQueue.length >= 2 && boundedAttempts >= 3) {
+    executionQueue.push(executionQueue[1]);
+  }
+  const modelsToTry = executionQueue.slice(0, boundedAttempts);
+
   let lastError: any = null;
-  let triedFallbackAfterQuota = false;
+  let lastCategory: GeminiErrorCategory | null = null;
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const modelName = modelsToTry[i];
+    // Re-check health before invoking (never call a model whose quota just exhausted or entered long cooldown)
+    const modelRec = modelHealthRegistry.get(modelName);
+    if (
+      modelRec &&
+      modelRec.availability === 'quota_exhausted' &&
+      Date.now() < modelRec.cooldownUntilMs
+    ) {
+      continue;
+    }
+
     const elapsedMs = Date.now() - startedAt;
     const remainingBudgetMs = maxTotalMs - elapsedMs;
     if (i > 0 && remainingBudgetMs < 2500) {
       break;
     }
-    const timeoutMs = Math.min(i === 0 ? 7000 : 7500, Math.max(3000, remainingBudgetMs - 500));
+
+    const timeoutMs = Math.min(i === 0 ? 7500 : 8000, Math.max(3000, remainingBudgetMs - 500));
+    const attemptStart = Date.now();
+    console.info(
+      `[PlaynixAI] stage=provider_contacted requestId=${requestId} route=${routeName} provider=google_genai model=${modelName} attempt=${i + 1}/${modelsToTry.length} timeoutMs=${timeoutMs}`
+    );
+
     try {
       const response = await ai.models.generateContent(buildRequest(modelName, timeoutMs));
-      return { response, modelUsed: modelName };
+      const attemptDurationMs = Date.now() - attemptStart;
+      const textLen = typeof response?.text === 'string' ? response.text.length : 0;
+      recordModelSuccess(modelName);
+      attempts.push({ model: modelName, status: 200, category: 'ok', durationMs: attemptDurationMs });
+      console.info(
+        `[PlaynixAI] stage=provider_response requestId=${requestId} route=${routeName} model=${modelName} httpStatus=200 category=ok responseChars=${textLen} durationMs=${attemptDurationMs}`
+      );
+      return { response, modelUsed: modelName, attempts };
     } catch (err: any) {
       lastError = err;
+      const attemptDurationMs = Date.now() - attemptStart;
       const info = extractCleanGeminiError(err);
-      if (modelName === PLAYNIX_GEMINI_MODEL && (info.isTransient || info.errorCategory === 'quota')) {
-        hydrogenOverloadCooldownUntil = Date.now() + 90_000;
+      const retryGuidance = parseProviderRetryDelayMs(err);
+      lastCategory = info.errorCategory;
+
+      recordModelFailure(modelName, err);
+      attempts.push({
+        model: modelName,
+        status: info.statusCode,
+        category: info.errorCategory,
+        durationMs: attemptDurationMs,
+        reason: info.upstreamReason,
+        detail: info.diagnosticDetail,
+      });
+      console.info(
+        `[PlaynixAI] stage=provider_response requestId=${requestId} route=${routeName} model=${modelName} httpStatus=${info.statusCode} category=${info.errorCategory} reason=${info.upstreamReason} durationMs=${attemptDurationMs} retryAfterMs=${retryGuidance.delayMs ?? 'none'} detail="${info.diagnosticDetail}"`
+      );
+
+      // Auth error -> stop immediately (unless specific model 404 and another model exists)
+      if (info.errorCategory === 'auth') {
+        const isModelSpecific404 =
+          info.statusCode === 404 ||
+          /not_found|model.*not found|unsupported/i.test(info.diagnosticDetail);
+        const nextDistinctModel = modelsToTry.slice(i + 1).find((m) => m !== modelName);
+        if (isModelSpecific404 && nextDistinctModel) {
+          continue;
+        }
+        if (err && typeof err === 'object') err.__playnixAttempts = attempts;
+        throw err;
       }
-      // If primary model hit 429 rate/quota limit, allow ONE immediate switch to lighter fallback model
-      const nextModel = modelsToTry[i + 1];
-      if (
-        info.errorCategory === 'quota' &&
-        !triedFallbackAfterQuota &&
-        modelName === PLAYNIX_GEMINI_MODEL &&
-        nextModel &&
-        nextModel !== modelName
-      ) {
-        triedFallbackAfterQuota = true;
+
+      // 429 quota/rate limit -> NEVER retry the same 429 model; immediately switch ONCE to an available fallback model if present
+      if (info.errorCategory === 'quota') {
+        const nextDistinctIndex = modelsToTry.findIndex(
+          (m, idx) => idx > i && m !== modelName
+        );
+        if (nextDistinctIndex !== -1) {
+          i = nextDistinctIndex - 1;
+          continue;
+        }
+        if (err && typeof err === 'object') err.__playnixAttempts = attempts;
+        throw err;
+      }
+
+      // Transient server error (503) or network error:
+      // Prefer immediate switch to another distinct healthy model if one exists
+      const nextDistinctIndex = modelsToTry.findIndex((m, idx) => idx > i && m !== modelName);
+      if (nextDistinctIndex !== -1) {
+        console.info(
+          `[PlaynixAI] stage=fallback_switch requestId=${requestId} route=${routeName} from=${modelName} to=${modelsToTry[nextDistinctIndex]} reason=${info.upstreamReason}`
+        );
+        i = nextDistinctIndex - 1;
+        await sleep(Math.min(400, 150 + Math.floor(Math.random() * 150)));
         continue;
       }
+
       if (!info.isTransient || i === modelsToTry.length - 1) {
+        if (err && typeof err === 'object') err.__playnixAttempts = attempts;
+        throw err;
+      }
+
+      // Bounded exponential backoff only if provider didn't ask for a long Retry-After (>8s)
+      if (retryGuidance.delayMs !== null && retryGuidance.delayMs > 8000) {
+        if (err && typeof err === 'object') err.__playnixAttempts = attempts;
         throw err;
       }
       const jitterMs = Math.floor(Math.random() * 150);
-      const backoffMs = Math.min(1800, 400 * Math.pow(2, i) + jitterMs);
+      const backoffMs = Math.min(
+        2200,
+        retryGuidance.delayMs !== null ? Math.max(500, retryGuidance.delayMs) : 500 * Math.pow(2, i) + jitterMs
+      );
       if (Date.now() - startedAt + backoffMs + 2500 > maxTotalMs) {
+        if (err && typeof err === 'object') err.__playnixAttempts = attempts;
         throw err;
       }
       await sleep(backoffMs);
     }
   }
 
+  if (lastError && typeof lastError === 'object') {
+    lastError.__playnixAttempts = attempts;
+    lastError.__playnixLastCategory = lastCategory;
+  }
   throw lastError || new Error('AI is temporarily unavailable. Retry shortly.');
 }
 
@@ -2277,16 +2947,21 @@ function buildDeterministicWebsiteKnowledge(payload: any) {
   };
 }
 
-app.post('/api/owner/ai/status', (req, res) => {
-  const { pin } = req.body || {};
+app.post('/api/owner/ai/status', async (req, res) => {
+  const { pin, verifyModels } = req.body || {};
   if (!verifyPin(pin)) {
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
-  const geminiConfigured = getGeminiClient() !== null;
+  const ai = getGeminiClient();
+  if (ai) {
+    await verifyConfiguredGeminiModels(ai, Boolean(verifyModels));
+  }
+  const systemStatus = getAiSystemStatusPayload();
   res.json({
     success: true,
-    geminiConfigured,
-    model: PLAYNIX_GEMINI_MODEL,
+    geminiConfigured: systemStatus.geminiConfigured,
+    model: systemStatus.activeModel || systemStatus.primaryModel,
+    systemStatus,
   });
 });
 
@@ -2431,6 +3106,7 @@ app.post('/api/owner/ai/scan', async (req, res) => {
       learnedHighlights,
       missingInfoItems,
       websiteEntries: deterministic.entries,
+      systemStatus: getAiSystemStatusPayload(),
     });
   } catch (err: any) {
     console.error('Error in /api/owner/ai/scan:', err);
@@ -3239,7 +3915,10 @@ async function handleAiSuggestQuestion(reqBody: any) {
     },
   };
 
-  const { response, modelUsed: activeSuggestModel } = await runGeminiWithRetryAndFallback(
+  const requestId = reqBody?.__requestId || `sug_${Date.now().toString(36)}`;
+  const routeName = reqBody?.__routeName || 'suggest-answer';
+
+  const { response, modelUsed: activeSuggestModel, attempts } = await runGeminiWithRetryAndFallback(
     ai,
     (modelName, timeoutMs) => {
       const cfg: any = {
@@ -3255,11 +3934,16 @@ async function handleAiSuggestQuestion(reqBody: any) {
         config: cfg,
       };
     },
-    3
+    3,
+    { requestId, routeName }
   );
 
-  const parsed = response.text ? JSON.parse(response.text) : null;
+  const rawText = typeof response?.text === 'string' ? response.text : '';
+  const parsed = rawText ? extractJsonObjectFromText(rawText) : null;
   if (!parsed || typeof parsed.suggestedAnswer !== 'string') {
+    console.info(
+      `[PlaynixAI] stage=response_malformed requestId=${requestId} route=${routeName} model=${activeSuggestModel} rawLength=${rawText.length}`
+    );
     throw new Error('Playnix AI returned an unexpected response structure.');
   }
 
@@ -3286,6 +3970,11 @@ async function handleAiSuggestQuestion(reqBody: any) {
   return {
     success: true,
     geminiConfigured: true,
+    diagnostics: {
+      requestId,
+      modelUsed: activeSuggestModel,
+      attempts,
+    },
     suggestion: {
       suggestedAnswer: parsed.suggestedAnswer.trim().slice(0, 2000),
       groundingStatus:
@@ -3312,47 +4001,117 @@ async function handleAiSuggestQuestion(reqBody: any) {
 }
 
 app.post('/api/owner/ai/suggest-answer', async (req, res) => {
+  const startedAt = Date.now();
+  const requestId = `sug_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const { pin } = req.body || {};
+  console.info(
+    `[PlaynixAI] stage=request_started requestId=${requestId} route=/api/owner/ai/suggest-answer hasProduct=${Boolean(req.body?.product || req.body?.productId)} questionLen=${String(req.body?.question || '').length}`
+  );
   if (!verifyPin(pin)) {
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/suggest-answer httpStatus=401 category=auth durationMs=${durationMs}`
+    );
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
 
   try {
-    const result = await handleAiSuggestQuestion(req.body || {});
-    res.json(result);
+    const result = await handleAiSuggestQuestion({
+      ...(req.body || {}),
+      __requestId: requestId,
+      __routeName: '/api/owner/ai/suggest-answer',
+    });
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/suggest-answer httpStatus=200 category=${result.success ? 'ok' : result.errorCategory || 'validation'} model=${result.suggestion?.modelUsed || 'none'} durationMs=${durationMs}`
+    );
+    res.json({
+      ...result,
+      systemStatus: getAiSystemStatusPayload(),
+    });
   } catch (err: any) {
-    const clean = extractCleanGeminiError(err);
-    console.info(`AI suggest-answer ${clean.errorCategory}:`, clean.statusCode);
+    const resolved = resolveFinalAiFailure(err);
+    const systemStatus = getAiSystemStatusPayload();
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/suggest-answer httpStatus=200 upstreamStatus=${resolved.statusCode} category=${resolved.errorCategory} reason=${resolved.upstreamReason} durationMs=${durationMs} attempts=${resolved.attempts.length}`
+    );
     return res.status(200).json({
       success: false,
-      retryable: clean.errorCategory === 'server_temporary' || clean.errorCategory === 'network',
-      errorCategory: clean.errorCategory,
-      upstreamStatus: clean.statusCode,
-      geminiConfigured: clean.errorCategory !== 'auth' && getGeminiClient() !== null,
-      error: clean.message,
+      retryable: resolved.retryable,
+      errorCategory: resolved.errorCategory,
+      upstreamStatus: resolved.statusCode,
+      upstreamReason: resolved.upstreamReason,
+      diagnosticSummary: resolved.diagnosticSummary,
+      geminiConfigured: resolved.errorCategory !== 'auth' && systemStatus.geminiConfigured,
+      error: resolved.message,
+      systemStatus,
+      diagnostics: {
+        requestId,
+        durationMs,
+        upstreamStatus: resolved.statusCode,
+        upstreamReason: resolved.upstreamReason,
+        diagnosticSummary: resolved.diagnosticSummary,
+        attempts: resolved.attempts,
+      },
     });
   }
 });
 
 app.post('/api/owner/ai/test-question', async (req, res) => {
+  const startedAt = Date.now();
+  const requestId = `tst_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const { pin } = req.body || {};
+  console.info(
+    `[PlaynixAI] stage=request_started requestId=${requestId} route=/api/owner/ai/test-question hasProduct=${Boolean(req.body?.product || req.body?.productId)} questionLen=${String(req.body?.question || '').length}`
+  );
   if (!verifyPin(pin)) {
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/test-question httpStatus=401 category=auth durationMs=${durationMs}`
+    );
     return res.status(401).json({ error: 'Invalid owner PIN' });
   }
 
   try {
-    const result = await handleAiSuggestQuestion(req.body || {});
-    res.json(result);
+    const result = await handleAiSuggestQuestion({
+      ...(req.body || {}),
+      __requestId: requestId,
+      __routeName: '/api/owner/ai/test-question',
+    });
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/test-question httpStatus=200 category=${result.success ? 'ok' : result.errorCategory || 'validation'} model=${result.suggestion?.modelUsed || 'none'} durationMs=${durationMs}`
+    );
+    res.json({
+      ...result,
+      systemStatus: getAiSystemStatusPayload(),
+    });
   } catch (err: any) {
-    const clean = extractCleanGeminiError(err);
-    console.info(`AI test-question ${clean.errorCategory}:`, clean.statusCode);
+    const resolved = resolveFinalAiFailure(err);
+    const systemStatus = getAiSystemStatusPayload();
+    const durationMs = Date.now() - startedAt;
+    console.info(
+      `[PlaynixAI] stage=request_finished requestId=${requestId} route=/api/owner/ai/test-question httpStatus=200 upstreamStatus=${resolved.statusCode} category=${resolved.errorCategory} reason=${resolved.upstreamReason} durationMs=${durationMs} attempts=${resolved.attempts.length}`
+    );
     return res.status(200).json({
       success: false,
-      retryable: clean.errorCategory === 'server_temporary' || clean.errorCategory === 'network',
-      errorCategory: clean.errorCategory,
-      upstreamStatus: clean.statusCode,
-      geminiConfigured: clean.errorCategory !== 'auth' && getGeminiClient() !== null,
-      error: clean.message,
+      retryable: resolved.retryable,
+      errorCategory: resolved.errorCategory,
+      upstreamStatus: resolved.statusCode,
+      upstreamReason: resolved.upstreamReason,
+      diagnosticSummary: resolved.diagnosticSummary,
+      geminiConfigured: resolved.errorCategory !== 'auth' && systemStatus.geminiConfigured,
+      error: resolved.message,
+      systemStatus,
+      diagnostics: {
+        requestId,
+        durationMs,
+        upstreamStatus: resolved.statusCode,
+        upstreamReason: resolved.upstreamReason,
+        diagnosticSummary: resolved.diagnosticSummary,
+        attempts: resolved.attempts,
+      },
     });
   }
 });
@@ -3539,68 +4298,40 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
       .filter(Boolean)
       .join('\n');
 
-    const isTransientOverload = (e: any) => {
-      const m = String(e?.message || e || '').toLowerCase();
-      return (
-        e?.status === 503 ||
-        e?.name === 'TimeoutError' ||
-        e?.name === 'AbortError' ||
-        m.includes('503') ||
-        m.includes('unavailable') ||
-        m.includes('high demand') ||
-        m.includes('overloaded') ||
-        m.includes('aborted') ||
-        m.includes('timed out')
-      );
-    };
-
-    const callModelWithRetry = async () => {
-      const runOnce = async (modelName: string, timeoutMs: number, parts: typeof imageParts) => {
+    let reviewedCountUsed = imageParts.length;
+    const out = await runGeminiWithRetryAndFallback(
+      ai,
+      (modelName, timeoutMs) => {
+        const partsToSend =
+          modelName === PLAYNIX_GEMINI_MODEL
+            ? imageParts
+            : imageParts.length > 2
+            ? imageParts.slice(0, 2)
+            : imageParts;
+        reviewedCountUsed = partsToSend.length;
         const cfg: any = {
           responseMimeType: 'application/json',
-          abortSignal: AbortSignal.timeout(timeoutMs),
+          abortSignal: AbortSignal.timeout(Math.max(timeoutMs, 14000)),
         };
         if (modelName === PLAYNIX_GEMINI_MODEL) {
           cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
         }
         const payload =
-          parts.length > 0 ? { parts: [...parts, { text: instructionText }] } : instructionText;
-        return ai.models.generateContent({
+          partsToSend.length > 0
+            ? { parts: [...partsToSend, { text: instructionText }] }
+            : instructionText;
+        return {
           model: modelName,
           contents: payload,
           config: cfg,
-        });
-      };
-
-      const primaryModel =
-        Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-
-      try {
-        return {
-          resp: await runOnce(primaryModel, 16000, imageParts),
-          modelUsed: primaryModel,
-          reviewedCount: imageParts.length,
         };
-      } catch (firstErr: any) {
-        if (isTransientOverload(firstErr)) {
-          const msg = String(firstErr?.message || firstErr || '').toLowerCase();
-          if (firstErr?.status === 503 || msg.includes('overloaded') || msg.includes('high demand')) {
-            hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-          }
-          const lighterParts = imageParts.length > 2 ? imageParts.slice(0, 2) : imageParts;
-          return {
-            resp: await runOnce('gemini-3.1-flash-lite', 15000, lighterParts),
-            modelUsed: 'gemini-3.1-flash-lite',
-            reviewedCount: lighterParts.length,
-          };
-        }
-        throw firstErr;
-      }
-    };
-
-    const out = await callModelWithRetry();
-    const response = out.resp;
+      },
+      2,
+      { routeName: '/api/owner/ai/product-price-advisor', maxTotalMs: 26000 }
+    );
+    const response = out.response;
     const modelUsed = out.modelUsed;
+    const reviewedCountOut = reviewedCountUsed;
     const parsed = extractJsonObjectFromText(response?.text || '');
 
     if (!parsed) {
@@ -3644,7 +4375,7 @@ app.post('/api/owner/ai/product-price-advisor', async (req, res) => {
     return res.json({
       success: true,
       geminiConfigured: true,
-      reviewedPhotosCount: out.reviewedCount,
+      reviewedPhotosCount: reviewedCountOut,
       imageReviewSummary,
       suggestedCategory,
       secondaryCategories,
@@ -3894,69 +4625,51 @@ app.post('/api/customer/ai-search', async (req, res) => {
       '- Provide 2 to 3 short clickable "suggestedRefinements" (2-4 words each) based strictly on items that actually exist in the store.',
     ].join('\n');
 
-    const runSearchOnce = async (modelName: string, timeoutMs: number) => {
-      const cfg: any = {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            understoodIntent: { type: Type.STRING },
-            matchedProducts: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  reason: { type: Type.STRING },
-                },
-                required: ['id', 'reason'],
+    const searchSchema = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          understoodIntent: { type: Type.STRING },
+          matchedProducts: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                reason: { type: Type.STRING },
               },
-            },
-            suggestedRefinements: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
+              required: ['id', 'reason'],
             },
           },
-          required: ['understoodIntent', 'matchedProducts', 'suggestedRefinements'],
+          suggestedRefinements: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
         },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      };
-      if (modelName === PLAYNIX_GEMINI_MODEL) {
-        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      }
-      return ai.models.generateContent({
-        model: modelName,
-        contents: promptText,
-        config: cfg,
-      });
+        required: ['understoodIntent', 'matchedProducts', 'suggestedRefinements'],
+      },
     };
 
-    const primaryModel =
-      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-
-    let resp: any;
-    let modelUsed = primaryModel;
-    try {
-      resp = await runSearchOnce(primaryModel, 5000);
-    } catch (firstErr: any) {
-      const m = String(firstErr?.message || firstErr || '').toLowerCase();
-      if (
-        primaryModel === PLAYNIX_GEMINI_MODEL &&
-        (firstErr?.status === 503 ||
-          firstErr?.name === 'TimeoutError' ||
-          firstErr?.name === 'AbortError' ||
-          m.includes('503') ||
-          m.includes('high demand') ||
-          m.includes('timed out') ||
-          m.includes('aborted'))
-      ) {
-        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-        modelUsed = 'gemini-3.1-flash-lite';
-        resp = await runSearchOnce(modelUsed, 4500);
-      } else {
-        throw firstErr;
-      }
-    }
+    const { response: resp, modelUsed } = await runGeminiWithRetryAndFallback(
+      ai,
+      (modelName, timeoutMs) => {
+        const cfg: any = {
+          ...searchSchema,
+          abortSignal: AbortSignal.timeout(Math.min(timeoutMs, 5500)),
+        };
+        if (modelName === PLAYNIX_GEMINI_MODEL) {
+          cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        return {
+          model: modelName,
+          contents: promptText,
+          config: cfg,
+        };
+      },
+      2,
+      { routeName: '/api/customer/ai-search', maxTotalMs: 11000 }
+    );
 
     const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
     const seenIds = new Set<string>();
@@ -4357,36 +5070,23 @@ app.post('/api/owner/ai/ask-guidance', async (req, res) => {
         abortSignal: AbortSignal.timeout(12000),
       };
 
-      const runAuditOnce = async (modelName: string) => {
-        const c = { ...cfgSchema };
-        if (modelName === PLAYNIX_GEMINI_MODEL) {
-          c.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-        }
-        return ai.models.generateContent({
-          model: modelName,
-          contents: multiTurnContents,
-          config: c,
-        });
-      };
-
       try {
-        const primaryModel =
-          Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-        let resp: any;
-        try {
-          resp = await runAuditOnce(primaryModel);
-        } catch (err: any) {
-          const m = String(err?.message || err || '').toLowerCase();
-          if (
-            primaryModel === PLAYNIX_GEMINI_MODEL &&
-            (err?.status === 503 || err?.name === 'TimeoutError' || err?.name === 'AbortError' || m.includes('503') || m.includes('high demand'))
-          ) {
-            hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-            resp = await runAuditOnce('gemini-3.1-flash-lite');
-          } else {
-            throw err;
-          }
-        }
+        const { response: resp } = await runGeminiWithRetryAndFallback(
+          ai,
+          (modelName, timeoutMs) => {
+            const c = { ...cfgSchema, abortSignal: AbortSignal.timeout(Math.max(timeoutMs, 10000)) };
+            if (modelName === PLAYNIX_GEMINI_MODEL) {
+              c.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+            }
+            return {
+              model: modelName,
+              contents: multiTurnContents,
+              config: c,
+            };
+          },
+          2,
+          { routeName: '/api/owner/ai/ask-guidance', maxTotalMs: 20000 }
+        );
         const parsed = resp?.text ? JSON.parse(resp.text) : null;
         if (Array.isArray(parsed?.questions)) {
           usedGemini = true;
@@ -4530,71 +5230,53 @@ app.post('/api/orders/inspect', async (req, res) => {
       '- flaggedFields: array of specific suspicious/inconsistent items (empty [] if LOW risk).',
     ].join('\n');
 
-    const runInspectOnce = async (modelName: string, timeoutMs: number) => {
-      const cfg: any = {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            riskLevel: { type: Type.STRING, enum: ['LOW', 'MEDIUM', 'HIGH'] },
-            confidence: { type: Type.INTEGER },
-            recommendedAction: { type: Type.STRING, enum: ['Approve', 'Verify Details', 'Hold & Review'] },
-            summaryReason: { type: Type.STRING },
-            suggestedClarificationMessage: { type: Type.STRING },
-            flaggedFields: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  field: { type: Type.STRING },
-                  suspiciousValue: { type: Type.STRING },
-                  reason: { type: Type.STRING },
-                  severity: { type: Type.STRING, enum: ['info', 'warning', 'critical'] },
-                },
-                required: ['field', 'suspiciousValue', 'reason', 'severity'],
+    const inspectSchema = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          riskLevel: { type: Type.STRING, enum: ['LOW', 'MEDIUM', 'HIGH'] },
+          confidence: { type: Type.INTEGER },
+          recommendedAction: { type: Type.STRING, enum: ['Approve', 'Verify Details', 'Hold & Review'] },
+          summaryReason: { type: Type.STRING },
+          suggestedClarificationMessage: { type: Type.STRING },
+          flaggedFields: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                field: { type: Type.STRING },
+                suspiciousValue: { type: Type.STRING },
+                reason: { type: Type.STRING },
+                severity: { type: Type.STRING, enum: ['info', 'warning', 'critical'] },
               },
+              required: ['field', 'suspiciousValue', 'reason', 'severity'],
             },
           },
-          required: ['riskLevel', 'confidence', 'recommendedAction', 'summaryReason', 'flaggedFields'],
         },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      };
-      if (modelName === PLAYNIX_GEMINI_MODEL) {
-        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      }
-      return ai.models.generateContent({
-        model: modelName,
-        contents: promptText,
-        config: cfg,
-      });
+        required: ['riskLevel', 'confidence', 'recommendedAction', 'summaryReason', 'flaggedFields'],
+      },
     };
 
-    const primaryModel =
-      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-
-    let resp: any;
-    let modelUsed = primaryModel;
-    try {
-      resp = await runInspectOnce(primaryModel, 9500);
-    } catch (firstErr: any) {
-      const m = String(firstErr?.message || firstErr || '').toLowerCase();
-      if (
-        primaryModel === PLAYNIX_GEMINI_MODEL &&
-        (firstErr?.status === 503 ||
-          firstErr?.name === 'TimeoutError' ||
-          firstErr?.name === 'AbortError' ||
-          m.includes('503') ||
-          m.includes('high demand') ||
-          m.includes('timed out') ||
-          m.includes('aborted'))
-      ) {
-        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-        modelUsed = 'gemini-3.1-flash-lite';
-        resp = await runInspectOnce(modelUsed, 8500);
-      } else {
-        throw firstErr;
-      }
-    }
+    const { response: resp, modelUsed } = await runGeminiWithRetryAndFallback(
+      ai,
+      (modelName, timeoutMs) => {
+        const cfg: any = {
+          ...inspectSchema,
+          abortSignal: AbortSignal.timeout(Math.max(timeoutMs, 8500)),
+        };
+        if (modelName === PLAYNIX_GEMINI_MODEL) {
+          cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        return {
+          model: modelName,
+          contents: promptText,
+          config: cfg,
+        };
+      },
+      2,
+      { routeName: '/api/orders/inspect', maxTotalMs: 18000 }
+    );
 
     const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
     const aiRisk: 'LOW' | 'MEDIUM' | 'HIGH' =
@@ -4785,88 +5467,70 @@ app.post('/api/owner/watchdog/analyze', async (req, res) => {
       `WEBSITE_ERRORS: ${JSON.stringify(websiteErrors)}`,
     ].join('\n');
 
-    const runWatchdogOnce = async (modelName: string, timeoutMs: number) => {
-      const cfg: any = {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            healthSummary: { type: Type.STRING },
-            extraAlerts: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  explanation: { type: Type.STRING },
-                  recommendedAction: { type: Type.STRING },
-                  category: {
-                    type: Type.STRING,
-                    enum: ['orders', 'products', 'pricing', 'website'],
-                  },
-                  severity: {
-                    type: Type.STRING,
-                    enum: ['info', 'warning', 'critical'],
-                  },
-                  targetType: {
-                    type: Type.STRING,
-                    enum: ['order', 'product', 'deal', 'offer', 'campaign', 'website'],
-                  },
-                  targetId: { type: Type.STRING },
-                  targetLabel: { type: Type.STRING },
+    const watchdogSchema = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          healthSummary: { type: Type.STRING },
+          extraAlerts: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                explanation: { type: Type.STRING },
+                recommendedAction: { type: Type.STRING },
+                category: {
+                  type: Type.STRING,
+                  enum: ['orders', 'products', 'pricing', 'website'],
                 },
-                required: [
-                  'title',
-                  'explanation',
-                  'recommendedAction',
-                  'category',
-                  'severity',
-                  'targetType',
-                  'targetId',
-                ],
+                severity: {
+                  type: Type.STRING,
+                  enum: ['info', 'warning', 'critical'],
+                },
+                targetType: {
+                  type: Type.STRING,
+                  enum: ['order', 'product', 'deal', 'offer', 'campaign', 'website'],
+                },
+                targetId: { type: Type.STRING },
+                targetLabel: { type: Type.STRING },
               },
+              required: [
+                'title',
+                'explanation',
+                'recommendedAction',
+                'category',
+                'severity',
+                'targetType',
+                'targetId',
+              ],
             },
           },
-          required: ['healthSummary', 'extraAlerts'],
         },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      };
-      if (modelName === PLAYNIX_GEMINI_MODEL) {
-        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      }
-      return ai.models.generateContent({
-        model: modelName,
-        contents: promptText,
-        config: cfg,
-      });
+        required: ['healthSummary', 'extraAlerts'],
+      },
     };
 
-    const primaryModel =
-      Date.now() < hydrogenOverloadCooldownUntil ? 'gemini-3.1-flash-lite' : PLAYNIX_GEMINI_MODEL;
-
-    let resp: any;
-    let modelUsed = primaryModel;
-    try {
-      resp = await runWatchdogOnce(primaryModel, 11000);
-    } catch (firstErr: any) {
-      const m = String(firstErr?.message || firstErr || '').toLowerCase();
-      if (
-        primaryModel === PLAYNIX_GEMINI_MODEL &&
-        (firstErr?.status === 503 ||
-          firstErr?.name === 'TimeoutError' ||
-          firstErr?.name === 'AbortError' ||
-          m.includes('503') ||
-          m.includes('high demand') ||
-          m.includes('timed out') ||
-          m.includes('aborted'))
-      ) {
-        hydrogenOverloadCooldownUntil = Date.now() + 60_000;
-        modelUsed = 'gemini-3.1-flash-lite';
-        resp = await runWatchdogOnce(modelUsed, 9000);
-      } else {
-        throw firstErr;
-      }
-    }
+    const { response: resp, modelUsed } = await runGeminiWithRetryAndFallback(
+      ai,
+      (modelName, timeoutMs) => {
+        const cfg: any = {
+          ...watchdogSchema,
+          abortSignal: AbortSignal.timeout(Math.max(timeoutMs, 9500)),
+        };
+        if (modelName === PLAYNIX_GEMINI_MODEL) {
+          cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        return {
+          model: modelName,
+          contents: promptText,
+          config: cfg,
+        };
+      },
+      2,
+      { routeName: '/api/owner/watchdog/analyze', maxTotalMs: 20000 }
+    );
 
     const parsed = resp?.text ? JSON.parse(resp.text) : extractJsonObjectFromText(resp?.text || '');
     const existingRuleTargets = new Set(
